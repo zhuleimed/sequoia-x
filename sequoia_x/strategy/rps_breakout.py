@@ -10,6 +10,7 @@ class RpsBreakoutStrategy(BaseStrategy):
     """RPS 极强动量突破策略"""
 
     webhook_key: str = "rps"
+    display_name: str = "RPS动量突破"
     rps_period: int = 120
     rps_threshold: int = 90
 
@@ -50,7 +51,14 @@ class RpsBreakoutStrategy(BaseStrategy):
 
         # 突破判定
         breakout_condition = strong_stocks['close'] >= strong_stocks['roll_high'] * 0.90
-        selected = strong_stocks[breakout_condition]
+        selected = strong_stocks[breakout_condition].copy()
 
-        logger.info(f"RpsBreakoutStrategy 选出 {len(selected)} 只股票")
-        return selected['symbol'].tolist()
+        if selected.empty:
+            logger.info("RpsBreakoutStrategy 无选股结果")
+            return []
+
+        # 按 RPS 分数排序（RPS越高动量越强）
+        scored = list(zip(selected['symbol'].tolist(), selected['rps'].tolist()))
+        result = self._pick_top(scored, self.top_n)
+        logger.info(f"RpsBreakoutStrategy 选出 {len(result)} 只（候选{len(scored)}只）")
+        return result

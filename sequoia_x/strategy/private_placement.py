@@ -21,6 +21,7 @@ class PrivatePlacementStrategy(BaseStrategy):
     """
 
     webhook_key: str = "private_placement"
+    display_name: str = "定增公告监控"
     _LOOKBACK_DAYS: int = 7  # 回看天数，覆盖一周内的新公告
 
     def run(self) -> list[str]:
@@ -69,5 +70,9 @@ class PrivatePlacementStrategy(BaseStrategy):
                 seen.add(s)
                 unique_symbols.append(s)
 
-        logger.info(f"PrivatePlacementStrategy 选出 {len(unique_symbols)} 只股票")
-        return unique_symbols
+        # 基础池过滤
+        pool_filtered = self._apply_pool(unique_symbols)
+        # 按发行日期顺序取前 top_n 支（已在 akshare 返回结果中按日期降序）
+        result = pool_filtered[:self.top_n]
+        logger.info(f"PrivatePlacementStrategy 选出 {len(result)} 只（候选{len(pool_filtered)}只）")
+        return result

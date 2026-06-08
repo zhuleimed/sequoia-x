@@ -21,17 +21,12 @@ class UptrendLimitDownStrategy(BaseStrategy):
     """
 
     webhook_key: str = "limit_down"
+    display_name: str = "上涨回调"
     _MIN_BARS: int = 60  # 至少需要 60 根 K 线（60日均线）
 
     def run(self) -> list[str]:
-        """
-        遍历全市场，返回满足上升趋势跌停条件的股票代码列表。
-
-        Returns:
-            满足条件的股票代码列表。
-        """
-        symbols = self.engine.get_local_symbols()
-        selected: list[str] = []
+        symbols = self.stock_pool or self.engine.get_local_symbols()
+        candidates: list[tuple[str, float]] = []
 
         for symbol in symbols:
             try:
@@ -39,29 +34,30 @@ class UptrendLimitDownStrategy(BaseStrategy):
                 if len(df) < self._MIN_BARS:
                     continue
 
-                # 向量化计算均线
                 df["ma20"] = df["close"].rolling(20).mean()
                 df["ma60"] = df["close"].rolling(60).mean()
                 df["vol_ma20"] = df["volume"].rolling(20).mean()
 
-                prev = df.iloc[-2]  # 昨日
-                today = df.iloc[-1]  # 今日
+                prev = df.iloc[-2]
+                today = df.iloc[-1]
 
                 if pd.isna(prev["ma20"]) or pd.isna(prev["ma60"]) or pd.isna(today["vol_ma20"]):
                     continue
 
-                # 条件 1：上升趋势（昨日均线多头排列）
                 uptrend = prev["ma20"] > prev["ma60"]
-                # 条件 2：放量跌停
                 limit_down = today["close"] <= prev["close"] * 0.905
                 volume_surge = today["volume"] > today["vol_ma20"] * 2.0
 
                 if uptrend and limit_down and volume_surge:
-                    selected.append(symbol)
+                    # 分数 = 放量倍数 × 跌幅（放量大跌更可能被错杀，反弹潜力大）
+                    drop_pct = (prev["close"] - today["close"]) / prev["close"]
+                    score = (today["volume"] / today["vol_ma20"]) * drop_pct
+                    candidates.append((symbol, score))
 
             except Exception as exc:
                 logger.warning(f"[{symbol}] UptrendLimitDownStrategy 计算失败：{exc}")
                 continue
 
-        logger.info(f"UptrendLimitDownStrategy 选出 {len(selected)} 只股票")
-        return selected
+        result = self._pick_top(candidates, self.top_n)
+        logger.info(f"UptrendLimitDownStrategy 选出 {len(result)} 只（候选{len(candidates)}只）")
+        return result

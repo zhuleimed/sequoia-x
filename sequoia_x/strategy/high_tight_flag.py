@@ -16,22 +16,16 @@ class HighTightFlagStrategy(BaseStrategy):
     2. 极度收敛：最近10天区间最高价 / 区间最低价 < 1.15（振幅低于15%）
     3. 缩量：今日 volume < 过去20日 volume 均值的 0.6 倍
 
-    Attributes:
-        webhook_key: 路由到 'flag' 专属飞书机器人。
+    排名分数 = 动量倍数 / 收敛幅度（强动量+窄幅整理 = 爆发潜力高）。
     """
 
     webhook_key: str = "flag"
-    _MIN_BARS: int = 40  # 至少需要 40 根 K 线
+    display_name: str = "高紧旗形突破"
+    _MIN_BARS: int = 40
 
     def run(self) -> list[str]:
-        """
-        遍历全市场，返回满足高旗形整理条件的股票代码列表。
-
-        Returns:
-            满足条件的股票代码列表。
-        """
-        symbols = self.engine.get_local_symbols()
-        selected: list[str] = []
+        symbols = self.stock_pool or self.engine.get_local_symbols()
+        candidates: list[tuple[str, float]] = []
 
         for symbol in symbols:
             try:
@@ -39,7 +33,6 @@ class HighTightFlagStrategy(BaseStrategy):
                 if len(df) < self._MIN_BARS:
                     continue
 
-                # 向量化计算各窗口指标
                 tail40 = df.tail(40)
                 tail10 = df.tail(10)
 
@@ -51,22 +44,21 @@ class HighTightFlagStrategy(BaseStrategy):
                 if low40 == 0 or low10 == 0:
                     continue
 
-                # 条件 1：强动量
                 momentum = high40 / low40 > 1.6
-                # 条件 2：极度收敛
                 consolidation = high10 / low10 < 1.15
-                # 条件 3：高位抗跌（近10天最低点不得低于40天最高点的80%）
                 high_level = low10 >= high40 * 0.8
-                # 条件 4：缩量（向量化均值）
                 vol_ma20 = df["volume"].iloc[-21:-1].mean()
                 shrink = df["volume"].iloc[-1] < vol_ma20 * 0.6
 
                 if momentum and consolidation and high_level and shrink:
-                    selected.append(symbol)
+                    # 分数 = 动量倍数 / 收敛幅度（值越高越好）
+                    score = (high40 / low40) / (high10 / low10)
+                    candidates.append((symbol, score))
 
             except Exception as exc:
                 logger.warning(f"[{symbol}] HighTightFlagStrategy 计算失败：{exc}")
                 continue
 
-        logger.info(f"HighTightFlagStrategy 选出 {len(selected)} 只股票")
-        return selected
+        result = self._pick_top(candidates, self.top_n)
+        logger.info(f"HighTightFlagStrategy 选出 {len(result)} 只（候选{len(candidates)}只）")
+        return result

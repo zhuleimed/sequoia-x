@@ -1,74 +1,49 @@
 """配置管理模块：通过 pydantic-settings 从环境变量或 .env 文件加载系统配置。"""
 
+import json
+from typing import Annotated
+
+from pydantic import BeforeValidator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _parse_json_list(value: str | list[str]) -> list[str]:
+    """将 JSON 数组字符串解析为 Python 列表。
+
+    支持从环境变量读取的 JSON 字符串（如 '["39277"]'）或直接传入的列表。
+    """
+    if isinstance(value, list):
+        return value
+    parsed = json.loads(value)
+    if not isinstance(parsed, list):
+        raise ValueError(f"期望 JSON 数组，获取到 {type(parsed).__name__}")
+    return [str(item) for item in parsed]
+
+
 class Settings(BaseSettings):
+    """系统配置，从环境变量或 .env 文件加载。
+
+    Attributes:
+        db_path: SQLite 数据库路径。
+        start_date: 数据回填/查询起始日期。
+        wxpusher_token: WxPusher 应用的 AppToken。
+        wxpusher_topic_ids: WxPusher 推送的 Topic ID 列表。
+    """
+
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
-    feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
-    strategy_webhooks: dict[str, str] = {}
+    wxpusher_token: str  # 必填字段，缺失时抛出 ValidationError
+    wxpusher_topic_ids: Annotated[
+        list[str],
+        BeforeValidator(_parse_json_list),
+    ] = Field(default=["39277"])
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",  # <--- 加上这一行！让 Pydantic 放行未定义的变量
+        extra="ignore",
     )
-
-    @classmethod
-    def settings_customise_sources(cls, settings_cls, **kwargs):  # type: ignore[override]
-        """扩展配置源，支持从环境变量中扫描 STRATEGY_WEBHOOK_ 前缀的键。"""
-        from pydantic_settings import EnvSettingsSource
-        import os
-
-        sources = super().settings_customise_sources(settings_cls, **kwargs)
-
-        # 扫描环境变量，将 STRATEGY_WEBHOOK_<KEY> 收集到 strategy_webhooks
-        prefix = "STRATEGY_WEBHOOK_"
-        webhooks: dict[str, str] = {}
-        for key, value in os.environ.items():
-            if key.upper().startswith(prefix):
-                strategy_key = key[len(prefix):].lower()
-                webhooks[strategy_key] = value
-
-        # 注入到初始化数据中（通过 init_kwargs source）
-        if webhooks:
-            original_init = kwargs.get("init_settings")
-            # 直接在 env 层注入，通过 model_post_init 处理
-            os.environ.setdefault("_STRATEGY_WEBHOOKS_PARSED", "1")
-            # 存储解析结果供 model_validator 使用
-            cls._parsed_strategy_webhooks = webhooks
-
-        return sources
-
-    def model_post_init(self, __context: object) -> None:
-        """初始化后合并 STRATEGY_WEBHOOK_ 前缀的环境变量到 strategy_webhooks。"""
-        import os
-
-        prefix = "STRATEGY_WEBHOOK_"
-        webhooks: dict[str, str] = dict(self.strategy_webhooks)
-        for key, value in os.environ.items():
-            if key.upper().startswith(prefix):
-                strategy_key = key[len(prefix):].lower()
-                webhooks[strategy_key] = value
-
-        # 使用 object.__setattr__ 绕过 pydantic 的不可变保护
-        object.__setattr__(self, "strategy_webhooks", webhooks)
-
-    def get_webhook_url(self, webhook_key: str) -> str:
-        """
-        根据 webhook_key 返回对应的 Webhook URL。
-
-        优先从 strategy_webhooks 查找，找不到则 fallback 到 feishu_webhook_url。
-
-        Args:
-            webhook_key: 策略标识，如 'ma_volume'、'breakout'。
-
-        Returns:
-            对应的 Webhook URL 字符串。
-        """
-        return self.strategy_webhooks.get(webhook_key.lower(), self.feishu_webhook_url)
 
 
 _settings: Settings | None = None
@@ -78,7 +53,7 @@ def get_settings() -> Settings:
     """返回全局 Settings 单例。
 
     首次调用时从环境变量或 .env 文件加载配置。
-    若必填字段（feishu_webhook_url）缺失，抛出 pydantic_core.ValidationError。
+    若必填字段（wxpusher_token）缺失，抛出 pydantic_core.ValidationError。
 
     Returns:
         Settings: 全局唯一的配置实例。

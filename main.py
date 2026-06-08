@@ -1,7 +1,7 @@
 """Sequoia-X V2 主程序入口。
 
 两种运行模式：
-  python main.py               # 日常模式：8进程增量补数据 + 跑策略 + 飞书推送（2~3分钟）
+  python main.py               # 日常模式：8进程增量补数据 + 跑策略 + WxPusher推送（2~3分钟）
   python main.py --backfill    # 回填模式：baostock 拉全市场历史K线（首次/补数据用，约12分钟）
 """
 
@@ -18,7 +18,7 @@ socket.setdefaulttimeout(10.0)
 from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
-from sequoia_x.notify.feishu import FeishuNotifier
+from sequoia_x.notify.wxpusher import WxPusherNotifier
 from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
 from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
@@ -62,22 +62,27 @@ def main() -> None:
         count = engine.sync_today_bulk()
         logger.info(f"快照同步完成，写入 {count} 只股票")
 
-        # 4. 策略列表（新增策略在此追加即可）
+        # 4. 获取基础股票池：剔除科创/创业/北交/ST/次新/低价股
+        logger.info("获取基础股票池...")
+        base_pool = engine.get_base_stock_pool()
+        logger.info(f"基础股票池共 {len(base_pool)} 只股票")
+
+        # 5. 策略列表（共享同一基础股票池）
         strategies: list[BaseStrategy] = [
-            MaVolumeStrategy(engine=engine, settings=settings),
-            TurtleTradeStrategy(engine=engine, settings=settings),
-            HighTightFlagStrategy(engine=engine, settings=settings),
-            LimitUpShakeoutStrategy(engine=engine, settings=settings),
-            UptrendLimitDownStrategy(engine=engine, settings=settings),
-            RpsBreakoutStrategy(engine=engine, settings=settings),
-            PrivatePlacementStrategy(engine=engine, settings=settings),
+            MaVolumeStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            TurtleTradeStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            HighTightFlagStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            LimitUpShakeoutStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            UptrendLimitDownStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            RpsBreakoutStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            PrivatePlacementStrategy(engine=engine, settings=settings, stock_pool=base_pool),
         ]
 
-        notifier = FeishuNotifier(settings)
+        notifier = WxPusherNotifier(settings)
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 6. 遍历策略，有结果则推送至 WxPusher
         for strategy in strategies:
-            strategy_name = type(strategy).__name__
+            strategy_name = getattr(strategy, "display_name", type(strategy).__name__)
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()

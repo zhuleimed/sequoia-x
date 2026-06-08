@@ -15,21 +15,15 @@ class MaVolumeStrategy(BaseStrategy):
     1. 5日收盘均线上穿20日收盘均线（金叉）
     2. 当日成交量 > 20日均量的 1.5 倍（放量确认）
 
-    Attributes:
-        webhook_key: 路由到 'ma_volume' 专属飞书机器人。
+    排名分数 = 当日成交量 / 20日均量（放量越猛排名越高）。
     """
 
     webhook_key: str = "ma_volume"
+    display_name: str = "均量线突破"
 
     def run(self) -> list[str]:
-        """
-        遍历全市场，返回满足均线金叉+放量条件的股票代码列表。
-
-        Returns:
-            满足条件的股票代码列表。
-        """
-        symbols = self.engine.get_local_symbols()
-        selected: list[str] = []
+        symbols = self.stock_pool or self.engine.get_local_symbols()
+        candidates: list[tuple[str, float]] = []
 
         for symbol in symbols:
             try:
@@ -37,12 +31,10 @@ class MaVolumeStrategy(BaseStrategy):
                 if len(df) < 20:
                     continue
 
-                # 向量化计算均线和成交量均值
                 df["ma5"] = df["close"].rolling(5).mean()
                 df["ma20"] = df["close"].rolling(20).mean()
                 df["vol_ma20"] = df["volume"].rolling(20).mean()
 
-                # 取最后两行判断金叉（昨日 ma5 < ma20，今日 ma5 > ma20）
                 last = df.iloc[-1]
                 prev = df.iloc[-2]
 
@@ -53,11 +45,15 @@ class MaVolumeStrategy(BaseStrategy):
                 volume_surge = last["volume"] > last["vol_ma20"] * 1.5
 
                 if golden_cross and volume_surge:
-                    selected.append(symbol)
+                    # 分数 = 放量倍数（越高越好）
+                    score = last["volume"] / last["vol_ma20"]
+                    if self.stock_pool is None or symbol in self.stock_pool:
+                        candidates.append((symbol, score))
 
             except Exception as exc:
                 logger.warning(f"[{symbol}] 策略计算失败：{exc}")
                 continue
 
-        logger.info(f"MaVolumeStrategy 选出 {len(selected)} 只股票")
-        return selected
+        result = self._pick_top(candidates, self.top_n)
+        logger.info(f"MaVolumeStrategy 选出 {len(result)} 只（候选{len(candidates)}只）")
+        return result

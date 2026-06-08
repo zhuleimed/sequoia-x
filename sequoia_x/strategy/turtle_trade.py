@@ -21,6 +21,7 @@ class TurtleTradeStrategy(BaseStrategy):
     """
 
     webhook_key: str = "turtle"
+    display_name: str = "海龟交易法则"
     _MIN_BARS: int = 21  # 至少需要 21 根 K 线（20日窗口 + 当日）
 
     def _get_market_caps(self, symbols: list[str]) -> dict[str, float]:
@@ -68,7 +69,7 @@ class TurtleTradeStrategy(BaseStrategy):
         """
         遍历全市场，返回满足海龟突破条件的股票代码列表。
         """
-        symbols = self.engine.get_local_symbols()
+        symbols = self.stock_pool or self.engine.get_local_symbols()
         candidates: list[str] = []
 
         for symbol in symbols:
@@ -102,10 +103,13 @@ class TurtleTradeStrategy(BaseStrategy):
                 logger.warning(f"[{symbol}] TurtleTradeStrategy 计算失败：{exc}")
                 continue
 
-        # 按流通市值从大到小排序
+        # 按流通市值作为分数排序，市值越大流动性越好
         if candidates:
             market_caps = self._get_market_caps(candidates)
-            candidates.sort(key=lambda s: market_caps.get(s, 0), reverse=True)
+            scored = [(s, market_caps.get(s, 0)) for s in candidates]
+            result = self._pick_top(scored, self.top_n)
+        else:
+            result = []
 
-        logger.info(f"TurtleTradeStrategy 选出 {len(candidates)} 只股票")
-        return candidates
+        logger.info(f"TurtleTradeStrategy 选出 {len(result)} 只（候选{len(candidates)}只）")
+        return result
