@@ -135,6 +135,7 @@ class DataEngine:
             logger.info("所有股票已是最新，无需更新")
             return 0
 
+        _start_time = time.time()
         logger.info(f"需要更新 {len(tasks)} 只股票，单进程顺序拉取（每只间隔200ms）...")
 
         all_rows = []
@@ -180,7 +181,7 @@ class DataEngine:
             df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
             conn.commit()
 
-        logger.info(f"增量同步完成: 写入 {count} 条数据（遍历 {len(tasks)} 只）")
+        logger.info(f"增量同步完成: 写入 {count} 条数据（遍历 {len(tasks)} 只）耗时 {time.time() - _start_time:.0f}秒")
         return count
 
     def backfill(self, symbols: list[str]) -> None:

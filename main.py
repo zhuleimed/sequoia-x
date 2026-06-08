@@ -7,6 +7,7 @@
 
 import argparse
 import sys
+import time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -54,6 +55,7 @@ def main() -> None:
 
         # 3. 初始化数据引擎
         engine = DataEngine(settings)
+        _main_start = time.monotonic()
 
         if args.backfill:
             # ── 回填模式 ──
@@ -64,9 +66,8 @@ def main() -> None:
             return
 
         # ── 日常模式 ──
-        logger.info("开始拉取最新快照...")
+        logger.info("开始增量拉取最新数据...")
         count = engine.sync_today_bulk()
-        logger.info(f"快照同步完成，写入 {count} 只股票")
 
         # 4. 基础股票池
         logger.info("获取基础股票池...")
@@ -134,7 +135,8 @@ def main() -> None:
             traceback.print_exc()
         sys.exit(1)
 
-    logger.info("Sequoia-X V2 运行完成")
+    _elapsed = time.monotonic() - _main_start
+    logger.info(f"Sequoia-X V2 运行完成（总耗时 {_elapsed:.0f} 秒）")
 
 
 def _push_ai_report(settings, report: str) -> None:
