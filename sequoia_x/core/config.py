@@ -28,15 +28,19 @@ class Settings(BaseSettings):
         start_date: 数据回填/查询起始日期。
         wxpusher_token: WxPusher 应用的 AppToken。
         wxpusher_topic_ids: WxPusher 推送的 Topic ID 列表。
+        deepseek_api_key: DeepSeek LLM API Key（可选，用于AI分析）。
+        deepseek_model: DeepSeek 模型名称，默认 deepseek-v4-flash。
     """
 
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
-    wxpusher_token: str  # 必填字段，缺失时抛出 ValidationError
+    wxpusher_token: str  # 必填字段
     wxpusher_topic_ids: Annotated[
         list[str],
         BeforeValidator(_parse_json_list),
     ] = Field(default=["39277"])
+    deepseek_api_key: str = ""  # DeepSeek API Key（可选）
+    deepseek_model: str = "deepseek-v4-flash"
 
     model_config = SettingsConfigDict(
         env_file=".env",
