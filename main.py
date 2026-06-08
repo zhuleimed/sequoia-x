@@ -86,7 +86,7 @@ def main() -> None:
 
         notifier = WxPusherNotifier(settings)
 
-        # 收集各策略选股结果（用于后续 LLM 分析）
+        # 收集各策略选股结果（内部使用，不单独推送）
         strategies_results: dict[str, list[str]] = {}
 
         for strategy in strategies:
@@ -94,20 +94,15 @@ def main() -> None:
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
-            logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
 
+            # 日志记录策略结果，但不单独推送（由 LLM 统一研判后一次推送）
+            if selected:
+                logger.info(f"{strategy_name} 选出 {len(selected)} 只: {' '.join(selected)}")
+            else:
+                logger.info(f"{strategy_name} 无选股结果")
             strategies_results[strategy_name] = selected
 
-            if selected:
-                notifier.send(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    webhook_key=strategy.webhook_key,
-                )
-            else:
-                logger.info(f"{strategy_name} 无选股结果，跳过推送")
-
-        # 7. LLM 多维度深度分析（可选）
+        # 7. LLM 多维度深度分析 → 唯一推送
         if not args.skip_llm and settings.deepseek_api_key:
             logger.info("开始 LLM 多维度深度分析...")
             try:
@@ -118,20 +113,17 @@ def main() -> None:
                 )
                 report = analyst.analyze(strategies_results)
 
-                # 发送 AI 分析报告
-                notifier.send(
-                    symbols=[],
-                    strategy_name="AI综合研判",
-                    webhook_key="default",
-                )
-                # 额外推送 AI 分析报告（作为纯文本消息）
+                # 仅推送 LLM 综合研判报告（包含全部策略结果 + AI 分析）
                 _push_ai_report(settings, report)
-
-                logger.info("LLM 多维度分析完成并推送")
+                logger.info("LLM 综合研判报告已推送")
             except Exception as e:
-                logger.warning(f"LLM 分析异常（不影响策略选股结果）: {e}")
+                logger.warning(f"LLM 分析异常: {e}")
+                # LLM 异常时降级：直接推送策略原始结果
+                _push_fallback_results(notifier, strategies_results)
         elif not args.skip_llm and not settings.deepseek_api_key:
             logger.info("未配置 DeepSeek API Key，跳过 LLM 分析")
+            # 无 LLM 时降级：直接推送策略原始结果
+            _push_fallback_results(notifier, strategies_results)
 
     except Exception:
         try:
@@ -165,6 +157,19 @@ def _push_ai_report(settings, report: str) -> None:
             logger.warning(f"AI 报告推送失败: {result}")
     except Exception as e:
         logger.warning(f"AI 报告推送异常: {e}")
+
+
+def _push_fallback_results(notifier, strategies_results: dict[str, list[str]]) -> None:
+    """LLM 不可用时的降级推送：直接推送策略原始结果。"""
+    from sequoia_x.core.logger import get_logger
+    logger = get_logger(__name__)
+    logger.info("LLM 不可用，降级为策略原始结果推送")
+
+    for name, symbols in strategies_results.items():
+        if symbols:
+            notifier.send(symbols=symbols, strategy_name=name, webhook_key="default")
+        else:
+            logger.info(f"{name}: 无选股结果")
 
 
 if __name__ == "__main__":
