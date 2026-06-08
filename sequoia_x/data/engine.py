@@ -101,9 +101,15 @@ class DataEngine:
     # ── 数据同步 ──
 
     def sync_today_bulk(self) -> int:
-        """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
+        """单进程顺序通过 baostock 拉取增量数据（后复权），写入 SQLite。
+
+        注意：baostock API 的 SocketUtil 为单例模式，且服务器端对同一用户
+        有并发连接限制。多进程并行会导致连接冲突（login 死锁、logout failed、
+        数据丢失），故使用单进程顺序拉取 + 请求间隔 200ms。
+        """
         from datetime import date, timedelta
-        from multiprocessing import Pool
+        import time
+        import baostock as bs
 
         today_str = date.today().strftime("%Y-%m-%d")
 
@@ -129,20 +135,36 @@ class DataEngine:
             logger.info("所有股票已是最新，无需更新")
             return 0
 
-        logger.info(f"需要更新 {len(tasks)} 只股票，启动多进程并行拉取...")
-
-        n_workers = min(8, len(tasks))
-        chunks = [tasks[i::n_workers] for i in range(n_workers)]
-
-        with Pool(n_workers) as pool:
-            batch_results = pool.map(_bs_fetch_batch, chunks)
+        logger.info(f"需要更新 {len(tasks)} 只股票，单进程顺序拉取（每只间隔200ms）...")
 
         all_rows = []
-        for batch in batch_results:
-            all_rows.extend(batch)
+        lg = bs.login()
+        if lg.error_code != "0":
+            logger.error(f"baostock 登录失败: {lg.error_msg}")
+            return 0
+
+        try:
+            for i, (symbol, bs_code, start, end) in enumerate(tasks):
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,open,high,low,close,volume,amount",
+                    start_date=start,
+                    end_date=end,
+                    frequency="d",
+                    adjustflag="1",
+                )
+                if rs.error_code == "0":
+                    while rs.next():
+                        all_rows.append([symbol] + rs.get_row_data())
+                time.sleep(0.2)  # 200ms 间隔，防止封 IP
+
+                if (i + 1) % 500 == 0:
+                    logger.info(f"增量同步进度: {i + 1}/{len(tasks)}, 已获取 {len(all_rows)} 条")
+        finally:
+            bs.logout()
 
         if not all_rows:
-            logger.info("无新数据（可能非交易日）")
+            logger.info("无新数据（可能非交易日或所有股票无成交）")
             return 0
 
         df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
@@ -158,32 +180,34 @@ class DataEngine:
             df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
             conn.commit()
 
-        logger.info(f"sync_today_bulk: 写入 {count} 条数据")
+        logger.info(f"增量同步完成: 写入 {count} 条数据（遍历 {len(tasks)} 只）")
         return count
 
     def backfill(self, symbols: list[str]) -> None:
-        """多进程并行回填历史K线数据。
+        """单进程顺序回填历史K线数据。
 
-        分批处理 + 请求间隔控制，避免 baostock API 被封。
-        - 每批 200 只股票，9 进程并行拉取
-        - 每个 worker 内每只股票间隔 200ms
-        - 已入库的自动 skip，中断后可重跑续传
-        - SQLite 只在主进程写入，避免并发冲突
+        注意：baostock API 不支持多进程并发。单进程每只间隔 200ms 防封。
+        每 200 只重新 login 一次（防止长连接超时）。
+        已入库的自动 skip，中断后可重跑续传。
         """
         import time
         from datetime import date, timedelta
-        from multiprocessing import Pool
+        import baostock as bs
 
         today_str = date.today().strftime("%Y-%m-%d")
         start_time = time.time()
-        n_workers = 9
-        batch_size = 200
+        reconnect_interval = 200
+
+        success = 0
+        failed = 0
+        skipped = 0
 
         # 构建任务列表（跳过已完成的）
         tasks = []
         for symbol in symbols:
             last_date = self._get_last_date(symbol)
             if last_date and last_date >= today_str:
+                skipped += 1
                 continue
             start = last_date or self.start_date
             if last_date:
@@ -195,29 +219,40 @@ class DataEngine:
             return
 
         total = len(tasks)
-        logger.info(f"回填启动：{total} 只股票需处理，{n_workers} 进程并行")
+        logger.info(
+            f"回填启动：{total} 只股票需处理（跳过已有 {skipped} 只），"
+            f"单进程顺序拉取，每 {reconnect_interval} 只重连一次"
+        )
 
-        total_success = 0
-        total_failed = 0
+        for batch_start in range(0, total, reconnect_interval):
+            batch = tasks[batch_start:batch_start + reconnect_interval]
 
-        # 分批处理
-        for batch_start in range(0, total, batch_size):
-            batch = tasks[batch_start:batch_start + batch_size]
-            chunks = [batch[i::n_workers] for i in range(n_workers)]
-            chunks = [c for c in chunks if c]
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.error(f"baostock 登录失败: {lg.error_msg}")
+                return
 
             all_rows = []
-
-            with Pool(n_workers) as pool:
-                batch_results = pool.map(_bs_fetch_batch, chunks)
-
-            for rows in batch_results:
-                if rows:
-                    all_rows.extend(rows)
+            try:
+                for symbol, bs_code, start, end in batch:
+                    rs = bs.query_history_k_data_plus(
+                        bs_code,
+                        "date,open,high,low,close,volume,amount",
+                        start_date=start,
+                        end_date=end,
+                        frequency="d",
+                        adjustflag="1",
+                    )
+                    if rs.error_code == "0":
+                        while rs.next():
+                            all_rows.append([symbol] + rs.get_row_data())
+                    time.sleep(0.2)  # 200ms 间隔
+            finally:
+                bs.logout()
 
             batch_success = len(set(r[0] for r in all_rows)) if all_rows else 0
-            total_success += batch_success
-            total_failed += (len(batch) - batch_success)
+            success += batch_success
+            failed += (len(batch) - batch_success)
 
             # 写入数据库
             if all_rows:
@@ -233,22 +268,21 @@ class DataEngine:
                         conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
                     df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
 
-            progress = min(batch_start + batch_size, total)
+            progress = min(batch_start + reconnect_interval, total)
             elapsed = time.time() - start_time
             rate = progress / elapsed if elapsed > 0 else 0
             logger.info(
                 f"回填进度: {progress}/{total} | "
-                f"成功 {total_success} 失败 {total_failed} | "
+                f"成功 {success} 失败 {failed} 跳过 {skipped} | "
                 f"速率 {rate:.1f} 只/秒 | "
                 f"已用 {elapsed/60:.0f}分钟"
             )
 
-        # 最终报告
         elapsed = time.time() - start_time
         logger.info(
-            f"回填完成 — 成功: {total_success} | "
-            f"失败: {total_failed} | "
-            f"跳过: {total - total_success - total_failed} | "
+            f"回填完成 — 成功: {success} | "
+            f"失败: {failed} | "
+            f"跳过: {skipped} | "
             f"耗时: {elapsed/60:.1f}分钟 | "
             f"平均: {elapsed/total:.2f}秒/只"
         )
