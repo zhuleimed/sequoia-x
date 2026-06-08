@@ -18,6 +18,8 @@ ENV/
 
 # 数据库文件
 data/*.db
+*.db
+!/.env.example
 
 # 环境变量
 .env
@@ -36,3 +38,11 @@ build/
 
 # Hypothesis 测试缓存
 .hypothesis/
+
+# WorkBuddy 项目记忆
+.workbuddy/
+
+# 临时文件
+*.swp
+.DS_Store
+Thumbs.db
