@@ -159,7 +159,10 @@ class MarketAnalyst:
         return ctx
 
     def _gather_stock_detail(self, code: str) -> dict:
-        """采集单只股票的实时行情、财务、股吧舆情等数据。"""
+        """采集单只股票的行情、财务、股吧舆情等数据。
+
+        优先使用 akshare 实时数据，收盘后自动降级为本地 DB 数据。
+        """
         detail = {
             "code": code,
             "name": _get_stock_name(code),
@@ -170,7 +173,7 @@ class MarketAnalyst:
             "errors": [],
         }
 
-        # ── 实时行情（akshare） ──
+        # ── 实时行情（akshare），收盘后自动降级为本地 DB ──
         try:
             import akshare as ak
             spot = ak.stock_zh_a_spot_em()
@@ -186,8 +189,30 @@ class MarketAnalyst:
                     f"市盈率:{r.get('市盈率-动态', '?')} "
                     f"市净率:{r.get('市净率', '?')}"
                 )
-        except Exception as e:
-            detail["errors"].append(f"行情: {e}")
+        except Exception:
+            pass  # 非交易时段无实时数据，切到本地 DB
+
+        # ── 收盘后降级：从本地 SQLite 取最新日线数据 ──
+        if not detail["realtime"]:
+            try:
+                import sqlite3
+                import pandas as pd
+                conn = sqlite3.connect(self.settings.db_path)
+                df = pd.read_sql(
+                    "SELECT date, close, volume, turnover FROM stock_daily "
+                    "WHERE symbol = ? ORDER BY date DESC LIMIT 1",
+                    conn, params=(code,),
+                )
+                conn.close()
+                if not df.empty:
+                    r = df.iloc[0]
+                    detail["realtime"] = (
+                        f"日期:{r['date']} 收盘价:{r['close']:.2f} "
+                        f"成交量:{r['volume']:.0f}手 "
+                        f"成交额:{r['turnover']:.2f}亿"
+                    )
+            except Exception as e:
+                detail["errors"].append(f"本地行情: {e}")
 
         # ── 个股基本面（akshare） ──
         try:

@@ -57,8 +57,15 @@ class RpsBreakoutStrategy(BaseStrategy):
             logger.info("RpsBreakoutStrategy 无选股结果")
             return []
 
-        # 按 RPS 分数排序（RPS越高动量越强）
-        scored = list(zip(selected['symbol'].tolist(), selected['rps'].tolist()))
+        # 基础股票池过滤
+        pool_filtered = self._apply_pool(selected['symbol'].tolist())
+        if not pool_filtered:
+            logger.info("RpsBreakoutStrategy 无选股结果（基础池过滤后）")
+            return []
+
+        # 按 RPS 分数排序取前 top_n
+        filtered_df = selected[selected['symbol'].isin(pool_filtered)]
+        scored = list(zip(filtered_df['symbol'].tolist(), filtered_df['rps'].tolist()))
         result = self._pick_top(scored, self.top_n)
         logger.info(f"RpsBreakoutStrategy 选出 {len(result)} 只（候选{len(scored)}只）")
         return result

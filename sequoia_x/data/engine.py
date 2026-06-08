@@ -311,7 +311,7 @@ class DataEngine:
         finally:
             bs.logout()
 
-        # 价格过滤：最新收盘价 < 2 剔除
+        # 价格过滤：最新收盘价 < 2 剔除（仅剔除有明确价格且<2的，无价格数据的不剔除）
         if candidates:
             try:
                 with sqlite3.connect(self.db_path) as conn:
@@ -319,12 +319,17 @@ class DataEngine:
                     rows = conn.execute(
                         f"SELECT symbol, close FROM stock_daily "
                         f"WHERE symbol IN ({ph}) "
-                        f"AND date = (SELECT MAX(date) FROM stock_daily WHERE symbol = stock_daily.symbol)",
+                        f"AND (symbol, date) IN "
+                        f"(SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol)",
                         candidates,
                     ).fetchall()
                     price_ok = {r[0]: r[1] for r in rows}
                     before = len(candidates)
-                    candidates = [s for s in candidates if s in price_ok and price_ok[s] >= 2.0]
+                    # 有价格数据的才过滤(<2剔除)，无价格数据的保留
+                    candidates = [
+                        s for s in candidates
+                        if s not in price_ok or price_ok[s] >= 2.0
+                    ]
                     dropped = before - len(candidates)
                     if dropped:
                         logger.info(f"价格过滤（<2元）: 剔除 {dropped} 只")
