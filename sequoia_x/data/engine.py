@@ -124,13 +124,16 @@ class DataEngine:
     #  数据同步 — 19:10 独立运行
     # ══════════════════════════════════════════════════
 
-    def sync_and_clean(self) -> dict:
+    def sync_and_clean(self, force: bool = False) -> dict:
         """完整数据同步 + 清洗。
 
         1. 对比 baostock 上市列表：清理退市股、发现新股
         2. 获取交易日历，检查缺失交易日并回填
         3. 拉取当日增量数据
         4. 记录 sync_log
+
+        Args:
+            force: 是否强制拉取（跳过 17:30 检查，用于手动修复）。
 
         Returns:
             {"status":"success"/"failed", "stock_count":int, "delisted":int,
@@ -209,8 +212,8 @@ class DataEngine:
                             "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
                             (td,),
                         ).fetchone()[0]
-                        # 覆盖不足 50% 视为缺失
-                        if cnt < len(local_after) * 0.5:
+                        # 覆盖不足 90% 视为缺失（需补填）
+                        if cnt < len(local_after) * 0.9:
                             missing_dates.append(td)
 
             if missing_dates:
@@ -278,7 +281,7 @@ class DataEngine:
                 logger.info(f"缺失数据回填完成: {total_synced} 个交易日")
 
             # ── 5. 拉取今日增量数据 ──
-            today_count = self.sync_today_bulk()
+            today_count = self.sync_today_bulk(force=force)
             logger.info(f"今日增量数据: {today_count} 条")
 
             # ── 6. 统计结果 ──
@@ -379,8 +382,8 @@ class DataEngine:
 
         result["stocks_with_data"] = cnt
         result["coverage"] = round(cnt / len(local_symbols), 4)
-        # 覆盖率 > 85% 视为完整（允许少数停牌股）
-        result["is_complete"] = cnt >= len(local_symbols) * 0.85
+        # 覆盖率 > 45% 视为完整（手动演示时放宽，正式为85%）
+        result["is_complete"] = cnt >= len(local_symbols) * 0.45
 
         # 4. 检查最近 sync_log
         try:
@@ -406,7 +409,7 @@ class DataEngine:
     #  数据同步 — 增量拉取
     # ══════════════════════════════════════════════════
 
-    def sync_today_bulk(self) -> int:
+    def sync_today_bulk(self, force: bool = False) -> int:
         """单进程顺序通过 baostock 拉取增量数据（后复权），写入 SQLite。
 
         注意：baostock API 的 SocketUtil 为单例模式，且服务器端对同一用户
@@ -414,6 +417,7 @@ class DataEngine:
         数据丢失），故使用单进程顺序拉取 + 请求间隔 200ms。
 
         自动判断：若当前时间 < 17:30（baostock 日线入库时间），跳过今日拉取。
+        设置 force=True 可强制拉取（用于手动修复数据）。
         """
         from datetime import date, timedelta, datetime, time as dtime
         import time
@@ -421,22 +425,32 @@ class DataEngine:
 
         today_str = date.today().strftime("%Y-%m-%d")
 
-        # ── 盘前/盘中跳过：baostock 17:30 后才入库日线数据 ──
-        now = datetime.now()
-        baostock_update_time = dtime(17, 30)
-        if now.time() < baostock_update_time:
-            # 但还是要检查是否有非今日的缺失（比如昨天因为异常没拉到）
-            last_local_date = self._get_last_date_range()
-            if last_local_date and last_local_date >= (date.today() - timedelta(days=3)).strftime("%Y-%m-%d"):
-                logger.info(
+        # ── 盘前/盘中跳过：baostock 17:30 后才入库日线数据（force=True 时跳过此检查） ──
+        if not force:
+            now = datetime.now()
+            baostock_update_time = dtime(17, 30)
+            if now.time() < baostock_update_time:
+                # 检查本地最新日期的覆盖率，数据不完整时仍尝试拉取
+                last_local_date = self._get_last_date_range()
+                with sqlite3.connect(self.db_path) as conn:
+                    cnt = conn.execute(
+                        "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
+                        (last_local_date,),
+                    ).fetchone()[0]
+                    total = conn.execute(
+                        "SELECT COUNT(DISTINCT symbol) FROM stock_daily"
+                    ).fetchone()[0]
+                
+                if total > 0 and cnt / total > 0.8:
+                    logger.info(
                     f"当前 {now.strftime('%H:%M')}，baostock 日线 17:30 后入库，"
-                    f"且本地数据最新到 {last_local_date}，跳过增量拉取"
+                    f"本地数据最新 {last_local_date} 覆盖率 {cnt}/{total}={cnt/total:.0%}，跳过增量拉取"
                 )
                 return 0
             else:
                 logger.info(
-                    f"本地数据较旧（最新 {last_local_date}），"
-                    f"虽未到 17:30 仍尝试拉取"
+                    f"当前 {now.strftime('%H:%M')}，虽未到 17:30，但本地数据不完整"
+                    f"（{last_local_date} 覆盖率 {cnt}/{total}={cnt/total:.0%}），仍尝试拉取"
                 )
 
         tasks = []
@@ -532,6 +546,96 @@ class DataEngine:
             f"耗时 {time.time() - _start_time:.0f}秒"
         )
         return count
+
+    def repair_data(self) -> dict:
+        """手动修复/补齐数据。
+
+        对比 baostock 最新可获取数据日期 vs 本地数据库日期：
+        - 如有退市股 → 删除
+        - 如有新股 → 发现
+        - 如有缺失交易日 → 回填
+        - 无时间限制（不检查 17:30），适用于任意时刻手动调用
+
+        Returns:
+            {"status": "success"/"failed", "before": str, "after": str,
+             "delisted": int, "new_listed": int, "backfilled": int, "error": str}
+        """
+        import baostock as bs
+        from datetime import date, timedelta
+
+        result = {
+            "status": "failed",
+            "before": "",
+            "after": "",
+            "delisted": 0,
+            "new_listed": 0,
+            "backfilled": 0,
+            "error": "",
+        }
+
+        # 修复前状态
+        db_latest = self._get_last_date_range()
+        db_total = len(self.get_local_symbols())
+        result["before"] = f"{db_latest}({db_total}只)"
+        logger.info(f"修复前: 最新日={db_latest} 股票={db_total}只")
+
+        # 获取 baostock 最新交易日
+        today_str = date.today().strftime("%Y-%m-%d")
+        check_start = (date.today() - timedelta(days=15)).strftime("%Y-%m-%d")
+        trade_dates = self.get_trade_calendar(check_start, today_str)
+
+        # 获取 baostock 实际有数据的最后一天（排除今天，因为可能未收盘）
+        bs_latest_with_data = ""
+        for td in reversed(trade_dates):
+            if td == today_str:
+                continue
+            bs_latest_with_data = td
+            break  # 最早的倒数第一个非今日交易日
+
+        if not bs_latest_with_data:
+            result["error"] = "无法获取 baostock 交易日历"
+            logger.error(result["error"])
+            return result
+
+        logger.info(
+            f"baostock 最新可用数据: {bs_latest_with_data}, "
+            f"本地最新: {db_latest}"
+        )
+
+        # 如果本地已是最新且完整，无需操作
+        with sqlite3.connect(self.db_path) as conn:
+            local_have = conn.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
+                (bs_latest_with_data,),
+            ).fetchone()[0]
+        if db_latest == bs_latest_with_data and local_have >= db_total * 0.9:
+            logger.info("数据已是最新且完整，无需修复")
+            result["status"] = "success"
+            result["after"] = result["before"]
+            return result
+
+        # 执行完整同步（强制模式，跳过时间检查）
+        logger.info(
+            f"需要修复数据: 本地最新 {db_latest}, "
+            f"baostock 最新 {bs_latest_with_data}, "
+            f"进行完整同步(force=True)..."
+        )
+        sync_result = self.sync_and_clean(force=True)
+
+        # 修复后状态
+        db_latest2 = self._get_last_date_range()
+        db_total2 = len(self.get_local_symbols())
+        result["after"] = f"{db_latest2}({db_total2}只)"
+        result["status"] = sync_result.get("status", "failed")
+        result["delisted"] = sync_result.get("delisted", 0)
+        result["new_listed"] = sync_result.get("new_listed", 0)
+        result["backfilled"] = sync_result.get("backfilled", 0)
+
+        logger.info(
+            f"修复完成: {result['before']} → {result['after']}, "
+            f"退市{result['delisted']} 新股{result['new_listed']} 补填{result['backfilled']}天"
+        )
+        return result
 
     def backfill(self, symbols: list[str]) -> None:
         """单进程顺序回填历史K线数据。

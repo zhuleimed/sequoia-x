@@ -3,6 +3,7 @@
 运行模式：
   python main.py                    # 日常模式：检查数据完整性 → 策略选股 → LLM分析 → 推送
   python main.py --sync-only        # 同步模式（19:10）：数据同步+清洗，不选股
+  python main.py --repair           # 修复模式：手动修复/补齐数据（无时间限制）
   python main.py --backfill         # 回填模式：baostock 全量历史K线
   python main.py --skip-llm         # 日常模式但跳过 LLM 分析
 """
@@ -50,6 +51,11 @@ def main() -> None:
         action="store_true",
         help="跳过 LLM 多维度分析（仅策略选股+推送）",
     )
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="修复模式：手动修补数据，对比 baostock 最新交易日补齐缺失数据",
+    )
     args = parser.parse_args()
 
     try:
@@ -68,6 +74,37 @@ def main() -> None:
             all_symbols = engine.get_all_symbols()
             engine.backfill(all_symbols)
             logger.info("Sequoia-X V2 回填模式运行完成")
+            return
+
+        if args.repair:
+            # ═══════════════════════════════════════════════
+            #  修复模式（手动调用，无时间限制）
+            # ═══════════════════════════════════════════════
+            logger.info("=== 修复模式 ===")
+            logger.info("对比 baostock 最新交易日 → 清理退市/发现新股/补齐缺失数据")
+            repair_t0 = time.monotonic()
+            result = engine.repair_data()
+            repair_elapsed = time.monotonic() - repair_t0
+
+            logger.info(
+                f"修复完成: 状态={result['status']} "
+                f"{result['before']} → {result['after']} "
+                f"退市{result['delisted']} 新股{result['new_listed']} "
+                f"补填{result['backfilled']}天 "
+                f"耗时{repair_elapsed:.0f}秒"
+            )
+
+            if result["status"] == "success":
+                _push_sync_summary(settings, {
+                    "status": "success",
+                    "stock_count": int(result["after"].split("(")[1].rstrip("只)")),
+                    "delisted": result["delisted"],
+                    "new_listed": result["new_listed"],
+                    "backfilled": result["backfilled"],
+                    "latest_date": result["after"].split("(")[0],
+                }, repair_elapsed)
+            _elapsed_total = time.monotonic() - _main_start
+            logger.info(f"Sequoia-X V2 修复模式运行完成（总耗时 {_elapsed_total:.0f} 秒）")
             return
 
         if args.sync_only:
