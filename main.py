@@ -3,7 +3,7 @@
 运行模式：
   python main.py                    # 日常模式：检查数据完整性 → 策略选股 → LLM分析 → 推送
   python main.py --sync-only        # 同步模式（19:10）：数据同步+清洗，不选股
-  python main.py --repair           # 修复模式：手动修复/补齐数据（无时间限制）
+  python main.py --repair           # 修复模式：手动修补数据（对比baostock最新交易日补齐缺失数据）
   python main.py --backfill         # 回填模式：baostock 全量历史K线
   python main.py --skip-llm         # 日常模式但跳过 LLM 分析
 """

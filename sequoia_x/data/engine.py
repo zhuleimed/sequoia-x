@@ -243,7 +243,7 @@ class DataEngine:
                             if rs.error_code == "0":
                                 while rs.next():
                                     day_rows.append([sym] + rs.get_row_data())
-                            time.sleep(0.15)
+                            time.sleep(0.05)
                     finally:
                         bs.logout()
 
@@ -501,9 +501,9 @@ class DataEngine:
                 if rs.error_code == "0":
                     while rs.next():
                         all_rows.append([symbol] + rs.get_row_data())
-                time.sleep(0.2)
+                time.sleep(0.05)
 
-                if (i + 1) % 500 == 0:
+                if (i + 1) % 1000 == 0:
                     logger.info(
                         f"增量同步进度: {i + 1}/{len(tasks)}, "
                         f"已获取 {len(all_rows)} 条"
@@ -702,7 +702,7 @@ class DataEngine:
                     if rs.error_code == "0":
                         while rs.next():
                             all_rows.append([symbol] + rs.get_row_data())
-                    time.sleep(0.2)
+                    time.sleep(0.05)
             finally:
                 bs.logout()
 
