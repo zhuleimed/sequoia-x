@@ -72,6 +72,12 @@ class DataEngine:
             ).fetchone()
         return row[0] if row and row[0] else None
 
+    def _get_last_date_range(self) -> str | None:
+        """获取数据库中最新的日期（全局）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+        return row[0] if row and row[0] else None
+
     def get_ohlcv(self, symbol: str) -> pd.DataFrame:
         with sqlite3.connect(self.db_path) as conn:
             df = pd.read_sql(
@@ -196,6 +202,9 @@ class DataEngine:
             if local_after and trade_dates:
                 with sqlite3.connect(self.db_path) as conn:
                     for td in trade_dates:
+                        # 跳过当日（baostock 17:30 后才入库）
+                        if td == today_str:
+                            continue
                         cnt = conn.execute(
                             "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
                             (td,),
@@ -343,9 +352,10 @@ class DataEngine:
             "last_sync_status": "unknown",
         }
 
-        # 1. 获取最近交易日
+        # 1. 获取最近交易日（排除今日 — 盘前/盘中查不到今日数据）
         check_start = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-        trade_dates = self.get_trade_calendar(check_start, today_str)
+        all_trade_dates = self.get_trade_calendar(check_start, today_str)
+        trade_dates = [d for d in all_trade_dates if d != today_str]
         if not trade_dates:
             result["error"] = "无法获取交易日历"
             return result
@@ -402,12 +412,32 @@ class DataEngine:
         注意：baostock API 的 SocketUtil 为单例模式，且服务器端对同一用户
         有并发连接限制。多进程并行会导致连接冲突（login 死锁、logout failed、
         数据丢失），故使用单进程顺序拉取 + 请求间隔 200ms。
+
+        自动判断：若当前时间 < 17:30（baostock 日线入库时间），跳过今日拉取。
         """
-        from datetime import date, timedelta
+        from datetime import date, timedelta, datetime, time as dtime
         import time
         import baostock as bs
 
         today_str = date.today().strftime("%Y-%m-%d")
+
+        # ── 盘前/盘中跳过：baostock 17:30 后才入库日线数据 ──
+        now = datetime.now()
+        baostock_update_time = dtime(17, 30)
+        if now.time() < baostock_update_time:
+            # 但还是要检查是否有非今日的缺失（比如昨天因为异常没拉到）
+            last_local_date = self._get_last_date_range()
+            if last_local_date and last_local_date >= (date.today() - timedelta(days=3)).strftime("%Y-%m-%d"):
+                logger.info(
+                    f"当前 {now.strftime('%H:%M')}，baostock 日线 17:30 后入库，"
+                    f"且本地数据最新到 {last_local_date}，跳过增量拉取"
+                )
+                return 0
+            else:
+                logger.info(
+                    f"本地数据较旧（最新 {last_local_date}），"
+                    f"虽未到 17:30 仍尝试拉取"
+                )
 
         tasks = []
         with sqlite3.connect(self.db_path) as conn:
