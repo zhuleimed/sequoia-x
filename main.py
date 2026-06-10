@@ -22,6 +22,7 @@ socket.setdefaulttimeout(10.0)
 from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
+from sequoia_x.data.sync import DataSync
 from sequoia_x.notify.wxpusher import WxPusherNotifier
 from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
@@ -56,6 +57,11 @@ def main() -> None:
         action="store_true",
         help="修复模式：手动修补数据，对比 baostock 最新交易日补齐缺失数据",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="与 --repair 配合使用：修复全部缺失股票（默认仅修复前50只）",
+    )
     args = parser.parse_args()
 
     try:
@@ -66,13 +72,19 @@ def main() -> None:
         logger = get_logger(__name__)
         logger.info("Sequoia-X V2 启动")
         engine = DataEngine(settings)
+        sync_mgr = DataSync(settings)
         _main_start = time.monotonic()
 
         if args.backfill:
             # ── 回填模式 ──
-            logger.info("进入回填模式...")
-            all_symbols = engine.get_all_symbols()
-            engine.backfill(all_symbols)
+            logger.info("进入回填模式（DataSync）...")
+            result = sync_mgr.backfill()
+            logger.info(
+                f"回填完成: status={result['status']} "
+                f"股票{result['stock_count']} "
+                f"记录{result['total_records']} "
+                f"耗时{result['duration_seconds']:.0f}s"
+            )
             logger.info("Sequoia-X V2 回填模式运行完成")
             return
 
@@ -80,28 +92,31 @@ def main() -> None:
             # ═══════════════════════════════════════════════
             #  修复模式（手动调用，无时间限制）
             # ═══════════════════════════════════════════════
+            max_stocks = None if args.all else 50
             logger.info("=== 修复模式 ===")
-            logger.info("对比 baostock 最新交易日 → 清理退市/发现新股/补齐缺失数据")
+            logger.info(
+                f"对比 baostock 最新交易日，补齐缺失数据"
+                + ("（全部股票）" if max_stocks is None else f"（最多{max_stocks}只）")
+            )
             repair_t0 = time.monotonic()
-            result = engine.repair_data()
+            result = sync_mgr.repair_missing(days=5, max_stocks=max_stocks)
             repair_elapsed = time.monotonic() - repair_t0
 
             logger.info(
-                f"修复完成: 状态={result['status']} "
-                f"{result['before']} → {result['after']} "
-                f"退市{result['delisted']} 新股{result['new_listed']} "
-                f"补填{result['backfilled']}天 "
+                f"修复完成: status={result['status']} "
+                f"涉及{result['affected_stocks']}只 "
+                f"补填{result['total_filled']}条 "
                 f"耗时{repair_elapsed:.0f}秒"
             )
 
-            if result["status"] == "success":
+            if result["status"] == "ok":
                 _push_sync_summary(settings, {
                     "status": "success",
-                    "stock_count": int(result["after"].split("(")[1].rstrip("只)")),
-                    "delisted": result["delisted"],
-                    "new_listed": result["new_listed"],
-                    "backfilled": result["backfilled"],
-                    "latest_date": result["after"].split("(")[0],
+                    "stock_count": result["affected_stocks"],
+                    "delisted": 0,
+                    "new_listed": 0,
+                    "backfilled": result["total_filled"],
+                    "latest_date": "",
                 }, repair_elapsed)
             _elapsed_total = time.monotonic() - _main_start
             logger.info(f"Sequoia-X V2 修复模式运行完成（总耗时 {_elapsed_total:.0f} 秒）")
@@ -113,30 +128,41 @@ def main() -> None:
             # ═══════════════════════════════════════════════
             logger.info("=== 同步模式 ===")
             sync_t0 = time.monotonic()
-            result = engine.sync_and_clean()
+            result = sync_mgr.run_full()
             sync_elapsed = time.monotonic() - sync_t0
 
+            phases = result.get("phases", {})
+            stock_list = phases.get("stock_list", {})
+            daily_sync = phases.get("daily_sync", {})
+            repair = phases.get("repair", {})
+
             logger.info(
-                f"同步完成: 状态={result['status']} "
-                f"股票{result['stock_count']} "
-                f"退市清理{result['delisted']}只 "
-                f"新股发现{result['new_listed']}只 "
-                f"补填{result['backfilled']}天 "
+                f"同步完成: 总体={result['status']} "
+                f"Phase1(stock_list)={stock_list.get('status')} "
+                f"Phase2(daily)={daily_sync.get('status')} "
+                f"Phase3(repair)={repair.get('status')} "
+                f"股票数={daily_sync.get('stock_count', 0)} "
                 f"耗时{sync_elapsed:.0f}秒"
             )
 
-            # 同步结果推送到微信便于确认
-            if result["status"] == "success":
-                _push_sync_summary(settings, result, sync_elapsed)
+            if result["status"] == "ok" or daily_sync.get("status") == "skipped":
+                _push_sync_summary(settings, {
+                    "status": "success",
+                    "stock_count": daily_sync.get("stock_count", 0),
+                    "delisted": len(stock_list.get("delisted", [])),
+                    "new_listed": len(stock_list.get("new_listed", [])),
+                    "backfilled": repair.get("total_filled", 0),
+                    "latest_date": "",
+                }, sync_elapsed)
             else:
                 _push_data_alert(settings, {
                     "is_complete": False,
                     "latest_trade_day": "",
                     "coverage": 0.0,
-                    "total_stocks": 0,
+                    "total_stocks": stock_list.get("total", 0),
                     "stocks_with_data": 0,
                     "last_sync_status": result["status"],
-                    "error": result["error"],
+                    "error": result.get("error", ""),
                 }, mode="sync")
 
             _elapsed_total = time.monotonic() - _main_start
@@ -150,7 +176,30 @@ def main() -> None:
 
         # 第一步：检查数据完整性
         logger.info("检查数据完整性...")
-        completeness = engine.check_data_completeness()
+        missing_report = sync_mgr.check_missing(days=5)
+        local_stocks = engine.get_local_symbols()
+        total_stocks = len(local_stocks)
+
+        # 从 check_missing 计算覆盖率
+        if total_stocks > 0 and missing_report.get("trade_days_expected", 0) > 0:
+            missing_count = missing_report.get("total_missing", 0)
+            # 覆盖率 = 1 - (缺失条数 / (股票数 × 理论交易日数))
+            coverage = 1.0 - (missing_count / (total_stocks * missing_report["trade_days_expected"]))
+            coverage = max(0.0, min(1.0, coverage))
+        else:
+            coverage = 0.0 if total_stocks == 0 else 1.0
+
+        is_complete = coverage >= 0.90
+        latest_date = missing_report.get("latest_date", "")
+
+        completeness = {
+            "is_complete": is_complete,
+            "latest_trade_day": latest_date,
+            "coverage": coverage,
+            "total_stocks": total_stocks,
+            "stocks_with_data": total_stocks - len(missing_report.get("missing_by_symbol", {})),
+            "last_sync_status": "ok" if is_complete else "incomplete",
+        }
 
         if not completeness["is_complete"]:
             # 数据不完整 → 推送告警，跳过选股

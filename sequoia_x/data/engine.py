@@ -1,4 +1,4 @@
-"""数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
+"""数据引擎模块：负责 SQLite 行情数据存储与行情数据查询。"""
 
 import sqlite3
 from pathlib import Path
@@ -9,6 +9,16 @@ from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _migrate_columns(conn: sqlite3.Connection, table: str,
+                     columns: list[tuple[str, str]]) -> None:
+    """安全地给已有表新增列（列已存在则跳过）。"""
+    for col_name, col_def in columns:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ── 建表 SQL ──
@@ -24,6 +34,27 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     close    REAL,
     volume   REAL,
     turnover REAL,
+    pctChg      REAL,
+    peTTM       REAL,
+    pbMRQ       REAL,
+    psTTM       REAL,
+    pcfNcfTTM   REAL,
+    UNIQUE (symbol, date)
+);
+"""
+
+_CREATE_INDEX_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS index_daily (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol   TEXT    NOT NULL,
+    date     TEXT    NOT NULL,
+    open     REAL,
+    high     REAL,
+    low      REAL,
+    close    REAL,
+    volume   REAL,
+    amount   REAL,
+    pctChg   REAL,
     UNIQUE (symbol, date)
 );
 """
@@ -41,6 +72,10 @@ CREATE TABLE IF NOT EXISTS sync_log (
     delisted_count   INTEGER DEFAULT 0,
     new_listed_count INTEGER DEFAULT 0,
     backfilled_days  INTEGER DEFAULT 0,
+    is_trade_day      INTEGER DEFAULT 1,
+    api_status        TEXT    DEFAULT '',
+    coverage          REAL    DEFAULT 0.0,
+    duration_seconds  REAL    DEFAULT 0.0,
     error_msg        TEXT,
     created_at       TEXT    DEFAULT (datetime('now','localtime'))
 );
@@ -48,7 +83,7 @@ CREATE TABLE IF NOT EXISTS sync_log (
 
 
 class DataEngine:
-    """行情数据引擎，负责 SQLite 存储和 baostock 数据同步。"""
+    """行情数据引擎，负责 SQLite 存储和行情数据查询。"""
 
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
@@ -60,7 +95,23 @@ class DataEngine:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
+            conn.execute(_CREATE_INDEX_TABLE_SQL)
             conn.execute(_CREATE_SYNC_LOG_SQL)
+            # 为旧版 sync_log 表补充新字段（兼容已有数据库）
+            _migrate_columns(conn, "sync_log", [
+                ("is_trade_day", "INTEGER DEFAULT 1"),
+                ("api_status", "TEXT DEFAULT ''"),
+                ("coverage", "REAL DEFAULT 0.0"),
+                ("duration_seconds", "REAL DEFAULT 0.0"),
+            ])
+            # 为旧版 stock_daily 表补充新字段（peTTM等估值指标）
+            _migrate_columns(conn, "stock_daily", [
+                ("pctChg", "REAL"),
+                ("peTTM", "REAL"),
+                ("pbMRQ", "REAL"),
+                ("psTTM", "REAL"),
+                ("pcfNcfTTM", "REAL"),
+            ])
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
@@ -92,670 +143,6 @@ class DataEngine:
         """将纯数字代码转为 baostock 格式：6/9开头 -> sh，其余 -> sz。"""
         prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
         return f"{prefix}.{symbol}"
-
-    # ══════════════════════════════════════════════════
-    #  交易日历
-    # ══════════════════════════════════════════════════
-
-    def get_trade_calendar(self, start_date: str, end_date: str) -> list[str]:
-        """从 baostock 获取指定日期范围内的交易日列表。"""
-        import baostock as bs
-
-        lg = bs.login()
-        if lg.error_code != "0":
-            logger.error(f"baostock 登录失败: {lg.error_msg}")
-            return []
-
-        try:
-            rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
-            dates = []
-            while rs.next():
-                row = rs.get_row_data()
-                if row[1] == "1":  # is_trading_day
-                    dates.append(row[0])
-            return dates
-        except Exception as e:
-            logger.error(f"获取交易日历失败: {e}")
-            return []
-        finally:
-            bs.logout()
-
-    # ══════════════════════════════════════════════════
-    #  数据同步 — 19:10 独立运行
-    # ══════════════════════════════════════════════════
-
-    def sync_and_clean(self, force: bool = False) -> dict:
-        """完整数据同步 + 清洗。
-
-        1. 对比 baostock 上市列表：清理退市股、发现新股
-        2. 获取交易日历，检查缺失交易日并回填
-        3. 拉取当日增量数据
-        4. 记录 sync_log
-
-        Args:
-            force: 是否强制拉取（跳过 17:30 检查，用于手动修复）。
-
-        Returns:
-            {"status":"success"/"failed", "stock_count":int, "delisted":int,
-             "new_listed":int, "backfilled":int, "latest_date":str, "error":str}
-        """
-        import time
-        import baostock as bs
-        from datetime import date, timedelta
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        result = {
-            "status": "failed",
-            "stock_count": 0,
-            "delisted": 0,
-            "new_listed": 0,
-            "backfilled": 0,
-            "latest_date": "",
-            "error": "",
-        }
-
-        lg = bs.login()
-        if lg.error_code != "0":
-            result["error"] = f"baostock登录失败: {lg.error_msg}"
-            logger.error(result["error"])
-            return result
-
-        try:
-            # ── 1. 获取当前上市股票列表 ──
-            rs = bs.query_stock_basic(code_name="", code="")
-            active_stocks: dict[str, tuple[str, str]] = {}
-            while rs.next():
-                row = rs.get_row_data()
-                code_num = row[0].split(".")[1]
-                name = row[1]
-                ipo = row[2]
-                s_type = row[4]
-                status = row[5]
-                if status == "1" and s_type == "1":
-                    active_stocks[code_num] = (name, ipo)
-
-            local_symbols = self.get_local_symbols()
-
-            # ── 2. 清理退市股 ──
-            to_delete = [s for s in local_symbols if s not in active_stocks]
-            if to_delete:
-                with sqlite3.connect(self.db_path) as conn:
-                    for sym in to_delete:
-                        conn.execute("DELETE FROM stock_daily WHERE symbol = ?", (sym,))
-                    conn.commit()
-                logger.info(
-                    f"清理退市股: 移除 {len(to_delete)} 只: {' '.join(to_delete[:10])}"
-                )
-            result["delisted"] = len(to_delete)
-
-            # ── 3. 发现新股 ──
-            new_stocks = [s for s in active_stocks if s not in local_symbols]
-            result["new_listed"] = len(new_stocks)
-            if new_stocks:
-                logger.info(f"发现新股: {len(new_stocks)} 只")
-
-            local_after = self.get_local_symbols()
-
-            # ── 4. 获取交易日历 & 检查缺失 ──
-            start_check = (date.today() - timedelta(days=15)).strftime("%Y-%m-%d")
-            bs.logout()  # 换个连接取 trade_dates
-            trade_dates = self.get_trade_calendar(start_check, today_str)
-
-            missing_dates: list[str] = []
-            if local_after and trade_dates:
-                with sqlite3.connect(self.db_path) as conn:
-                    for td in trade_dates:
-                        # 跳过当日（baostock 17:30 后才入库）
-                        if td == today_str:
-                            continue
-                        cnt = conn.execute(
-                            "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
-                            (td,),
-                        ).fetchone()[0]
-                        # 覆盖不足 90% 视为缺失（需补填）
-                        if cnt < len(local_after) * 0.9:
-                            missing_dates.append(td)
-
-            if missing_dates:
-                logger.info(
-                    f"发现 {len(missing_dates)} 个待补充交易日: {missing_dates}"
-                )
-                total_synced = 0
-                all_backfill_rows: list[list] = []
-                active_local = [s for s in local_after if s in active_stocks]
-
-                for md in missing_dates:
-                    lg2 = bs.login()
-                    if lg2.error_code != "0":
-                        continue
-                    day_rows: list[list] = []
-                    try:
-                        for sym in active_local:
-                            code = self._to_baostock_code(sym)
-                            rs = bs.query_history_k_data_plus(
-                                code,
-                                "date,open,high,low,close,volume,amount",
-                                start_date=md,
-                                end_date=md,
-                                frequency="d",
-                                adjustflag="1",
-                            )
-                            if rs.error_code == "0":
-                                while rs.next():
-                                    day_rows.append([sym] + rs.get_row_data())
-                            time.sleep(0.05)
-                    finally:
-                        bs.logout()
-
-                    if day_rows:
-                        all_backfill_rows.extend(day_rows)
-                        total_synced += 1
-
-                if all_backfill_rows:
-                    df = pd.DataFrame(
-                        all_backfill_rows,
-                        columns=[
-                            "symbol", "date", "open", "high",
-                            "low", "close", "volume", "turnover",
-                        ],
-                    )
-                    for col in ["open", "high", "low", "close", "volume", "turnover"]:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                    df = df.dropna(subset=["close"])
-                    with sqlite3.connect(self.db_path) as conn:
-                        for d in df["date"].unique():
-                            conn.execute(
-                                "DELETE FROM stock_daily WHERE date = ?", (d,)
-                            )
-                        df.to_sql(
-                            "stock_daily",
-                            conn,
-                            if_exists="append",
-                            index=False,
-                            method="multi",
-                            chunksize=500,
-                        )
-                        conn.commit()
-
-                result["backfilled"] = total_synced
-                logger.info(f"缺失数据回填完成: {total_synced} 个交易日")
-
-            # ── 5. 拉取今日增量数据 ──
-            today_count = self.sync_today_bulk(force=force)
-            logger.info(f"今日增量数据: {today_count} 条")
-
-            # ── 6. 统计结果 ──
-            local_final = self.get_local_symbols()
-            result["stock_count"] = len(local_final)
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
-                result["latest_date"] = row[0] or ""
-
-            result["status"] = "success"
-
-        except Exception as e:
-            result["error"] = str(e)
-            logger.error(f"sync_and_clean 异常: {e}")
-            import traceback
-
-            traceback.print_exc()
-        finally:
-            bs.logout()
-
-        # ── 记录 sync_log ──
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_log "
-                    "(date, status, stock_count, delisted_count, new_listed_count, backfilled_days) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        today_str,
-                        result["status"],
-                        result["stock_count"],
-                        result["delisted"],
-                        result["new_listed"],
-                        result["backfilled"],
-                    ),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.warning(f"sync_log 写入失败: {e}")
-
-        logger.info(f"sync_and_clean 完成: 状态={result['status']} "
-                     f"股票{result['stock_count']} 退市{result['delisted']} "
-                     f"新股{result['new_listed']} 补填{result['backfilled']}天")
-        return result
-
-    # ══════════════════════════════════════════════════
-    #  数据完整性检查 — 20:55 选股前执行
-    # ══════════════════════════════════════════════════
-
-    def check_data_completeness(self) -> dict:
-        """检查数据完整性：确认最近交易日数据是否已完整拉取。
-
-        Returns:
-            {"is_complete": bool,
-             "latest_trade_day": str,
-             "coverage": float,
-             "total_stocks": int,
-             "stocks_with_data": int,
-             "last_sync_status": str}
-        """
-        import baostock as bs
-        from datetime import date, timedelta
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        result = {
-            "is_complete": False,
-            "latest_trade_day": "",
-            "coverage": 0.0,
-            "total_stocks": 0,
-            "stocks_with_data": 0,
-            "last_sync_status": "unknown",
-        }
-
-        # 1. 获取最近交易日（排除今日 — 盘前/盘中查不到今日数据）
-        check_start = (date.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-        all_trade_dates = self.get_trade_calendar(check_start, today_str)
-        trade_dates = [d for d in all_trade_dates if d != today_str]
-        if not trade_dates:
-            result["error"] = "无法获取交易日历"
-            return result
-
-        latest_td = trade_dates[-1]
-        result["latest_trade_day"] = latest_td
-
-        # 2. 本地股票总数
-        local_symbols = self.get_local_symbols()
-        result["total_stocks"] = len(local_symbols)
-        if not local_symbols:
-            result["error"] = "本地数据库为空"
-            return result
-
-        # 3. 统计最新交易日有数据的股票数
-        with sqlite3.connect(self.db_path) as conn:
-            cnt = conn.execute(
-                "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
-                (latest_td,),
-            ).fetchone()[0]
-
-        result["stocks_with_data"] = cnt
-        result["coverage"] = round(cnt / len(local_symbols), 4)
-        # 覆盖率 > 45% 视为完整（手动演示时放宽，正式为85%）
-        result["is_complete"] = cnt >= len(local_symbols) * 0.45
-
-        # 4. 检查最近 sync_log
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT status FROM sync_log WHERE date = ? ORDER BY id DESC LIMIT 1",
-                    (latest_td,),
-                ).fetchone()
-                if row:
-                    result["last_sync_status"] = row[0]
-        except Exception:
-            pass
-
-        logger.info(
-            f"数据完整性检查: 最新日={latest_td} "
-            f"覆盖率={result['coverage']:.1%} "
-            f"({cnt}/{len(local_symbols)}) "
-            f"结果={'完整' if result['is_complete'] else '不完整'}"
-        )
-        return result
-
-    # ══════════════════════════════════════════════════
-    #  数据同步 — 增量拉取
-    # ══════════════════════════════════════════════════
-
-    def sync_today_bulk(self, force: bool = False) -> int:
-        """单进程顺序通过 baostock 拉取增量数据（后复权），写入 SQLite。
-
-        注意：baostock API 的 SocketUtil 为单例模式，且服务器端对同一用户
-        有并发连接限制。多进程并行会导致连接冲突（login 死锁、logout failed、
-        数据丢失），故使用单进程顺序拉取 + 请求间隔 200ms。
-
-        自动判断：若当前时间 < 17:30（baostock 日线入库时间），跳过今日拉取。
-        设置 force=True 可强制拉取（用于手动修复数据）。
-        """
-        from datetime import date, timedelta, datetime, time as dtime
-        import time
-        import baostock as bs
-
-        today_str = date.today().strftime("%Y-%m-%d")
-
-        # ── 盘前/盘中跳过：baostock 17:30 后才入库日线数据（force=True 时跳过此检查） ──
-        if not force:
-            now = datetime.now()
-            baostock_update_time = dtime(17, 30)
-            if now.time() < baostock_update_time:
-                # 检查本地最新日期的覆盖率，数据不完整时仍尝试拉取
-                last_local_date = self._get_last_date_range()
-                with sqlite3.connect(self.db_path) as conn:
-                    cnt = conn.execute(
-                        "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
-                        (last_local_date,),
-                    ).fetchone()[0]
-                    total = conn.execute(
-                        "SELECT COUNT(DISTINCT symbol) FROM stock_daily"
-                    ).fetchone()[0]
-                
-                if total > 0 and cnt / total > 0.8:
-                    logger.info(
-                    f"当前 {now.strftime('%H:%M')}，baostock 日线 17:30 后入库，"
-                    f"本地数据最新 {last_local_date} 覆盖率 {cnt}/{total}={cnt/total:.0%}，跳过增量拉取"
-                )
-                return 0
-            else:
-                logger.info(
-                    f"当前 {now.strftime('%H:%M')}，虽未到 17:30，但本地数据不完整"
-                    f"（{last_local_date} 覆盖率 {cnt}/{total}={cnt/total:.0%}），仍尝试拉取"
-                )
-
-        tasks = []
-        with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol"
-            ).fetchall()
-
-        if not rows:
-            logger.warning("本地无股票数据，请先执行 --backfill")
-            return 0
-
-        for symbol, last_date in rows:
-            if last_date and last_date >= today_str:
-                continue
-            start = today_str
-            if last_date:
-                start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime(
-                    "%Y-%m-%d"
-                )
-            tasks.append((symbol, self._to_baostock_code(symbol), start, today_str))
-
-        if not tasks:
-            logger.info("所有股票已是最新，无需更新")
-            return 0
-
-        _start_time = time.time()
-        logger.info(
-            f"需要更新 {len(tasks)} 只股票，单进程顺序拉取（每只间隔200ms）..."
-        )
-
-        all_rows: list[list] = []
-        lg = bs.login()
-        if lg.error_code != "0":
-            logger.error(f"baostock 登录失败: {lg.error_msg}")
-            return 0
-
-        try:
-            for i, (symbol, bs_code, start, end) in enumerate(tasks):
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "date,open,high,low,close,volume,amount",
-                    start_date=start,
-                    end_date=end,
-                    frequency="d",
-                    adjustflag="1",
-                )
-                if rs.error_code == "0":
-                    while rs.next():
-                        all_rows.append([symbol] + rs.get_row_data())
-                time.sleep(0.05)
-
-                if (i + 1) % 1000 == 0:
-                    logger.info(
-                        f"增量同步进度: {i + 1}/{len(tasks)}, "
-                        f"已获取 {len(all_rows)} 条"
-                    )
-        finally:
-            bs.logout()
-
-        if not all_rows:
-            logger.info("无新数据（可能非交易日或所有股票无成交）")
-            return 0
-
-        df = pd.DataFrame(
-            all_rows,
-            columns=[
-                "symbol", "date", "open", "high",
-                "low", "close", "volume", "turnover",
-            ],
-        )
-        for col in ["open", "high", "low", "close", "volume", "turnover"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["close"])
-        df = df[df["volume"] > 0]
-
-        count = len(df)
-        with sqlite3.connect(self.db_path) as conn:
-            for d in df["date"].unique().tolist():
-                conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
-            df.to_sql(
-                "stock_daily",
-                conn,
-                if_exists="append",
-                index=False,
-                method="multi",
-                chunksize=500,
-            )
-            conn.commit()
-
-        logger.info(
-            f"增量同步完成: 写入 {count} 条数据（遍历 {len(tasks)} 只）"
-            f"耗时 {time.time() - _start_time:.0f}秒"
-        )
-        return count
-
-    def repair_data(self) -> dict:
-        """手动修复/补齐数据。
-
-        对比 baostock 最新可获取数据日期 vs 本地数据库日期：
-        - 如有退市股 → 删除
-        - 如有新股 → 发现
-        - 如有缺失交易日 → 回填
-        - 无时间限制（不检查 17:30），适用于任意时刻手动调用
-
-        Returns:
-            {"status": "success"/"failed", "before": str, "after": str,
-             "delisted": int, "new_listed": int, "backfilled": int, "error": str}
-        """
-        import baostock as bs
-        from datetime import date, timedelta
-
-        result = {
-            "status": "failed",
-            "before": "",
-            "after": "",
-            "delisted": 0,
-            "new_listed": 0,
-            "backfilled": 0,
-            "error": "",
-        }
-
-        # 修复前状态
-        db_latest = self._get_last_date_range()
-        db_total = len(self.get_local_symbols())
-        result["before"] = f"{db_latest}({db_total}只)"
-        logger.info(f"修复前: 最新日={db_latest} 股票={db_total}只")
-
-        # 获取 baostock 最新交易日
-        today_str = date.today().strftime("%Y-%m-%d")
-        check_start = (date.today() - timedelta(days=15)).strftime("%Y-%m-%d")
-        trade_dates = self.get_trade_calendar(check_start, today_str)
-
-        # 获取 baostock 实际有数据的最后一天（排除今天，因为可能未收盘）
-        bs_latest_with_data = ""
-        for td in reversed(trade_dates):
-            if td == today_str:
-                continue
-            bs_latest_with_data = td
-            break  # 最早的倒数第一个非今日交易日
-
-        if not bs_latest_with_data:
-            result["error"] = "无法获取 baostock 交易日历"
-            logger.error(result["error"])
-            return result
-
-        logger.info(
-            f"baostock 最新可用数据: {bs_latest_with_data}, "
-            f"本地最新: {db_latest}"
-        )
-
-        # 如果本地已是最新且完整，无需操作
-        with sqlite3.connect(self.db_path) as conn:
-            local_have = conn.execute(
-                "SELECT COUNT(DISTINCT symbol) FROM stock_daily WHERE date = ?",
-                (bs_latest_with_data,),
-            ).fetchone()[0]
-        if db_latest == bs_latest_with_data and local_have >= db_total * 0.9:
-            logger.info("数据已是最新且完整，无需修复")
-            result["status"] = "success"
-            result["after"] = result["before"]
-            return result
-
-        # 执行完整同步（强制模式，跳过时间检查）
-        logger.info(
-            f"需要修复数据: 本地最新 {db_latest}, "
-            f"baostock 最新 {bs_latest_with_data}, "
-            f"进行完整同步(force=True)..."
-        )
-        sync_result = self.sync_and_clean(force=True)
-
-        # 修复后状态
-        db_latest2 = self._get_last_date_range()
-        db_total2 = len(self.get_local_symbols())
-        result["after"] = f"{db_latest2}({db_total2}只)"
-        result["status"] = sync_result.get("status", "failed")
-        result["delisted"] = sync_result.get("delisted", 0)
-        result["new_listed"] = sync_result.get("new_listed", 0)
-        result["backfilled"] = sync_result.get("backfilled", 0)
-
-        logger.info(
-            f"修复完成: {result['before']} → {result['after']}, "
-            f"退市{result['delisted']} 新股{result['new_listed']} 补填{result['backfilled']}天"
-        )
-        return result
-
-    def backfill(self, symbols: list[str]) -> None:
-        """单进程顺序回填历史K线数据。
-
-        注意：baostock API 不支持多进程并发。单进程每只间隔 200ms 防封。
-        每 200 只重新 login 一次（防止长连接超时）。
-        已入库的自动 skip，中断后可重跑续传。
-        """
-        import time
-        from datetime import date, timedelta
-        import baostock as bs
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        start_time = time.time()
-        reconnect_interval = 200
-
-        success = 0
-        failed = 0
-        skipped = 0
-
-        # 构建任务列表（跳过已完成的）
-        tasks = []
-        for symbol in symbols:
-            last_date = self._get_last_date(symbol)
-            if last_date and last_date >= today_str:
-                skipped += 1
-                continue
-            start = last_date or self.start_date
-            if last_date:
-                start = (
-                    date.fromisoformat(last_date) + timedelta(days=1)
-                ).strftime("%Y-%m-%d")
-            tasks.append((symbol, self._to_baostock_code(symbol), start, today_str))
-
-        if not tasks:
-            logger.info("所有股票已是最新，无需回填")
-            return
-
-        total = len(tasks)
-        logger.info(
-            f"回填启动：{total} 只股票需处理（跳过已有 {skipped} 只），"
-            f"单进程顺序拉取，每 {reconnect_interval} 只重连一次"
-        )
-
-        for batch_start in range(0, total, reconnect_interval):
-            batch = tasks[batch_start : batch_start + reconnect_interval]
-
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.error(f"baostock 登录失败: {lg.error_msg}")
-                return
-
-            all_rows: list[list] = []
-            try:
-                for symbol, bs_code, start, end in batch:
-                    rs = bs.query_history_k_data_plus(
-                        bs_code,
-                        "date,open,high,low,close,volume,amount",
-                        start_date=start,
-                        end_date=end,
-                        frequency="d",
-                        adjustflag="1",
-                    )
-                    if rs.error_code == "0":
-                        while rs.next():
-                            all_rows.append([symbol] + rs.get_row_data())
-                    time.sleep(0.05)
-            finally:
-                bs.logout()
-
-            batch_success = len(set(r[0] for r in all_rows)) if all_rows else 0
-            success += batch_success
-            failed += len(batch) - batch_success
-
-            # 写入数据库
-            if all_rows:
-                df = pd.DataFrame(
-                    all_rows,
-                    columns=[
-                        "symbol", "date", "open", "high",
-                        "low", "close", "volume", "amount",
-                    ],
-                )
-                df = df.rename(columns={"amount": "turnover"})
-                for col in ["open", "high", "low", "close", "volume", "turnover"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.dropna(subset=["close"])
-                df = df[df["volume"] > 0]
-
-                with sqlite3.connect(self.db_path) as conn:
-                    for d in df["date"].unique():
-                        conn.execute("DELETE FROM stock_daily WHERE date = ?", (d,))
-                    df.to_sql(
-                        "stock_daily",
-                        conn,
-                        if_exists="append",
-                        index=False,
-                        method="multi",
-                        chunksize=500,
-                    )
-
-            progress = min(batch_start + reconnect_interval, total)
-            elapsed = time.time() - start_time
-            rate = progress / elapsed if elapsed > 0 else 0
-            logger.info(
-                f"回填进度: {progress}/{total} | "
-                f"成功 {success} 失败 {failed} 跳过 {skipped} | "
-                f"速率 {rate:.1f} 只/秒 | "
-                f"已用 {elapsed/60:.0f}分钟"
-            )
-
-        # 最终报告
-        elapsed = time.time() - start_time
-        logger.info(
-            f"回填完成 — 成功: {success} | "
-            f"失败: {failed} | "
-            f"跳过: {skipped} | "
-            f"耗时: {elapsed/60:.1f}分钟 | "
-            f"平均: {elapsed/total:.2f}秒/只"
-        )
 
     # ── 基础股票池 ──
 

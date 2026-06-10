@@ -1,0 +1,57 @@
+classDiagram
+    direction TB
+
+    class Settings {
+        +str db_path
+        +str start_date
+        +str wxpusher_token
+        +list~str~ wxpusher_topic_ids
+        +str deepseek_api_key
+        +str deepseek_model
+    }
+
+    class DataEngine {
+        -str db_path
+        -str start_date
+        +__init__(settings: Settings)
+        -_init_db()
+        +get_ohlcv(symbol: str) DataFrame
+        +get_base_stock_pool() list~str~
+        +get_all_symbols() list~str~
+        +get_local_symbols() list~str~
+        +_to_baostock_code(symbol: str) str
+        +_get_last_date(symbol: str) str | None
+        +_get_last_date_range() str | None
+    }
+
+    class DataSync {
+        -Settings settings
+        -DataEngine engine
+        -str db_path
+        -str start_date
+        -Logger logger
+        -bool _bs_logged_in
+        +__init__(settings: Settings)
+        -_init_db()
+        -_bs_login() bool
+        -_bs_logout()
+        -_write_to_db(df: DataFrame)
+        -_log_sync(result: dict, duration: float)
+        +is_trade_day(date_str: str?) bool
+        +get_active_stocks() dict~str,tuple~
+        +sync_stock_list() tuple~list,list~
+        +sync_daily(force: bool) int
+        +backfill_missing(days: int, threshold: float) int
+        +backfill(symbols: list~str~, start_date: str?) dict
+        +repair() dict
+        +check_completeness(threshold: float) dict
+        +run_full(force: bool) dict
+        +main() <<static>>
+    }
+
+    Settings <.. DataEngine : 依赖
+    Settings <.. DataSync : 依赖
+    DataEngine <.. DataSync : 持有引用
+    DataEngine ..> sqlite3 : SQLite
+    DataSync ..> sqlite3 : SQLite (写入)
+    DataSync ..> baostock : HTTP API

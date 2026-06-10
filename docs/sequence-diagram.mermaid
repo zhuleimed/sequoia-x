@@ -1,0 +1,71 @@
+sequenceDiagram
+    participant User
+    participant CLI as DataSync.main()
+    participant DS as DataSync
+    participant BS as baostock API
+    participant DB as SQLite
+
+    User->>CLI: python -m sequoia_x.data.sync daily
+    CLI->>CLI: argparse 解析子命令
+    CLI->>DS: DataSync(settings)
+    
+    alt daily
+        DS->>DS: run_full(force=False)
+    else repair
+        DS->>DS: repair()
+    else backfill --symbols X,Y
+        DS->>DS: backfill(symbols=[...])
+    else backfill --all
+        DS->>DS: backfill(symbols=None)
+    else check
+        DS->>DS: check_completeness()
+    end
+
+    Note over DS: ── run_full 内部管线 ──
+
+    DS->>BS: login() (一次会话)
+    BS-->>DS: login OK
+
+    Note over DS: 1. 交易日判断
+    DS->>BS: query_trade_dates(today, today)
+    BS-->>DS: [row0=date, row1=is_trading_day]
+
+    alt 非交易日
+        DS-->>User: 今日非交易日，跳过同步
+    end
+
+    Note over DS: 2. 上市/退市检测
+    DS->>BS: query_stock_basic()
+    BS-->>DS: 全量上市A股列表
+    DS->>DB: SELECT DISTINCT symbol FROM stock_daily
+    DB-->>DS: 本地symbol列表
+    DS->>DS: diff → new_stocks / delisted
+    loop 每个退市股
+        DS->>DB: DELETE FROM stock_daily WHERE symbol=?
+    end
+
+    Note over DS: 3. 缺失回填 (最近15天)
+    DS->>BS: query_trade_dates(recent_15d)
+    BS-->>DS: 交易日列表
+    DS->>DB: 逐日检查覆盖率
+    loop 每个覆盖率<90%的日期
+        DS->>BS: query_history_k_data_plus (逐只)
+        BS-->>DS: OHLCV 数据
+        DS->>DB: 先删后插写入
+    end
+
+    Note over DS: 4. 今日增量
+    DS->>DS: sync_daily(force=False)
+    Note over DS: 17:30 时间门控检查
+    loop 每只股票 (每1000只汇报进度)
+        DS->>BS: query_history_k_data_plus
+        BS-->>DS: 今日OHLCV
+    end
+    DS->>DB: 批量写入 stock_daily
+
+    Note over DS: 5. 记录同步日志
+    DS->>DB: INSERT INTO sync_log (增强字段+耗时)
+
+    DS->>BS: logout()
+    
+    DS-->>User: {"status":"success", "stock_count":5206, ...}
