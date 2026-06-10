@@ -84,7 +84,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 ### 时间线
 
 ```
-19:10  数据同步（--sync-only）
+17:45  数据同步（--sync-only）
     ↓
 ├─ Phase 1: 股票列表同步（上市/退市检测）
 ├─ Phase 2: 增量日线同步（交易日判断 + 时间门控）
@@ -119,14 +119,14 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 
 | 命令 | 用途 | 执行时间 |
 |------|------|---------|
-| `python main.py --sync-only` | 数据同步+清洗 | 19:10（cron） |
+| `python main.py --sync-only` | 数据同步+清洗 | 17:45（cron） |
 | `python main.py` | 完整选股+推送 | 20:55（cron） |
 | `python main.py --skip-llm` | 选股但跳过 LLM 分析 | 手动 |
 | `python main.py --backfill` | 首次回填/补充数据 | 手动 |
 
 ### 日志说明
 
-- `logs/sync_YYYYMMDD.log` — 19:10 同步日志（含退市/新股/补填信息）
+- `logs/sync_YYYYMMDD.log` — 17:45 同步日志（含退市/新股/补填信息）
 - `logs/daily_YYYYMMDD.log` — 20:55 选股日志
 
 ---
@@ -230,7 +230,7 @@ WXPUSHER_TOPIC_IDS=["39277"]
 系统在交易日自动运行两个阶段，cron 配置如下：
 
 ```cron
-# ===== Sequoia-X 数据同步 (19:10) =====
+# ===== Sequoia-X 数据同步 (17:45) =====
 # 退市清理 → 新股发现 → 缺失补填 → 增量拉取 → 推送同步摘要到微信
 10 19 * * 1-5 cd /path/to/Sequoia-X && /path/to/python main.py --sync-only >> logs/sync_$(date +\%Y\%m\%d).log 2>&1
 
@@ -243,8 +243,8 @@ WXPUSHER_TOPIC_IDS=["39277"]
 
 | 时间 | 触发条件 | 推送内容 | 样式 |
 |:---:|---------|---------|:----:|
-| 19:10 同步成功 | `sync_and_clean()` 正常返回 | 股票数、退市清理数、新股发现数、补填天数、耗时 | 📊 数据同步完成 |
-| 19:10 同步失败 | `sync_and_clean()` 异常 | 错误信息、股票数 | ⚠️ 数据同步失败 |
+| 17:45 同步成功 | `run_full()` 正常返回 | 股票数、退市清理数、新股发现数、补填天数、耗时 | 📊 数据同步完成 |
+| 17:45 同步失败 | `run_full()` 异常 | 错误信息、股票数 | ⚠️ 数据同步失败 |
 | 20:55 选股正常 | 数据覆盖率 > 85% | LLM 综合研判报告（含大盘/个股/财务/舆情分析） | 📈 AI 选股研判 |
 | 20:55 数据不足 | 覆盖率 ≤ 85% | 覆盖率、有数据/总股票数、可能原因 | ❌ 选股已取消 |
 
@@ -259,7 +259,7 @@ WXPUSHER_TOPIC_IDS=["39277"]
 
 | 日志文件 | 对应模式 | 生产时间 |
 |---------|---------|---------|
-| `logs/sync_YYYYMMDD.log` | `--sync-only` | 19:10 |
+| `logs/sync_YYYYMMDD.log` | `--sync-only` | 17:45 |
 | `logs/daily_YYYYMMDD.log` | 常规模式 | 20:55 |
 
 ---
