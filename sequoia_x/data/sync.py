@@ -131,7 +131,7 @@ class DataSync:
 
         all_stock_cols: list[str] = [
             "symbol", "date", "open", "high", "low", "close", "volume", "turnover",
-            "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
+            "amount", "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
         ]
         # 取第一条记录的列作为基准
         cols_present: list[str] = [c for c in all_stock_cols if c in self._batch_buffer[0]]
@@ -171,7 +171,7 @@ class DataSync:
             return 0
 
         numeric_cols: list[str] = [
-            "open", "high", "low", "close", "volume", "turnover",
+            "open", "high", "low", "close", "volume", "turnover", "amount",
             "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
         ]
         for col in numeric_cols:
@@ -190,7 +190,7 @@ class DataSync:
             # 小批量：放入缓冲区
             stock_cols: list[str] = [
                 "symbol", "date", "open", "high", "low", "close", "volume", "turnover",
-                "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
+                "amount", "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
             ]
             cols_present: list[str] = [c for c in stock_cols if c in df.columns]
             for rec in df[cols_present].to_dict("records"):
@@ -199,7 +199,7 @@ class DataSync:
             # 大批量：直接写盘（回填场景，数据量大）
             all_stock_cols: list[str] = [
                 "symbol", "date", "open", "high", "low", "close", "volume", "turnover",
-                "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
+                "amount", "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM",
             ]
             cols_present: list[str] = [c for c in all_stock_cols if c in df.columns]
             records = df[cols_present].to_dict("records")
@@ -606,7 +606,7 @@ class DataSync:
 
                     rs = bs.query_history_k_data_plus(
                         bs_code,
-                        "date,open,high,low,close,volume,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                        "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                         start_date=start,
                         end_date=today_str,
                         frequency="d",
@@ -889,7 +889,7 @@ class DataSync:
                 try:
                     rs = bs.query_history_k_data_plus(
                         bs_code,
-                        "date,open,high,low,close,volume,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                        "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                         start_date=earliest,
                         end_date=latest_str,
                         frequency="d",
@@ -932,7 +932,7 @@ class DataSync:
                     try:
                         rs = bs.query_history_k_data_plus(
                             self.engine._to_baostock_code(sym),
-                            "date,open,high,low,close,volume,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                            "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                             start_date=earliest,
                             end_date=latest_str,
                             frequency="d",
@@ -1100,7 +1100,7 @@ class DataSync:
                     try:
                         rs = bs.query_history_k_data_plus(
                             bs_code,
-                            "date,open,high,low,close,volume,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                            "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                             start_date=batch_start,
                             end_date=batch_end,
                             frequency="d",

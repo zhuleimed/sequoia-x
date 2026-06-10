@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS stock_daily (
     close    REAL,
     volume   REAL,
     turnover REAL,
+    amount      REAL,
     pctChg      REAL,
     peTTM       REAL,
     pbMRQ       REAL,
@@ -104,13 +105,14 @@ class DataEngine:
                 ("coverage", "REAL DEFAULT 0.0"),
                 ("duration_seconds", "REAL DEFAULT 0.0"),
             ])
-            # 为旧版 stock_daily 表补充新字段（peTTM等估值指标）
+            # 为旧版 stock_daily 表补充新字段（peTTM等估值指标 + amount）
             _migrate_columns(conn, "stock_daily", [
                 ("pctChg", "REAL"),
                 ("peTTM", "REAL"),
                 ("pbMRQ", "REAL"),
                 ("psTTM", "REAL"),
                 ("pcfNcfTTM", "REAL"),
+                ("amount", "REAL"),
             ])
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
