@@ -61,7 +61,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 |------|------|
 | 批量写入优化 | 500条/批，持久化SQLite连接，避免逐只提交开销 |
 | 幂等写入 | INSERT OR REPLACE 基于 UNIQUE(symbol,date) |
-| 断连恢复 | 连续50次错误自动重连 + 指数退避重试 |
+| 断连恢复 | 连续10次错误自动重连 + 指数退避重试 |
 | 交易日判断 | baostock query_trade_dates API（fail-open） |
 | 新字段支持 | pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM |
 | pandas 3.0 兼容 | _bs_get_data() 手动拼接，避免 baostock 内部 df.append() |
@@ -179,7 +179,7 @@ cp .env.example .env
 python main.py --backfill
 ```
 
-约 12~60 分钟完成 ~5200 只 A 股历史后复权日 K 数据回填（视网络与服务器性能而定）。
+约 45~60 分钟完成 ~5200 只 A 股历史前复权（adjustflag=2）日 K 数据回填（视网络与服务器性能而定）。
 
 ### 4. 日常运行
 
@@ -306,9 +306,9 @@ Sequoia-X/
 ## 📦 数据说明
 
 - **数据源**：[baostock](http://baostock.com)（免费、无需注册、无限流）
-- **复权方式**：后复权（hfq）— 历史价格不变，适合增量存储
+- **复权方式**：前复权（adjustflag=2）（hfq）— 历史价格不变，适合增量存储
 - **存储**：本地 SQLite（`data/sequoia_v2.db`），可直接拷贝使用
-- **增量更新**：`sync_today_bulk()` 多进程并行补数据，2~3 分钟完成
+- **增量更新**：`sync_today_bulk()` 单进程顺序补数据，40~50 分钟完成
 - **数据更新时间**：日 K 线每个交易日 17:30 入库，建议 19:00 后运行
 
 ---
@@ -316,7 +316,6 @@ Sequoia-X/
 ## 📚 参考文档
 
 - [股票及指数日线数据拉取模块使用指南.md](./股票及指数日线数据拉取模块使用指南.md) — DataSync 详细使用手册
-- [db_adapter.py](./db_adapter.py) — 共享数据访问适配器（供 015/016 项目使用）
 - [004_Sequoia-X量化选股系统开发部署运行指南.md](./004_Sequoia-X量化选股系统开发部署运行指南.md) — 系统部署运维指南
 
 新增策略必须遵守三阶层选股架构：

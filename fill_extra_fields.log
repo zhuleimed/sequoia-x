@@ -1,0 +1,122 @@
+需补填扩展字段的股票: 5206 只
+login success!
+baostock 登录成功
+[50/5206] updated=29,273 failed=0
+[100/5206] updated=58,573 failed=0
+[150/5206] updated=87,873 failed=0
+[200/5206] updated=117,167 failed=0
+[250/5206] updated=146,467 failed=0
+[300/5206] updated=175,764 failed=0
+[350/5206] updated=205,064 failed=0
+[400/5206] updated=234,406 failed=0
+[450/5206] updated=261,251 failed=0
+[500/5206] updated=288,067 failed=0
+[550/5206] updated=312,684 failed=0
+[600/5206] updated=342,034 failed=0
+[650/5206] updated=371,384 failed=0
+[700/5206] updated=400,733 failed=0
+[750/5206] updated=430,083 failed=0
+[800/5206] updated=459,433 failed=0
+[850/5206] updated=488,783 failed=0
+[900/5206] updated=518,133 failed=0
+[950/5206] updated=547,483 failed=0
+[1000/5206] updated=576,833 failed=0
+[1050/5206] updated=606,183 failed=0
+[1100/5206] updated=635,533 failed=0
+[1150/5206] updated=664,883 failed=0
+[1200/5206] updated=694,233 failed=0
+[1250/5206] updated=723,558 failed=0
+[1300/5206] updated=752,883 failed=0
+[1350/5206] updated=782,233 failed=0
+[1400/5206] updated=811,558 failed=0
+[1450/5206] updated=840,908 failed=0
+[1500/5206] updated=870,258 failed=0
+[1550/5206] updated=899,582 failed=0
+[1600/5206] updated=928,932 failed=0
+[1650/5206] updated=958,282 failed=0
+[1700/5206] updated=987,632 failed=0
+[1750/5206] updated=1,016,982 failed=0
+[1800/5206] updated=1,046,332 failed=0
+[1850/5206] updated=1,075,682 failed=0
+[1900/5206] updated=1,105,032 failed=0
+[1950/5206] updated=1,134,382 failed=0
+[2000/5206] updated=1,163,732 failed=0
+[2050/5206] updated=1,193,082 failed=0
+[2100/5206] updated=1,222,432 failed=0
+[2150/5206] updated=1,251,782 failed=0
+[2200/5206] updated=1,281,132 failed=0
+[2250/5206] updated=1,310,380 failed=0
+[2300/5206] updated=1,339,730 failed=0
+[2350/5206] updated=1,369,080 failed=0
+[2400/5206] updated=1,398,430 failed=0
+[2450/5206] updated=1,427,780 failed=0
+[2500/5206] updated=1,457,130 failed=0
+[2550/5206] updated=1,486,480 failed=0
+[2600/5206] updated=1,515,552 failed=0
+[2650/5206] updated=1,544,902 failed=0
+[2700/5206] updated=1,573,968 failed=0
+[2750/5206] updated=1,603,318 failed=0
+[2800/5206] updated=1,630,855 failed=0
+[2850/5206] updated=1,654,536 failed=0
+[2900/5206] updated=1,671,193 failed=0
+[2950/5206] updated=1,700,543 failed=0
+[3000/5206] updated=1,729,893 failed=0
+[3050/5206] updated=1,759,243 failed=0
+[3100/5206] updated=1,788,593 failed=0
+[3150/5206] updated=1,817,943 failed=0
+[3200/5206] updated=1,847,293 failed=0
+[3250/5206] updated=1,876,643 failed=0
+[3300/5206] updated=1,905,993 failed=0
+[3350/5206] updated=1,935,343 failed=0
+[3400/5206] updated=1,964,693 failed=0
+[3450/5206] updated=1,994,042 failed=0
+[3500/5206] updated=2,023,392 failed=0
+[3550/5206] updated=2,052,742 failed=0
+[3600/5206] updated=2,082,092 failed=0
+[3650/5206] updated=2,111,072 failed=0
+[3700/5206] updated=2,139,476 failed=0
+[3750/5206] updated=2,168,826 failed=0
+[3800/5206] updated=2,198,176 failed=0
+[3850/5206] updated=2,227,526 failed=0
+[3900/5206] updated=2,256,547 failed=0
+[3950/5206] updated=2,285,293 failed=0
+[4000/5206] updated=2,313,423 failed=0
+[4050/5206] updated=2,341,122 failed=0
+[4100/5206] updated=2,369,032 failed=0
+[4150/5206] updated=2,396,593 failed=0
+[4200/5206] updated=2,421,492 failed=0
+[4250/5206] updated=2,449,304 failed=0
+[4300/5206] updated=2,478,654 failed=0
+[4350/5206] updated=2,508,004 failed=0
+[4400/5206] updated=2,537,354 failed=0
+[4450/5206] updated=2,566,704 failed=0
+[4500/5206] updated=2,596,044 failed=0
+[4550/5206] updated=2,625,368 failed=0
+[4600/5206] updated=2,654,718 failed=0
+[4650/5206] updated=2,684,068 failed=0
+[4700/5206] updated=2,713,418 failed=0
+[4750/5206] updated=2,742,743 failed=0
+[4800/5206] updated=2,772,093 failed=0
+[4850/5206] updated=2,801,443 failed=0
+[4900/5206] updated=2,830,788 failed=0
+[4950/5206] updated=2,859,551 failed=0
+[5000/5206] updated=2,889,010 failed=0
+[5050/5206] updated=2,918,023 failed=0
+[5100/5206] updated=2,946,112 failed=0
+[5150/5206] updated=2,974,250 failed=0
+[5200/5206] updated=2,993,732 failed=0
+logout success!
+
+==================================================
+补填完成!
+补填行数: 2,995,724
+失败: 0
+
+  amount: 剩余 NULL=4/2,996,925 (0.0%)
+  pctChg: 剩余 NULL=4/2,996,925 (0.0%)
+  peTTM: 剩余 NULL=0/2,996,925 (0.0%)
+  pbMRQ: 剩余 NULL=0/2,996,925 (0.0%)
+  psTTM: 剩余 NULL=1/2,996,925 (0.0%)
+  pcfNcfTTM: 剩余 NULL=0/2,996,925 (0.0%)
+==================================================
+WxPusher 推送成功

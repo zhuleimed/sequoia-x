@@ -112,11 +112,11 @@ def main() -> None:
             if result["status"] == "ok":
                 _push_sync_summary(settings, {
                     "status": "success",
-                    "stock_count": result["affected_stocks"],
+                    "stock_count": len(sync_mgr.engine.get_local_symbols()),
                     "delisted": 0,
                     "new_listed": 0,
                     "backfilled": result["total_filled"],
-                    "latest_date": "",
+                    "latest_date": sync_mgr.engine._get_last_date_range() or "",
                 }, repair_elapsed)
             _elapsed_total = time.monotonic() - _main_start
             logger.info(f"Sequoia-X V2 修复模式运行完成（总耗时 {_elapsed_total:.0f} 秒）")
@@ -148,11 +148,11 @@ def main() -> None:
             if result["status"] == "ok" or daily_sync.get("status") == "skipped":
                 _push_sync_summary(settings, {
                     "status": "success",
-                    "stock_count": daily_sync.get("stock_count", 0),
+                    "stock_count": len(engine.get_local_symbols()),
                     "delisted": len(stock_list.get("delisted", [])),
                     "new_listed": len(stock_list.get("new_listed", [])),
                     "backfilled": repair.get("total_filled", 0),
-                    "latest_date": "",
+                    "latest_date": sync_mgr.engine._get_last_date_range() or "",
                 }, sync_elapsed)
             else:
                 _push_data_alert(settings, {
@@ -404,7 +404,7 @@ def _push_sync_summary(settings, result: dict, elapsed: float) -> None:
         f"当前股票数: {result['stock_count']}\n"
         f"退市清理: {result['delisted']} 只\n"
         f"新股发现: {result['new_listed']} 只\n"
-        f"缺失补填: {result['backfilled']} 天\n"
+        f"缺失补填: {result["backfilled"]} 条\n"
         f"最新日期: {result['latest_date']}\n"
         f"耗时: {elapsed:.0f} 秒\n\n"
         f"20:55 将自动执行选股流程"

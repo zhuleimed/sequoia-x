@@ -179,7 +179,19 @@ class DataSync:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
         df = df.dropna(subset=["close"])
-        df = df[df["volume"] > 0]
+
+        # 停牌处理：成交量为空填0，其他字段向前填充
+        if "volume" in df.columns:
+            df["volume"] = df["volume"].fillna(0.0)
+
+        # 确保按日期排序，使前向填充顺序正确
+        if "date" in df.columns:
+            df = df.sort_values("date")
+
+        # 其他数值字段：用上一交易日数据向前填充，仍为空则填0
+        ffill_cols = [c for c in numeric_cols if c != "volume" and c in df.columns]
+        if ffill_cols:
+            df[ffill_cols] = df[ffill_cols].ffill().fillna(0.0)
 
         if df.empty:
             return 0
@@ -324,8 +336,12 @@ class DataSync:
                 logger.warning("get_active_stocks: 查询结果为空")
                 return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
 
-            # 仅保留沪深 A 股：sh.6 / sz.0 / sz.3 开头
-            mask = raw["code"].str.startswith(("sh.6", "sz.0", "sz.3"))
+            # 仅保留沪深 A 股：sh.6 / sz.0 / sz.3 开头，且 type="1"(股票) status="1"(上市)
+            mask = (
+                raw["code"].str.startswith(("sh.6", "sz.0", "sz.3"))
+                & (raw["type"] == "1")
+                & (raw["status"] == "1")
+            )
             filtered = raw.loc[mask, "code"]
 
             remote_symbols: list[str] = filtered.str.split(".").str[1].tolist()
@@ -529,7 +545,7 @@ class DataSync:
                 else:
                     start = self.start_date
                 # 仅当起始日期不晚于今天时才拉取
-                if start < today_str:
+                if start <= today_str:
                     symbol_starts[sym] = start
 
             logger.info(
@@ -550,7 +566,7 @@ class DataSync:
                     start = last_date  # 从最后日期开始（覆盖模式）
                 else:
                     start = self.start_date
-                if start < today_str:
+                if start <= today_str:
                     symbol_starts[sym] = start
             logger.info(
                 f"sync_daily force 模式（覆盖）: {len(symbol_starts)}/{len(symbols)} 只待拉取"
@@ -582,7 +598,7 @@ class DataSync:
         stock_count: int = 0
         symbols_list: list[str] = list(symbol_starts.keys())
         consecutive_errors: int = 0
-        max_consecutive_errors: int = 50  # 连续 50 次错误则尝试重连
+        max_consecutive_errors: int = 10  # 连续 10 次错误则尝试重连
 
         try:
             for i, sym in enumerate(symbols_list):
@@ -735,8 +751,8 @@ class DataSync:
                     ].tolist()
         except Exception as e:
             logger.warning(f"check_missing: 交易日查询异常: {e}，假定全为交易日")
-            # 回退：生成区间内所有日历日
-            trade_days = []
+        # 回退：query_trade_dates 异常或返回错误码时，生成区间内所有日历日
+        if not trade_days:
             cursor: datetime = dt_start
             while cursor <= dt_latest:
                 trade_days.append(cursor.strftime("%Y-%m-%d"))
