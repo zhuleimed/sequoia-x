@@ -7,6 +7,7 @@
   - ❌ 东方财富 akshare 系列接口已全面封禁（大盘/行情/板块资金流）
   - ✅ 新浪行情 API → 大盘指数 + 个股实时行情
   - ✅ 本地 SQLite (sequoia_v2.db) → peTTM、pbMRQ 等财务数据
+  - ✅ 本地 index_daily 表 → 大盘指数趋势（5日/20日涨跌幅）
   - ✅ baostock → 股票名称查询
   - ✅ 东方财富新闻公告 API（直连HTTP，不走 akshare）
   - ⚠️ 东方财富股吧 API 已变更接口地址，暂不可用
@@ -172,7 +173,7 @@ class MarketAnalyst:
     """LLM 驱动的多维度市场分析器（实时数据驱动）。
 
     数据源说明：
-    - 大盘指数：新浪行情 API（直连 HTTP）
+    - 大盘指数：新浪行情 API（实时）+ 本地 index_daily 表（趋势 + PE）
     - 个股行情：新浪行情 API（直连 HTTP）
     - 个股财务：本地 SQLite 数据库（peTTM, pbMRQ 等已有字段）
     - 股票名称：baostock API
@@ -237,22 +238,109 @@ class MarketAnalyst:
     # 采集层 — 全实时数据，无需 LLM 自身知识
     # ═══════════════════════════════════════════
 
+    def _fetch_local_index_trends(self) -> list[str]:
+        """从本地 index_daily 表读取指数趋势数据。
+
+        计算各指数的今日涨跌幅、近5日涨跌幅、近20日涨跌幅，
+        以及最新 PE 估值（若有）。
+
+        Returns:
+            格式化的指数趋势字符串列表。
+        """
+        INDEX_MAP = {
+            "sh.000001": "上证指数",
+            "sh.000016": "上证50",
+            "sh.000300": "沪深300",
+            "sh.000905": "中证500",
+            "sz.399001": "深证成指",
+            "sz.399106": "深证综指",
+        }
+        try:
+            import sqlite3
+            import pandas as pd
+
+            conn = sqlite3.connect(self.settings.db_path)
+            lines = []
+            for code, name in INDEX_MAP.items():
+                try:
+                    df = pd.read_sql(
+                        "SELECT date, close, pctChg FROM index_daily "
+                        "WHERE symbol = ? ORDER BY date DESC LIMIT 20",
+                        conn,
+                        params=(code,),
+                    )
+                    if df.empty or len(df) < 2:
+                        continue
+
+                    latest = df.iloc[0]
+                    day1_chg = latest["pctChg"]
+
+                    # 近5日涨跌幅（第0天 vs 第4天）
+                    if len(df) >= 5:
+                        week_chg = (
+                            (latest["close"] / df.iloc[4]["close"]) - 1
+                        ) * 100
+                        week_str = f"{week_chg:+.2f}%"
+                    else:
+                        week_str = "N/A"
+
+                    # 近20日涨跌幅（第0天 vs 第19天，最多到最后一个）
+                    if len(df) >= 20:
+                        month_chg = (
+                            (latest["close"] / df.iloc[19]["close"]) - 1
+                        ) * 100
+                        month_str = f"{month_chg:+.2f}%"
+                    else:
+                        # 用最早一个代替
+                        month_chg = (
+                            (latest["close"] / df.iloc[-1]["close"]) - 1
+                        ) * 100
+                        month_str = f"{month_chg:+.2f}%（仅{len(df)}日）"
+
+                    lines.append(
+                        f"{name}: {latest['close']:.0f} "
+                        f"(今日{day1_chg:+.2f}%, "
+                        f"近5日{week_str}, "
+                        f"近20日{month_str})"
+                    )
+                except Exception as e:
+                    logger.debug(f"指数[{code}]读取失败: {e}")
+                    continue
+            conn.close()
+            return lines
+        except Exception as e:
+            logger.debug(f"本地指数趋势读取失败: {e}")
+            return []
+
     def _gather_market_context(self) -> dict:
-        """采集大盘指数行情等实时数据（新浪 API）。"""
+        """采集大盘指数行情等实时数据。
+
+        双源采集：
+        1. 新浪行情 API → 今日实时点位和涨跌幅
+        2. 本地 index_daily 表 → 趋势（近5日/近20日）及 PE 估值
+        """
         ctx = {
             "indices": [],
+            "index_trends": [],
             "global_markets": [],
             "errors": [],
         }
 
-        # ── 大盘指数（新浪行情 API，已测试可用） ──
+        # ── 大盘指数实时行情（新浪 API） ──
         try:
             index_data = _fetch_sina_index(
                 ["sh000001", "sz399001", "sz399006"]
             )
             ctx["indices"] = index_data
         except Exception as e:
-            ctx["errors"].append(f"指数获取失败: {e}")
+            ctx["errors"].append(f"新浪指数获取失败: {e}")
+
+        # ── 大盘指数趋势 + PE（本地 index_daily 表） ──
+        try:
+            trends = self._fetch_local_index_trends()
+            ctx["index_trends"] = trends
+        except Exception as e:
+            ctx["errors"].append(f"本地指数趋势获取失败: {e}")
 
         # ── 外盘（通过新浪获取） ──
         try:
@@ -261,7 +349,6 @@ class MarketAnalyst:
             )
             if global_data:
                 ctx["global_markets"] = global_data
-            # 新浪外盘指数可能不支持，静默降级
         except Exception:
             pass
 
@@ -403,11 +490,17 @@ class MarketAnalyst:
         today_str = date.today().strftime("%Y-%m-%d")
 
         # ── 大盘概况 ──
-        market_lines = ["【A股主要指数】"]
+        market_lines = ["【A股主要指数（实时）】"]
         if market.get("indices"):
             market_lines.extend(market["indices"])
         else:
             market_lines.append("（数据暂缺）")
+
+        # ── 大盘趋势 + PE（本地历史数据） ──
+        if market.get("index_trends"):
+            market_lines.append("")
+            market_lines.append("【大盘趋势（近5日/近20日涨跌幅）】")
+            market_lines.extend(market["index_trends"])
 
         if market.get("global_markets"):
             market_lines.append("")
