@@ -1,12 +1,15 @@
 """LLM 多维度选股分析引擎。
 
 将策略选出的股票结合实时大盘数据、外盘走势、舆论舆情、
-股吧讨论、基本面等维度，通过大模型进行统一分析输出推荐。
+基本面等维度，通过大模型进行统一分析输出推荐。
 
-核心思路：
-  - akshare → 实时行情/财务/板块/资金流数据
-  - 网页爬取 → 东方财富股吧/雪球讨论
-  - LLM → 仅分析上述实时数据，不依赖模型自带知识
+数据源说明（2026-06-11 验证）：
+  - ❌ 东方财富 akshare 系列接口已全面封禁（大盘/行情/板块资金流）
+  - ✅ 新浪行情 API → 大盘指数 + 个股实时行情
+  - ✅ 本地 SQLite (sequoia_v2.db) → peTTM、pbMRQ 等财务数据
+  - ✅ baostock → 股票名称查询
+  - ✅ 东方财富新闻公告 API（直连HTTP，不走 akshare）
+  - ⚠️ 东方财富股吧 API 已变更接口地址，暂不可用
 """
 
 import json
@@ -33,6 +36,7 @@ def _get_stock_name(code: str) -> str:
         return _STOCK_NAME_CACHE[code]
     try:
         import baostock as bs
+
         bs.login()
         prefix = "sh" if code.startswith(("6", "9")) else "sz"
         rs = bs.query_stock_basic(code=f"{prefix}.{code}")
@@ -46,8 +50,136 @@ def _get_stock_name(code: str) -> str:
         return code
 
 
+def _sina_quote_url() -> str:
+    """生成新浪批量行情请求 URL，支持多只股票同时查询。"""
+    return "https://hq.sinajs.cn/list={codes_str}"
+
+
+def _fetch_sina_quotes(codes: list[str]) -> dict[str, dict]:
+    """批量查询新浪实时行情。
+
+    Args:
+        codes: 股票代码列表，如 ["000001", "600519"]。
+
+    Returns:
+        {code: {name, price, chg_pct, volume, amount, ...}} 的字典。
+    """
+    if not codes:
+        return {}
+
+    sina_codes = []
+    for c in codes:
+        if c.startswith(("6", "9")):
+            sina_codes.append(f"sh{c}")
+        else:
+            sina_codes.append(f"sz{c}")
+
+    try:
+        url = f"https://hq.sinajs.cn/list={','.join(sina_codes)}"
+        resp = requests.get(
+            url,
+            headers={"Referer": "https://finance.sina.com.cn"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {}
+
+        result: dict[str, dict] = {}
+        for line in resp.text.strip().split("\n"):
+            if "=" not in line:
+                continue
+            parts = line.split('="')
+            if len(parts) < 2:
+                continue
+            key = parts[0].replace("var hq_str_", "").strip()
+            values = parts[1].rstrip(";").split(",")
+
+            # 新浪行情格式: 0-name, 1-open, 2-prev_close, 3-price, 4-chg, 5-chg_pct, ...
+            if len(values) >= 32:
+                raw_code = key[2:]  # 去掉 sh/sz 前缀
+                result[raw_code] = {
+                    "name": values[0],
+                    "price": values[3],
+                    "chg": values[4],
+                    "chg_pct": values[5],
+                    "volume": values[8],   # 手
+                    "amount": values[9],   # 元
+                    "high": values[6],
+                    "low": values[7],
+                    "turnover": values[30],  # 换手率%
+                }
+
+        return result
+    except Exception as e:
+        logger.debug(f"新浪行情查询失败: {e}")
+        return {}
+
+
+def _fetch_sina_index(index_codes: list[str]) -> list[str]:
+    """查询新浪大盘指数行情。
+
+    新浪指数格式：0-名称, 1-今开, 2-昨收, 3-现价, 4-最高, 5-最低, ...
+    涨跌幅需根据 (现价 - 昨收) / 昨收 自行计算。
+
+    Args:
+        index_codes: 指数新浪代码，如 ["sh000001", "sz399001", "sz399006"]
+
+    Returns:
+        格式化的指数行情字符串列表。
+    """
+    if not index_codes:
+        return []
+
+    try:
+        url = f"https://hq.sinajs.cn/list={','.join(index_codes)}"
+        resp = requests.get(
+            url,
+            headers={"Referer": "https://finance.sina.com.cn"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+
+        lines = []
+        for line in resp.text.strip().split("\n"):
+            if "=" not in line:
+                continue
+            parts = line.split('="')
+            if len(parts) < 2:
+                continue
+            values = parts[1].rstrip(";").split(",")
+            if len(values) >= 6:
+                name = values[0]
+                try:
+                    price = float(values[3])
+                    prev_close = float(values[2])
+                    chg = price - prev_close
+                    chg_pct = chg / prev_close * 100 if prev_close != 0 else 0.0
+                    lines.append(
+                        f"{name}: {price:.2f} "
+                        f"(涨跌{chg:+.2f}点, 涨幅{chg_pct:+.2f}%)"
+                    )
+                except (ValueError, IndexError):
+                    lines.append(f"{name}: {values[3]}")
+
+        return lines
+    except Exception as e:
+        logger.debug(f"新浪指数查询失败: {e}")
+        return []
+
+
 class MarketAnalyst:
-    """LLM 驱动的多维度市场分析器（实时数据驱动）。"""
+    """LLM 驱动的多维度市场分析器（实时数据驱动）。
+
+    数据源说明：
+    - 大盘指数：新浪行情 API（直连 HTTP）
+    - 个股行情：新浪行情 API（直连 HTTP）
+    - 个股财务：本地 SQLite 数据库（peTTM, pbMRQ 等已有字段）
+    - 股票名称：baostock API
+    - 新闻公告：东方财富公告 API（直连 HTTP，不走 akshare）
+    - 板块资金流：因东方财富封禁 akshare，暂时移除
+    - 股吧舆情：接口已变更，暂时不可用
+    """
 
     def __init__(
         self,
@@ -64,11 +196,11 @@ class MarketAnalyst:
     def analyze(self, strategies_results: dict[str, list[str]]) -> str:
         """执行完整的多维分析。
 
-        1. 收集实时大盘/板块/资金流数据
-        2. 对每只候选股收集实时行情、股吧热帖、财务数据
+        1. 收集实时大盘/行情数据（新浪 API）
+        2. 对每只候选股收集实时行情 + 本地财务数据 + 新闻
         3. 将全部实时数据作为 prompt 上下文 → LLM 分析
         """
-        logger.info("MarketAnalyst: 开始实时数据采集...")
+        logger.info("MarketAnalyst: 开始实时数据采集（新浪 API + SQLite）...")
         t0 = time.time()
 
         # 1. 收集全局市场背景
@@ -87,7 +219,9 @@ class MarketAnalyst:
             stocks_detail.append(detail)
 
         t1 = time.time()
-        logger.info(f"实时数据采集完成: {len(all_codes)} 只股票, 耗时 {t1-t0:.0f}秒")
+        logger.info(
+            f"实时数据采集完成: {len(all_codes)} 只股票, 耗时 {t1-t0:.0f}秒"
+        )
 
         # 3. 构建 prompt（所有数据都是实时采集的）
         prompt = self._build_prompt(strategies_results, market, stocks_detail)
@@ -104,188 +238,156 @@ class MarketAnalyst:
     # ═══════════════════════════════════════════
 
     def _gather_market_context(self) -> dict:
-        """采集大盘指数、板块资金流向、隔夜外盘等实时数据。"""
+        """采集大盘指数行情等实时数据（新浪 API）。"""
         ctx = {
             "indices": [],
-            "sectors": [],
-            "fund_flow": [],
             "global_markets": [],
             "errors": [],
         }
 
-        # ── 大盘指数（使用最近交易日数据） ──
-        for name, symbol in [
-            ("上证指数", "sh000001"),
-            ("深证成指", "sz399001"),
-            ("创业板指", "sz399006"),
-        ]:
-            try:
-                import akshare as ak
-                df = ak.stock_zh_index_daily_em(symbol=symbol)
-                if df is not None and len(df) >= 2:
-                    last = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    chg = (last["close"] - prev["close"]) / prev["close"] * 100
-                    ctx["indices"].append(
-                        f"{name}: {last['close']:.2f} ({chg:+.2f}%) "
-                        f"日期:{last.get('date', df.index[-1])}"
-                    )
-            except Exception as e:
-                ctx["errors"].append(f"{name}获取失败: {e}")
-
-        # ── 板块资金流向 ──
+        # ── 大盘指数（新浪行情 API，已测试可用） ──
         try:
-            import akshare as ak
-            flow_df = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流向")
-            if flow_df is not None and len(flow_df) > 0:
-                for _, row in flow_df.head(5).iterrows():
-                    ctx["fund_flow"].append(
-                        f"{row.get('名称', '?')}: "
-                        f"主力净流入{row.get('主力净流入-净额', '?')}亿"
-                    )
+            index_data = _fetch_sina_index(
+                ["sh000001", "sz399001", "sz399006"]
+            )
+            ctx["indices"] = index_data
         except Exception as e:
-            ctx["errors"].append(f"资金流: {e}")
+            ctx["errors"].append(f"指数获取失败: {e}")
 
-        # ── 外盘 ──
+        # ── 外盘（通过新浪获取） ──
         try:
-            import akshare as ak
-            us = ak.index_global_index(symbol="美国")
-            if us is not None and not us.empty:
-                for _, r in us.head(3).iterrows():
-                    ctx["global_markets"].append(f"{r.get('名称','?')}: {r.get('最新价','?')} ({r.get('涨跌幅','?')})")
+            global_data = _fetch_sina_index(
+                [".DJI", ".IXIC", ".INX"]
+            )
+            if global_data:
+                ctx["global_markets"] = global_data
+            # 新浪外盘指数可能不支持，静默降级
         except Exception:
             pass
 
         return ctx
 
     def _gather_stock_detail(self, code: str) -> dict:
-        """采集单只股票的行情、财务、股吧舆情等数据。
+        """采集单只股票的行情、财务、新闻等数据。
 
-        优先使用 akshare 实时数据，收盘后自动降级为本地 DB 数据。
+        数据源优先级：
+        1. 新浪实时行情（交易时段）
+        2. 本地 SQLite 财务数据（peTTM, pbMRQ）
+        3. 东方财富新闻公告 API（直连 HTTP）
         """
         detail = {
             "code": code,
             "name": _get_stock_name(code),
             "realtime": "",
             "fundamentals": "",
-            "guba_posts": [],
             "news_titles": [],
             "errors": [],
         }
 
-        # ── 实时行情（akshare），收盘后自动降级为本地 DB ──
+        # ── 实时行情（新浪 API，已测试可用） ──
         try:
-            import akshare as ak
-            spot = ak.stock_zh_a_spot_em()
-            row = spot[spot["代码"] == code]
-            if not row.empty:
-                r = row.iloc[0]
+            quotes = _fetch_sina_quotes([code])
+            if code in quotes:
+                q = quotes[code]
                 detail["realtime"] = (
-                    f"最新价:{r.get('最新价', '?')} "
-                    f"涨跌幅:{r.get('涨跌幅', '?')}% "
-                    f"换手率:{r.get('换手率', '?')}% "
-                    f"成交量:{r.get('成交量', '?')}手 "
-                    f"成交额:{r.get('成交额', '?')}亿 "
-                    f"市盈率:{r.get('市盈率-动态', '?')} "
-                    f"市净率:{r.get('市净率', '?')}"
+                    f"最新价:{q.get('price', '?')} "
+                    f"涨跌幅:{q.get('chg_pct', '?')}% "
+                    f"涨跌额:{q.get('chg', '?')} "
+                    f"最高:{q.get('high', '?')} "
+                    f"最低:{q.get('low', '?')} "
+                    f"换手率:{q.get('turnover', '?')}% "
+                    f"成交量:{q.get('volume', '?')}手 "
+                    f"成交额:{q.get('amount', '?')}元"
                 )
-        except Exception:
-            pass  # 非交易时段无实时数据，切到本地 DB
-
-        # ── 收盘后降级：从本地 SQLite 取最新日线数据 ──
-        if not detail["realtime"]:
-            try:
-                import sqlite3
-                import pandas as pd
-                conn = sqlite3.connect(self.settings.db_path)
-                df = pd.read_sql(
-                    "SELECT date, close, volume, turnover FROM stock_daily "
-                    "WHERE symbol = ? ORDER BY date DESC LIMIT 1",
-                    conn, params=(code,),
-                )
-                conn.close()
-                if not df.empty:
-                    r = df.iloc[0]
-                    detail["realtime"] = (
-                        f"日期:{r['date']} 收盘价:{r['close']:.2f} "
-                        f"成交量:{r['volume']:.0f}手 "
-                        f"成交额:{r['turnover']:.2f}亿"
-                    )
-            except Exception as e:
-                detail["errors"].append(f"本地行情: {e}")
-
-        # ── 个股基本面（akshare） ──
-        try:
-            import akshare as ak
-            info = ak.stock_individual_info_em(symbol=code)
-            if info is not None and not info.empty:
-                items = []
-                for _, r in info.iterrows():
-                    items.append(f"{r['item']}: {r['value']}")
-                detail["fundamentals"] = " | ".join(items[:10])
         except Exception as e:
-            detail["errors"].append(f"基本面: {e}")
+            detail["errors"].append(f"新浪行情: {e}")
 
-        # ── 东方财富股吧热帖 ──
+        # ── 收盘后降级：从本地 SQLite 取最新日线财务数据 ──
         try:
-            posts = self._fetch_guba_posts(code)
-            detail["guba_posts"] = posts
+            import sqlite3
+            import pandas as pd
+
+            conn = sqlite3.connect(self.settings.db_path)
+            df = pd.read_sql(
+                "SELECT date, close, pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM, "
+                "volume, turnover, amount "
+                "FROM stock_daily WHERE symbol = ? ORDER BY date DESC LIMIT 1",
+                conn,
+                params=(code,),
+            )
+            conn.close()
+            if not df.empty:
+                r = df.iloc[0]
+                # 构建基本面描述
+                info_parts = [f"日期:{r['date']}"]
+                if pd.notna(r["close"]):
+                    info_parts.append(f"收盘价:{r['close']:.2f}")
+                if pd.notna(r["pctChg"]):
+                    info_parts.append(f"涨跌幅:{r['pctChg']:+.2f}%")
+                if pd.notna(r["peTTM"]):
+                    info_parts.append(f"PE(TTM):{r['peTTM']:.2f}")
+                if pd.notna(r["pbMRQ"]):
+                    info_parts.append(f"PB(MRQ):{r['pbMRQ']:.3f}")
+                if pd.notna(r["psTTM"]):
+                    info_parts.append(f"PS(TTM):{r['psTTM']:.2f}")
+                if pd.notna(r["volume"]):
+                    info_parts.append(f"成交量:{r['volume']:.0f}手")
+                if pd.notna(r["turnover"]):
+                    info_parts.append(f"成交额:{r['turnover']:.2f}亿")
+
+                detail["fundamentals"] = " | ".join(info_parts)
+
+                # 如果实时行情尚未获取（非交易时段），使用本地数据
+                if not detail["realtime"]:
+                    detail["realtime"] = " | ".join(info_parts[:4])
         except Exception as e:
-            detail["errors"].append(f"股吧: {e}")
+            detail["errors"].append(f"本地财务: {e}")
 
-        # ── 近期新闻 ──
+        # ── 近期新闻公告（东方财富公告 API，不走 akshare，已测试可用） ──
         try:
-            import akshare as ak
-            news = ak.stock_news_em(symbol=code)
-            if news is not None and not news.empty:
-                detail["news_titles"] = news["新闻标题"].head(5).tolist()
+            news = self._fetch_news(code)
+            detail["news_titles"] = news
         except Exception as e:
             detail["errors"].append(f"新闻: {e}")
 
         return detail
 
-    def _fetch_guba_posts(self, code: str, max_posts: int = 5) -> list[str]:
-        """爬取东方财富股吧帖子（实时舆情）。
-
-        使用 East Money 的 API 接口获取帖子列表。
-        """
-        # 东财股吧API接口
-        url = (
-            f"https://guba.eastmoney.com/ajax/articallist,{code},1.html"
-        )
+    def _fetch_news(self, code: str, max_news: int = 5) -> list[str]:
+        """从东方财富公告 API 获取个股新闻（直连 HTTP，不走 akshare）。"""
+        url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+        params = {
+            "sr": -1,
+            "page_size": max_news,
+            "page_index": 1,
+            "ann_type": "A",
+            "stock_list": code,
+            "f_node": 0,
+            "s_node": 0,
+        }
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
-            "Referer": f"https://guba.eastmoney.com/list,{code}.html",
+            "Referer": f"https://emweb.securities.eastmoney.com/PC_HSF10/",
         }
         try:
-            resp = requests.get(url, headers=headers, timeout=8)
-            resp.encoding = "utf-8"
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                return []
 
-            posts = []
-            # 尝试解析 JSON
-            try:
-                data = resp.json()
-                if isinstance(data, dict) and "art" in data:
-                    for item in data["art"][:max_posts]:
-                        title = item.get("title", "").strip()
-                        reads = item.get("read", "?")
-                        comments = item.get("comment", "?")
-                        if title:
-                            posts.append(f"[阅读{reads} 评论{comments}] {title}")
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-            if not posts:
-                posts.append("（暂无热门讨论）")
-            return posts
-
+            data = resp.json()
+            titles = []
+            for item in data.get("data", {}).get("list", []):
+                title = item.get("title", "").strip()
+                date_str = item.get("noticeDate", "")[:10]
+                if title:
+                    titles.append(f"[{date_str}] {title}")
+            return titles[:max_news]
         except Exception as e:
-            logger.debug(f"股吧爬取失败 [{code}]: {e}")
-            return ["（股吧数据暂不可用）"]
+            logger.debug(f"新闻获取失败 [{code}]: {e}")
+            return []
 
     # ═══════════════════════════════════════════
     # Prompt 构建 — 全部是实时数据
@@ -298,43 +400,42 @@ class MarketAnalyst:
         stocks_detail: list[dict],
     ) -> str:
         """构建 prompt，所有数据均为实时采集，LLM 只需分析无需回忆。"""
-
         today_str = date.today().strftime("%Y-%m-%d")
 
         # ── 大盘概况 ──
-        market_lines = [
-            "【A股主要指数】",
-            *market.get("indices", []),
-            "",
-            "【板块资金流向（TOP5）】",
-            *market.get("fund_flow", ["（数据暂缺）"]),
-            "",
-        ]
+        market_lines = ["【A股主要指数】"]
+        if market.get("indices"):
+            market_lines.extend(market["indices"])
+        else:
+            market_lines.append("（数据暂缺）")
+
+        if market.get("global_markets"):
+            market_lines.append("")
+            market_lines.append("【外盘行情】")
+            market_lines.extend(market["global_markets"])
 
         # ── 候选股详情 ──
         stock_lines = []
         for sd in stocks_detail:
+            stock_lines.append(f"\n## {sd['name']} ({sd['code']})")
             stock_lines.append(
-                f"\n## {sd['name']} ({sd['code']})"
+                f"实时行情: {sd['realtime'] or '（非交易时段，见下方财务数据）'}"
             )
-            stock_lines.append(f"实时行情: {sd['realtime'] or '（暂缺）'}")
-            stock_lines.append(f"基本面: {sd['fundamentals'] or '（暂缺）'}")
-
-            # 股吧舆情
-            if sd.get("guba_posts"):
-                stock_lines.append("--- 股吧热议 ---")
-                for p in sd["guba_posts"][:3]:
-                    stock_lines.append(f"  • {p}")
+            stock_lines.append(
+                f"基本面/财务: {sd['fundamentals'] or '（暂缺）'}"
+            )
 
             # 新闻
             if sd.get("news_titles"):
-                stock_lines.append("--- 近期新闻 ---")
+                stock_lines.append("--- 近期公告 ---")
                 for n in sd["news_titles"][:3]:
                     stock_lines.append(f"  • {n}")
 
             # 错误
             if sd.get("errors"):
-                stock_lines.append(f"⚠️ 数据采集异常: {'; '.join(sd['errors'])}")
+                stock_lines.append(
+                    f"⚠️ 数据采集异常: {'; '.join(sd['errors'])}"
+                )
 
         # ── 策略选股对应关系 ──
         strategy_lines = []
@@ -344,7 +445,7 @@ class MarketAnalyst:
                 strategy_lines.append(f"▸ {sname}: {', '.join(names)}")
 
         # ── 完整 prompt ──
-        prompt = f"""你是一位经验丰富的 A 股市场分析师。以下是 {today_str} 的实时市场数据和候选股票信息，全部是实时采集的，请基于这些数据进行分析，**不要依赖你自己的训练知识**。
+        prompt = f"""你是一位经验丰富的 A 股市场分析师。以下是 {today_str} 的实时市场数据和候选股票信息，全部是实时采集的（来源：新浪行情 API + 本地数据库），请基于这些数据进行分析，**不要依赖你自己的训练知识**。
 
 ## 📊 今日市场实时数据
 {" ".join(market_lines)}
@@ -358,9 +459,9 @@ class MarketAnalyst:
 ## 分析要求
 请对上述候选股票进行多维度综合分析，必须严格基于上面提供的实时数据：
 
-1. **大盘与板块环境** — 调用上面的大盘指数和资金流数据
-2. **股吧舆情** — 调用上面的股吧帖子内容，分析散户情绪
-3. **实时行情与基本面** — 调用上面的行情/财务数据
+1. **大盘与板块环境** — 调用上面的大盘指数数据
+2. **实时行情与基本面** — 调用上面的行情/财务数据（PE/PB等）
+3. **新闻公告** — 调用上面的公告标题，判断是否有重大事项
 4. **综合研判** — 综合所有数据，给出最终推荐
 
 ## 输出格式
@@ -369,7 +470,7 @@ class MarketAnalyst:
 📊 Sequoia-X AI 综合研判 | {today_str}
 
 ### 📈 大盘环境
-[根据上面提供的实时指数数据和资金流，1-2句话总结]
+[根据上面提供的实时指数数据，1-2句话总结]
 
 ### 🔍 个股深度分析
 
@@ -377,11 +478,11 @@ class MarketAnalyst:
 - 综合评分: ⭐X.X/5
 - 核心逻辑: [一句话]
 - 实时行情分析: [引用上面的行情数据]
-- 股吧舆情: [引用上面的帖子，判断散户情绪是多还是空]
 - 基本面: [引用上面的财务数据]
+- 新闻公告: [引用上面的公告标题]
 - 风险提示: [1-2个]
 
-[对每只有实时数据的候选股重复上述格式]
+[对每只候选股重复上述格式]
 
 ### 🏆 综合建议
 - 最优关注: [1-2只，给出明确理由]
