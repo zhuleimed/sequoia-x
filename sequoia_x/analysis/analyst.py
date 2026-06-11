@@ -388,6 +388,11 @@ class MarketAnalyst:
         3. 成交量集中度：TOP10 股票成交占比
         4. 涨跌幅分布：各涨跌幅区间的股票数量
         5. 市场估值中位数：全市场 PE/PB 中位数
+        6. 日内振幅分布：市场波动烈度
+        7. K线形态统计：阳线/阴线/十字星比例
+        8. 价格分层表现：不同价位段的涨跌差异
+        9. PE/PB四象限：价值/成长/困境分类
+        10. 成交额分布：大额交易活跃度
 
         Returns:
             格式化的市场情绪与结构指标列表。
@@ -399,9 +404,10 @@ class MarketAnalyst:
 
             conn = sqlite3.connect(self.settings.db_path)
 
-            # 获取所有股票的最新日线数据
+            # 获取所有股票的最新日线数据（扩充字段：high, low, open, amount）
             df = pd.read_sql(
-                "SELECT symbol, date, close, pctChg, volume, peTTM, pbMRQ "
+                "SELECT symbol, date, open, high, low, close, "
+                "pctChg, volume, amount, peTTM, pbMRQ "
                 "FROM stock_daily "
                 "WHERE (symbol, date) IN ("
                 "  SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol"
@@ -544,6 +550,149 @@ class MarketAnalyst:
             lines.append("  PE分布: " + " | ".join(
                 f"{lbl}:{int(pe_dist.get(lbl,0))}只" for lbl in pe_labels
             ))
+
+            # ═══════════════════════════════════════════════
+            # 新增强大模块 6~10
+            # ═══════════════════════════════════════════════
+
+            # ── 6. 日内振幅分布（市场波动烈度） ──
+            if "high" in df_today.columns and "low" in df_today.columns:
+                closes = df_today["close"].replace(0, pd.NA)
+                amplitudes = (
+                    (df_today["high"] - df_today["low"]) / closes * 100
+                ).dropna()
+
+                amp_median = amplitudes.median()
+                amp_mean = amplitudes.mean()
+
+                amp_bins = [0, 1, 2, 3, 4, 6, 10, 100]
+                amp_labels = ["<1%", "1~2%", "2~3%", "3~4%", "4~6%", "6~10%", ">10%"]
+                amp_dist = pd.cut(amplitudes, bins=amp_bins, labels=amp_labels, right=False).value_counts()
+
+                lines.append("")
+                lines.append("【日内振幅分布（波动烈度）】")
+                lines.append(f"振幅中位数: {amp_median:.1f}% | 均值: {amp_mean:.1f}%")
+                for lbl in amp_labels:
+                    cnt = int(amp_dist.get(lbl, 0))
+                    bar = "█" * min(cnt // 50, 20)
+                    lines.append(f"  {lbl:>6}: {cnt:>4d}只 {bar}")
+
+                # 高波动占比
+                high_vol = int((amplitudes > 4).sum())
+                lines.append(f"高波动(>4%): {high_vol}只 ({high_vol/len(amplitudes)*100:.1f}%)")
+
+            # ── 7. K线形态统计（阳线/阴线/十字星） ──
+            if "open" in df_today.columns and "high" in df_today.columns:
+                opens = df_today["open"]
+                closes = df_today["close"]
+                highs = df_today["high"]
+                lows = df_today["low"]
+
+                yang = int(((closes > opens) & (pct_chgs > 0)).sum())
+                yin = int(((closes < opens) & (pct_chgs < 0)).sum())
+                # 十字星：实体 < 振幅的10% 且 有一定振幅
+                body = (closes - opens).abs()
+                span = (highs - lows).replace(0, pd.NA)
+                doji_ratio = body / span
+                doji = int(((doji_ratio < 0.1) & (span > closes * 0.005)).sum())
+
+                # 光头光脚阳线：close=high and open=low
+                strong_yang = int(((closes == highs) & (opens == lows) & (pct_chgs > 0)).sum())
+                strong_yin = int(((closes == lows) & (opens == highs) & (pct_chgs < 0)).sum())
+
+                lines.append("")
+                lines.append("【K线形态】")
+                lines.append(f"阳线: {yang}只 ({yang/total*100:.0f}%) | "
+                             f"阴线: {yin}只 ({yin/total*100:.0f}%)")
+                lines.append(f"十字星(窄实体): {doji}只 ({doji/total*100:.0f}%)")
+                if strong_yang > 0:
+                    lines.append(f"光头光脚阳线(极强): {strong_yang}只")
+                if strong_yin > 0:
+                    lines.append(f"光头光脚阴线(极弱): {strong_yin}只")
+
+            # ── 8. 价格分层表现 ──
+            closes = df_today["close"].dropna()
+            price_bins = [0, 5, 10, 20, 50, 100, 500, float("inf")]
+            price_labels = ["<5元", "5~10", "10~20", "20~50", "50~100", "100~500", ">500"]
+            df_today["price_tier"] = pd.cut(
+                closes, bins=price_bins, labels=price_labels, right=False
+            )
+            price_stats = (
+                df_today.groupby("price_tier", observed=True)["pctChg"]
+                .agg(["count", "median"])
+            )
+
+            lines.append("")
+            lines.append("【价格分层表现】")
+            for lbl in price_labels:
+                if lbl in price_stats.index:
+                    r = price_stats.loc[lbl]
+                    bar = "█" * min(int(r["count"]) // 50, 20)
+                    lines.append(
+                        f"  {lbl:>7}: {int(r['count']):>4d}只 "
+                        f"中位数{r['median']:+.2f}% {bar}"
+                    )
+
+            # ── 9. PE/PB 四象限（价值/成长/困境） ──
+            pe_sane_4q = pe_vals[(pe_vals > 0) & (pe_vals < 200)]
+            pb_sane_4q = pb_vals[(pb_vals > 0) & (pb_vals < 30)]
+
+            df_4q = df_today.loc[
+                pe_sane_4q.index.intersection(pb_sane_4q.index)
+            ].copy()
+            if not df_4q.empty:
+                pe_med = df_4q["peTTM"].median()
+                pb_med = df_4q["pbMRQ"].median()
+
+                df_4q["quadrant"] = "其他"
+                df_4q.loc[
+                    (df_4q["peTTM"] <= pe_med) & (df_4q["pbMRQ"] <= pb_med), "quadrant"
+                ] = "深度价值(低PE低PB)"
+                df_4q.loc[
+                    (df_4q["peTTM"] > pe_med) & (df_4q["pbMRQ"] > pb_med), "quadrant"
+                ] = "高成长(高PE高PB)"
+                df_4q.loc[
+                    (df_4q["peTTM"] <= pe_med) & (df_4q["pbMRQ"] > pb_med), "quadrant"
+                ] = "轻资产高估(低PE高PB)"
+                df_4q.loc[
+                    (df_4q["peTTM"] > pe_med) & (df_4q["pbMRQ"] <= pb_med), "quadrant"
+                ] = "困境反转型(高PE低PB)"
+
+                quad_stats = df_4q.groupby("quadrant").agg(
+                    数量=("pctChg", "count"),
+                    涨幅中位数=("pctChg", "median"),
+                ).sort_values("涨幅中位数", ascending=False)
+
+                lines.append("")
+                lines.append("【PE/PB四象限（风格归因）】")
+                for qname, qr in quad_stats.iterrows():
+                    lines.append(
+                        f"  {qname}: {int(qr['数量'])}只 "
+                        f"中位数{qr['涨幅中位数']:+.2f}%"
+                    )
+
+            # ── 10. 成交额分布（大额交易活跃度） ──
+            if "amount" in df_today.columns:
+                amounts = df_today["amount"].dropna() / 1e8  # 转为亿元
+                amt_median = amounts.median()
+                amt_total = amounts.sum()
+
+                amt_bins = [0, 0.1, 0.5, 1, 3, 5, 10, 50, float("inf")]
+                amt_labels = ["<0.1亿", "0.1~0.5", "0.5~1", "1~3", "3~5", "5~10", "10~50", ">50亿"]
+                amt_dist = pd.cut(amounts, bins=amt_bins, labels=amt_labels, right=False).value_counts()
+
+                lines.append("")
+                lines.append("【成交额分布】")
+                lines.append(f"全市场总成交: {amt_total:.0f}亿 | 中位数: {amt_median:.2f}亿")
+                for lbl in amt_labels:
+                    cnt = int(amt_dist.get(lbl, 0))
+                    pct = cnt / total * 100
+                    bar = "█" * min(cnt // 50, 15)
+                    lines.append(f"  {lbl:>8}: {cnt:>4d}只 ({pct:.1f}%) {bar}")
+
+                # 大单活跃度
+                big_amt = int((amounts > 5).sum())
+                lines.append(f"大额交易(>5亿): {big_amt}只 ({big_amt/total*100:.1f}%)")
 
             return lines
 
