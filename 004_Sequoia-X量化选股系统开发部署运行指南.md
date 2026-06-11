@@ -51,6 +51,7 @@
 │   ├── data/
 │   │   ├── __init__.py
 │   │   └── engine.py                # 数据引擎（baostock 回填/增量/基础池过滤）
+│   │   └── save_results.py          # 选股结果保存模块（供 WorkBuddy 自动化读取）
 │   ├── strategy/
 │   │   ├── __init__.py
 │   │   ├── base.py                  # BaseStrategy 抽象基类（含 _pick_top 排序）
@@ -64,13 +65,8 @@
 │   │   └── private_placement.py     # 定增公告监控策略
 │   ├── analysis/
 │   │   ├── __init__.py
-│   │   └── analyst.py               # LLM 多维度分析引擎（10大市场模块 + 三源数据采集）
+│   │   └── analyst.py               # LLM 多维度分析引擎（10大市场模块 + 知兔API/Sina/SQLite三源采集）
 │   ├── notify/
-│   │   ├── __init__.py
-│   │   └── wxpusher.py              # WxPusher 微信推送
-│   └── analysis/
-│       ├── __init__.py
-│       └── analyst.py               # LLM 多维度分析引擎（DeepSeek API + 实时数据）
 └── tests/                           # 属性测试（pytest + hypothesis）
     ├── __init__.py
     ├── test_config.py
@@ -99,24 +95,35 @@
   │     ├─ 剔除 最新收盘价<2元的低价股
   │     └─ 输出 ≈ 2,500~3,000 只
   │     ↓
-  ├─ 第3层：7个量化策略独立选股 + 打分（取每策略前5支）
+  ├─ 第3层：8个量化策略独立选股 + 打分（取每策略前5支）
   │     ├─ 均量线突破 — 放量倍数
   │     ├─ 海龟交易法则 — 流通市值
   │     ├─ 高紧旗形突破 — 动量倍数/收敛幅度
   │     ├─ 涨停洗盘 — 放量/跌幅比
   │     ├─ 上涨回调 — 放量倍×跌幅
   │     ├─ RPS动量突破 — RPS分数
+  │     ├─ 多周期RPS突破 — 综合信号评分（new!）
   │     └─ 定增公告监控 — 公告日期
   │     ↓
-  ├─ 第4层：MarketAnalyst 多维度 LLM 分析
-  │     ├─ akshare 采集大盘指数/板块资金流/个股行情
-  │     ├─ 东方财富股吧爬取实时散户讨论
-  │     ├─ akshare 采集个股新闻/基本面
-  │     ├─ 全部实时数据打包进 Prompt
-  │     └─ DeepSeek API 综合分析 → 输出最终推荐
+  ├─ 第4层：MarketAnalyst 多维度数据采集
+  │     ├─ 知兔API → 个股实时行情 + PE/PB/市值/60日涨幅
+  │     ├─ 新浪行情API → 大盘指数实时点位 + 个股行情兜底
+  │     ├─ 本地SQLite → 10大市场情绪模块 + PE/PB估值分布
+  │     ├─ 本地index_daily → 大盘指数趋势（5日/20日）
+  │     ├─ 东方财富公告API → 个股新闻公告
+  │     └─ 全部实时数据打包进 Prompt
   │     ↓
-  └─ 第5层：WxPusher 一次性推送最终研判报告
-        └─ 📱 微信收到一条综合研判消息
+  ├─ 第5层：DeepSeek LLM 综合研判
+  │     ↓
+  ├─ 第6层：保存选股结果到 data/results/results_YYYYMMDD.json
+  │     ↓
+  └─ 第7层：WxPusher 推送初版报告到微信
+              ↓
+       ┌──── 次日 07:30 (WorkBuddy 自动化) ────┐
+       │  SSH 读取结果 → 通达信MCP 深度查询    │
+       │  研报评级+资金流向+热点题材+财报        │
+       │  → 生成深度荐股报告 → WxPusher推送     │
+       └──────────────────────────────────────┘
 ```
 
 ### 2.2 三阶层选股架构（铁律）

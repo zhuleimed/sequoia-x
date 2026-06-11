@@ -84,7 +84,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 ### 时间线
 
 ```
-17:45  数据同步（--sync-only）
+17:45  数据同步（--sync-only）              ← 远程服务器无人值守
     ↓
 ├─ Phase 1: 股票列表同步（上市/退市检测）
 ├─ Phase 2: 增量日线同步（交易日判断 + 时间门控）
@@ -92,7 +92,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 ├─ Phase 4: 6大指数日线同步
 └─ 推送同步摘要到微信
 
-20:55  选股策略运行
+20:55  选股策略运行                        ← 远程服务器无人值守
     ↓
 ├─ 1. 检查数据完整性 → check_missing(days=5)
 │   ├─ 覆盖率 > 90% → ✅ 继续进行
@@ -100,8 +100,23 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 ├─ 2. 基础股票池过滤（~2950 只）
 ├─ 3. 8 策略独立选股 + 按分数取前 5
 ├─ 4. **DeepSeek LLM 综合研判**（基于10大市场模块 + 知兔API个股数据）
-├─ 5. WxPusher 推送到微信
+├─ 5. 保存选股结果到 data/results/results_YYYYMMDD.json
+├─ 6. WxPusher 推送到微信（初版）
 └─ 预计耗时 3~5 分钟
+
+───────────────────────────────────────── 次日 ─────────────────────────────────────────
+
+07:30  通达信深度分析                      ← WorkBuddy 自动化任务（需本地开机）
+    ↓
+├─ 1. SSH 读取昨夜选股结果 JSON
+├─ 2. 对每只候选股调用 通达信MCP 查询：
+│   ├─ 📝 研报评级一致预期
+│   ├─ 💰 资金流向（主力/超大单）
+│   ├─ 🔥 热点题材关联
+│   ├─ 📊 财务数据（利润表）
+│   └─ 🏛️ 公司基本信息
+├─ 3. DeepSeek 生成深度荐股分析报告
+└─ 4. WxPusher 推送详报到微信（深度版）
 ```
 
 ### 退市股与新股处理
@@ -240,7 +255,7 @@ ZHITU_TOKEN=your_zhitu_api_token_here
 10 19 * * 1-5 cd /path/to/Sequoia-X && /path/to/python main.py --sync-only >> logs/sync_$(date +\%Y\%m\%d).log 2>&1
 
 # ===== Sequoia-X 选股推送 (20:55) =====
-# 检查数据完整性 → 基础池过滤 → 7策略选股 → LLM研判 → 推送结论到微信
+# 检查数据完整性 → 基础池过滤 → 8策略选股 → LLM研判 → 保存结果 → 推送结论到微信
 55 20 * * 1-5 cd /path/to/Sequoia-X && /path/to/python main.py >> logs/daily_$(date +\%Y\%m\%d).log 2>&1
 ```
 
@@ -252,6 +267,7 @@ ZHITU_TOKEN=your_zhitu_api_token_here
 | 17:45 同步失败 | `run_full()` 异常 | 错误信息、股票数 | ⚠️ 数据同步失败 |
 | 20:55 选股正常 | 数据覆盖率 > 85% | **LLM 综合研判报告**（10大市场模块 + 知兔API个股行情/PE/PB/60日涨幅 + 公告新闻） | 📈 AI 选股研判 |
 | 20:55 数据不足 | 覆盖率 ≤ 85% | 覆盖率、有数据/总股票数、可能原因 | ❌ 选股已取消 |
+| 07:30 深度分析次日 | WorkBuddy 自动化任务 | **通达信MCP 深度荐股报告**（含研报/资金流/题材/财报） | 📊 Sequoia-X 深度分析 |
 
 ### 回填数据加速
 
@@ -285,7 +301,8 @@ Sequoia-X/
 │   │   ├── config.py            # Pydantic-settings 配置管理
 │   │   └── logger.py            # rich 结构化日志
 │   ├── data/
-│   │   └── engine.py            # 数据引擎（回填 + 增量同步 + 基础池）
+│   │   ├── engine.py            # 数据引擎（回填 + 增量同步 + 基础池）
+│   │   └── save_results.py      # 选股结果保存（供 WorkBuddy 自动化读取）
 │   ├── strategy/
 │   │   ├── base.py              # 策略抽象基类（含 _pick_top 排序）
 │   │   ├── turtle_trade.py      # 海龟交易策略
