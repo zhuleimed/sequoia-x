@@ -256,7 +256,14 @@ def main() -> None:
                 logger.info(f"{strategy_name} 无选股结果")
             strategies_results[strategy_name] = selected
 
-        # 6. LLM 多维度深度分析 → 唯一推送
+        # 6. 保存选股结果到文件（供 WorkBuddy 07:30 自动化读取）
+        try:
+            from sequoia_x.data.save_results import save_strategy_results
+            save_strategy_results(strategies_results)
+        except Exception as exc:
+            logger.warning(f"保存选股结果失败: {exc}")
+
+        # 7. LLM 多维度深度分析 → 唯一推送
         if not args.skip_llm and settings.deepseek_api_key:
             logger.info("开始 LLM 多维度深度分析...")
             try:
