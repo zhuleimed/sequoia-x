@@ -5,9 +5,10 @@
 
 数据源说明（2026-06-11 验证）：
   - ❌ 东方财富 akshare 系列接口已全面封禁（大盘/行情/板块资金流）
-  - ✅ 新浪行情 API → 大盘指数 + 个股实时行情
-  - ✅ 本地 SQLite (sequoia_v2.db) → peTTM、pbMRQ 等财务数据
+  - ✅ 知兔 API (zhituapi.com) → 个股实时行情含 PE/PB/市值/60日涨跌幅
+  - ✅ 新浪行情 API → 大盘指数实时行情
   - ✅ 本地 index_daily 表 → 大盘指数趋势（5日/20日涨跌幅）
+  - ✅ 本地 SQLite (sequoia_v2.db) → peTTM、pbMRQ 等财务数据（兜底）
   - ✅ baostock → 股票名称查询
   - ✅ 东方财富新闻公告 API（直连HTTP，不走 akshare）
   - ⚠️ 东方财富股吧 API 已变更接口地址，暂不可用
@@ -22,13 +23,29 @@ from typing import Optional
 import requests
 from bs4 import BeautifulSoup
 
-from sequoia_x.core.config import Settings
+from sequoia_x.core.config import get_settings, Settings
 from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 # 股票名称缓存（避免重复请求）
 _STOCK_NAME_CACHE: dict[str, str] = {}
+
+# 知兔 API 配置
+_ZHITU_BASE = "https://api.zhituapi.com"
+_ZHITU_TOKEN = ""  # 从 .env 加载
+
+
+def _get_zhitu_token() -> str:
+    """获取知兔 API token，优先从 .env 读取。"""
+    global _ZHITU_TOKEN
+    if not _ZHITU_TOKEN:
+        try:
+            settings = get_settings()
+            _ZHITU_TOKEN = getattr(settings, "zhitu_token", "")
+        except Exception:
+            _ZHITU_TOKEN = ""
+    return _ZHITU_TOKEN
 
 
 def _get_stock_name(code: str) -> str:
@@ -51,13 +68,63 @@ def _get_stock_name(code: str) -> str:
         return code
 
 
+def _fetch_zhitu_quotes(codes: list[str]) -> dict[str, dict]:
+    """批量查询知兔 API 个股实时行情（含 PE/PB/市值等）。
+
+    注意：知兔免费版不支持真正的批量查询，需逐只查询。
+
+    Returns:
+        {code: {price, chg_pct, turnover, pe, pb, market_cap, ...}} 的字典。
+    """
+    token = _get_zhitu_token()
+    if not token:
+        return {}
+
+    result: dict[str, dict] = {}
+    for code in codes:
+        try:
+            url = f"{_ZHITU_BASE}/hs/real/ssjy/{code}?token={token}"
+            resp = requests.get(url, timeout=8)
+            if resp.status_code != 200:
+                continue
+            d = resp.json()
+            if not d or "p" not in d:
+                continue
+
+            result[code] = {
+                "price": d.get("p"),
+                "chg_pct": d.get("pc"),         # 涨跌幅%
+                "chg": d.get("ud"),              # 涨跌额
+                "volume": d.get("v"),            # 成交量(万手)
+                "amount": d.get("cje"),          # 成交额(元)
+                "amplitude": d.get("zf"),        # 振幅%
+                "turnover": d.get("hs"),         # 换手率%
+                "pe": d.get("pe"),               # 市盈率
+                "pb": d.get("lb"),               # 市净率
+                "eps": d.get("fm"),              # 每股收益
+                "high": d.get("h"),
+                "low": d.get("l"),
+                "open": d.get("o"),
+                "prev_close": d.get("yc"),
+                "total_mv": d.get("sz"),         # 总市值
+                "float_mv": d.get("lt"),         # 流通市值
+                "chg_60d": d.get("zdf60"),       # 60日涨跌幅%
+                "chg_ytd": d.get("zdfnc"),       # 年初至今涨跌幅%
+            }
+        except Exception as e:
+            logger.debug(f"知兔行情查询失败 [{code}]: {e}")
+            continue
+
+    return result
+
+
 def _sina_quote_url() -> str:
     """生成新浪批量行情请求 URL，支持多只股票同时查询。"""
     return "https://hq.sinajs.cn/list={codes_str}"
 
 
 def _fetch_sina_quotes(codes: list[str]) -> dict[str, dict]:
-    """批量查询新浪实时行情。
+    """批量查询新浪实时行情（兜底方案，知兔 API 不可用时使用）。
 
     Args:
         codes: 股票代码列表，如 ["000001", "600519"]。
@@ -173,11 +240,12 @@ class MarketAnalyst:
     """LLM 驱动的多维度市场分析器（实时数据驱动）。
 
     数据源说明：
-    - 大盘指数：新浪行情 API（实时）+ 本地 index_daily 表（趋势 + PE）
-    - 个股行情：新浪行情 API（直连 HTTP）
-    - 个股财务：本地 SQLite 数据库（peTTM, pbMRQ 等已有字段）
+    - 大盘指数：新浪行情 API（实时点位）+ 本地 index_daily 表（趋势）
+    - 个股行情 + 财务：知兔 API（PE/PB/市值/60日涨幅，主数据源）
+    - 个股行情兜底：新浪行情 API
+    - 个股财务兜底：本地 SQLite（peTTM, pbMRQ）
     - 股票名称：baostock API
-    - 新闻公告：东方财富公告 API（直连 HTTP，不走 akshare）
+    - 新闻公告：东方财富公告 API（直连 HTTP）
     - 板块资金流：因东方财富封禁 akshare，暂时移除
     - 股吧舆情：接口已变更，暂时不可用
     """
@@ -197,11 +265,11 @@ class MarketAnalyst:
     def analyze(self, strategies_results: dict[str, list[str]]) -> str:
         """执行完整的多维分析。
 
-        1. 收集实时大盘/行情数据（新浪 API）
-        2. 对每只候选股收集实时行情 + 本地财务数据 + 新闻
+        1. 收集实时大盘/行情数据（新浪 API + 本地 index_daily）
+        2. 对每只候选股采集实时行情 + 财务数据（知兔 API 优先）
         3. 将全部实时数据作为 prompt 上下文 → LLM 分析
         """
-        logger.info("MarketAnalyst: 开始实时数据采集（新浪 API + SQLite）...")
+        logger.info("MarketAnalyst: 开始实时数据采集（知兔 API + 新浪 API + SQLite）...")
         t0 = time.time()
 
         # 1. 收集全局市场背景
@@ -241,8 +309,7 @@ class MarketAnalyst:
     def _fetch_local_index_trends(self) -> list[str]:
         """从本地 index_daily 表读取指数趋势数据。
 
-        计算各指数的今日涨跌幅、近5日涨跌幅、近20日涨跌幅，
-        以及最新 PE 估值（若有）。
+        计算各指数的今日涨跌幅、近5日涨跌幅、近20日涨跌幅。
 
         Returns:
             格式化的指数趋势字符串列表。
@@ -275,7 +342,7 @@ class MarketAnalyst:
                     latest = df.iloc[0]
                     day1_chg = latest["pctChg"]
 
-                    # 近5日涨跌幅（第0天 vs 第4天）
+                    # 近5日涨跌幅
                     if len(df) >= 5:
                         week_chg = (
                             (latest["close"] / df.iloc[4]["close"]) - 1
@@ -284,14 +351,13 @@ class MarketAnalyst:
                     else:
                         week_str = "N/A"
 
-                    # 近20日涨跌幅（第0天 vs 第19天，最多到最后一个）
+                    # 近20日涨跌幅
                     if len(df) >= 20:
                         month_chg = (
                             (latest["close"] / df.iloc[19]["close"]) - 1
                         ) * 100
                         month_str = f"{month_chg:+.2f}%"
                     else:
-                        # 用最早一个代替
                         month_chg = (
                             (latest["close"] / df.iloc[-1]["close"]) - 1
                         ) * 100
@@ -317,7 +383,7 @@ class MarketAnalyst:
 
         双源采集：
         1. 新浪行情 API → 今日实时点位和涨跌幅
-        2. 本地 index_daily 表 → 趋势（近5日/近20日）及 PE 估值
+        2. 本地 index_daily 表 → 趋势（近5日/近20日）
         """
         ctx = {
             "indices": [],
@@ -335,7 +401,7 @@ class MarketAnalyst:
         except Exception as e:
             ctx["errors"].append(f"新浪指数获取失败: {e}")
 
-        # ── 大盘指数趋势 + PE（本地 index_daily 表） ──
+        # ── 大盘指数趋势（本地 index_daily 表） ──
         try:
             trends = self._fetch_local_index_trends()
             ctx["index_trends"] = trends
@@ -358,9 +424,10 @@ class MarketAnalyst:
         """采集单只股票的行情、财务、新闻等数据。
 
         数据源优先级：
-        1. 新浪实时行情（交易时段）
-        2. 本地 SQLite 财务数据（peTTM, pbMRQ）
-        3. 东方财富新闻公告 API（直连 HTTP）
+        1. 知兔 API（实时行情 + PE/PB/市值 + 60日/年初至今涨幅）— 主数据源
+        2. 新浪行情 API（兜底）
+        3. 本地 SQLite（PE/PB 财务数据兜底）
+        4. 东方财富新闻公告 API（直连 HTTP）
         """
         detail = {
             "code": code,
@@ -371,66 +438,109 @@ class MarketAnalyst:
             "errors": [],
         }
 
-        # ── 实时行情（新浪 API，已测试可用） ──
+        has_zhitu = False
+
+        # ── 主数据源：知兔 API（含行情 + PE/PB/市值） ──
         try:
-            quotes = _fetch_sina_quotes([code])
+            quotes = _fetch_zhitu_quotes([code])
             if code in quotes:
                 q = quotes[code]
-                detail["realtime"] = (
-                    f"最新价:{q.get('price', '?')} "
-                    f"涨跌幅:{q.get('chg_pct', '?')}% "
-                    f"涨跌额:{q.get('chg', '?')} "
-                    f"最高:{q.get('high', '?')} "
-                    f"最低:{q.get('low', '?')} "
-                    f"换手率:{q.get('turnover', '?')}% "
-                    f"成交量:{q.get('volume', '?')}手 "
-                    f"成交额:{q.get('amount', '?')}元"
+                has_zhitu = True
+
+                # 实时行情部分
+                parts = [
+                    f"最新价:{q.get('price', '?')}",
+                    f"涨跌幅:{q.get('chg_pct', '?')}%",
+                    f"涨跌额:{q.get('chg', '?')}",
+                    f"换手率:{q.get('turnover', '?')}%",
+                    f"最高:{q.get('high', '?')}",
+                    f"最低:{q.get('low', '?')}",
+                ]
+                detail["realtime"] = " | ".join(parts)
+
+                # 财务/估值部分
+                fin_parts = []
+                if q.get("pe") is not None:
+                    fin_parts.append(f"PE:{q['pe']:.2f}")
+                if q.get("pb") is not None:
+                    fin_parts.append(f"PB:{q['pb']:.3f}")
+                if q.get("eps") is not None:
+                    fin_parts.append(f"每股收益:{q['eps']:.3f}元")
+                if q.get("total_mv"):
+                    mv = q["total_mv"]
+                    if mv > 1e8:
+                        fin_parts.append(f"总市值:{mv/1e8:.0f}亿")
+                    else:
+                        fin_parts.append(f"总市值:{mv:.0f}")
+                if q.get("float_mv"):
+                    fmv = q["float_mv"]
+                    if fmv > 1e8:
+                        fin_parts.append(f"流通市值:{fmv/1e8:.0f}亿")
+                if q.get("chg_60d") is not None:
+                    fin_parts.append(f"60日涨跌幅:{q['chg_60d']:+.2f}%")
+                if q.get("chg_ytd") is not None:
+                    fin_parts.append(f"年初至今:{q['chg_ytd']:+.2f}%")
+
+                if fin_parts:
+                    detail["fundamentals"] = " | ".join(fin_parts)
+        except Exception as e:
+            detail["errors"].append(f"知兔行情: {e}")
+
+        # ── 兜底：新浪行情（知兔不可用时） ──
+        if not has_zhitu:
+            try:
+                sina_quotes = _fetch_sina_quotes([code])
+                if code in sina_quotes:
+                    q = sina_quotes[code]
+                    detail["realtime"] = (
+                        f"最新价:{q.get('price', '?')} "
+                        f"涨跌幅:{q.get('chg_pct', '?')}% "
+                        f"涨跌额:{q.get('chg', '?')} "
+                        f"最高:{q.get('high', '?')} "
+                        f"最低:{q.get('low', '?')} "
+                        f"换手率:{q.get('turnover', '?')}% "
+                        f"成交量:{q.get('volume', '?')}手 "
+                        f"成交额:{q.get('amount', '?')}元"
+                    )
+            except Exception as e:
+                detail["errors"].append(f"新浪行情: {e}")
+
+        # ── 财务数据兜底：本地 SQLite（知兔未提供 PE/PB 时） ──
+        if not has_zhitu or not detail["fundamentals"]:
+            try:
+                import sqlite3
+                import pandas as pd
+
+                conn = sqlite3.connect(self.settings.db_path)
+                df = pd.read_sql(
+                    "SELECT date, close, pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM, "
+                    "volume, turnover, amount "
+                    "FROM stock_daily WHERE symbol = ? ORDER BY date DESC LIMIT 1",
+                    conn,
+                    params=(code,),
                 )
-        except Exception as e:
-            detail["errors"].append(f"新浪行情: {e}")
+                conn.close()
+                if not df.empty:
+                    r = df.iloc[0]
+                    info_parts = [f"日期:{r['date']}"]
+                    if pd.notna(r["close"]):
+                        info_parts.append(f"收盘价:{r['close']:.2f}")
+                    if pd.notna(r["pctChg"]):
+                        info_parts.append(f"涨跌幅:{r['pctChg']:+.2f}%")
+                    if pd.notna(r["peTTM"]):
+                        info_parts.append(f"PE(TTM):{r['peTTM']:.2f}")
+                    if pd.notna(r["pbMRQ"]):
+                        info_parts.append(f"PB(MRQ):{r['pbMRQ']:.3f}")
 
-        # ── 收盘后降级：从本地 SQLite 取最新日线财务数据 ──
-        try:
-            import sqlite3
-            import pandas as pd
+                    detail["fundamentals"] = " | ".join(info_parts)
 
-            conn = sqlite3.connect(self.settings.db_path)
-            df = pd.read_sql(
-                "SELECT date, close, pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM, "
-                "volume, turnover, amount "
-                "FROM stock_daily WHERE symbol = ? ORDER BY date DESC LIMIT 1",
-                conn,
-                params=(code,),
-            )
-            conn.close()
-            if not df.empty:
-                r = df.iloc[0]
-                # 构建基本面描述
-                info_parts = [f"日期:{r['date']}"]
-                if pd.notna(r["close"]):
-                    info_parts.append(f"收盘价:{r['close']:.2f}")
-                if pd.notna(r["pctChg"]):
-                    info_parts.append(f"涨跌幅:{r['pctChg']:+.2f}%")
-                if pd.notna(r["peTTM"]):
-                    info_parts.append(f"PE(TTM):{r['peTTM']:.2f}")
-                if pd.notna(r["pbMRQ"]):
-                    info_parts.append(f"PB(MRQ):{r['pbMRQ']:.3f}")
-                if pd.notna(r["psTTM"]):
-                    info_parts.append(f"PS(TTM):{r['psTTM']:.2f}")
-                if pd.notna(r["volume"]):
-                    info_parts.append(f"成交量:{r['volume']:.0f}手")
-                if pd.notna(r["turnover"]):
-                    info_parts.append(f"成交额:{r['turnover']:.2f}亿")
+                    # 如果实时行情也缺失，用本地数据顶替
+                    if not detail["realtime"]:
+                        detail["realtime"] = " | ".join(info_parts[:4])
+            except Exception as e:
+                detail["errors"].append(f"本地财务: {e}")
 
-                detail["fundamentals"] = " | ".join(info_parts)
-
-                # 如果实时行情尚未获取（非交易时段），使用本地数据
-                if not detail["realtime"]:
-                    detail["realtime"] = " | ".join(info_parts[:4])
-        except Exception as e:
-            detail["errors"].append(f"本地财务: {e}")
-
-        # ── 近期新闻公告（东方财富公告 API，不走 akshare，已测试可用） ──
+        # ── 近期新闻公告（东方财富公告 API，不走 akshare） ──
         try:
             news = self._fetch_news(code)
             detail["news_titles"] = news
@@ -496,7 +606,6 @@ class MarketAnalyst:
         else:
             market_lines.append("（数据暂缺）")
 
-        # ── 大盘趋势 + PE（本地历史数据） ──
         if market.get("index_trends"):
             market_lines.append("")
             market_lines.append("【大盘趋势（近5日/近20日涨跌幅）】")
@@ -515,7 +624,7 @@ class MarketAnalyst:
                 f"实时行情: {sd['realtime'] or '（非交易时段，见下方财务数据）'}"
             )
             stock_lines.append(
-                f"基本面/财务: {sd['fundamentals'] or '（暂缺）'}"
+                f"估值/财务: {sd['fundamentals'] or '（暂缺）'}"
             )
 
             # 新闻
@@ -538,7 +647,7 @@ class MarketAnalyst:
                 strategy_lines.append(f"▸ {sname}: {', '.join(names)}")
 
         # ── 完整 prompt ──
-        prompt = f"""你是一位经验丰富的 A 股市场分析师。以下是 {today_str} 的实时市场数据和候选股票信息，全部是实时采集的（来源：新浪行情 API + 本地数据库），请基于这些数据进行分析，**不要依赖你自己的训练知识**。
+        prompt = f"""你是一位经验丰富的 A 股市场分析师。以下是 {today_str} 的实时市场数据和候选股票信息，全部是实时采集的（来源：知兔 API + 新浪行情 API + 本地数据库），请基于这些数据进行分析，**不要依赖你自己的训练知识**。
 
 ## 📊 今日市场实时数据
 {" ".join(market_lines)}
@@ -552,8 +661,8 @@ class MarketAnalyst:
 ## 分析要求
 请对上述候选股票进行多维度综合分析，必须严格基于上面提供的实时数据：
 
-1. **大盘与板块环境** — 调用上面的大盘指数数据
-2. **实时行情与基本面** — 调用上面的行情/财务数据（PE/PB等）
+1. **大盘与板块环境** — 调用上面的大盘指数和趋势数据
+2. **实时行情与基本面** — 调用上面的行情/估值数据（PE/PB/60日涨幅等）
 3. **新闻公告** — 调用上面的公告标题，判断是否有重大事项
 4. **综合研判** — 综合所有数据，给出最终推荐
 
@@ -563,7 +672,7 @@ class MarketAnalyst:
 📊 Sequoia-X AI 综合研判 | {today_str}
 
 ### 📈 大盘环境
-[根据上面提供的实时指数数据，1-2句话总结]
+[根据上面提供的实时指数数据和趋势，1-2句话总结]
 
 ### 🔍 个股深度分析
 
@@ -571,7 +680,8 @@ class MarketAnalyst:
 - 综合评分: ⭐X.X/5
 - 核心逻辑: [一句话]
 - 实时行情分析: [引用上面的行情数据]
-- 基本面: [引用上面的财务数据]
+- 基本面与估值: [引用上面的 PE/PB/市值等数据]
+- 趋势分析: [引用上面的 60日/年初至今涨跌幅]
 - 新闻公告: [引用上面的公告标题]
 - 风险提示: [1-2个]
 

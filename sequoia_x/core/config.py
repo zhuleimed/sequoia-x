@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     ] = Field(default=["39277"])
     deepseek_api_key: str = ""  # DeepSeek API Key（可选）
     deepseek_model: str = "deepseek-v4-flash"
+    zhitu_token: str = ""  # 知兔 API Token（可选，用于个股行情及财务数据）
 
     model_config = SettingsConfigDict(
         env_file=".env",
