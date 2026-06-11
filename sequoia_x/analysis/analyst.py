@@ -380,31 +380,28 @@ class MarketAnalyst:
             return []
 
     def _fetch_market_breadth(self) -> list[str]:
-        """从本地 stock_daily 表计算市场情绪指标。
+        """从本地 stock_daily 表计算全面的市场情绪与结构指标。
 
-        利用全市场 5206 只股票的最新日线数据，计算：
-        - 涨跌比（上涨家数/下跌家数）
-        - 涨跌幅中位数
-        - 涨停家数（涨幅 >= 9.8%）
-        - 跌停家数（跌幅 <= -9.8%）
-        - 涨幅 > 3% 的强势股数量
-        - 跌幅 > 3% 的弱势股数量
-        - 成交量同比变化（估算）
-
-        全部基于本地数据，零网络依赖。
+        全部基于本地数据，零网络依赖。包含：
+        1. 基础情绪：涨跌比、中位数、涨停/跌停
+        2. 板块分层：按代码前缀统计各板块中位数涨幅
+        3. 成交量集中度：TOP10 股票成交占比
+        4. 涨跌幅分布：各涨跌幅区间的股票数量
+        5. 市场估值中位数：全市场 PE/PB 中位数
 
         Returns:
-            格式化的市场情绪字符串列表。
+            格式化的市场情绪与结构指标列表。
         """
         try:
             import sqlite3
             import pandas as pd
+            import numpy as np
 
             conn = sqlite3.connect(self.settings.db_path)
 
-            # 获取所有股票的最新两条日线数据
+            # 获取所有股票的最新日线数据
             df = pd.read_sql(
-                "SELECT symbol, date, close, pctChg, volume "
+                "SELECT symbol, date, close, pctChg, volume, peTTM, pbMRQ "
                 "FROM stock_daily "
                 "WHERE (symbol, date) IN ("
                 "  SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol"
@@ -418,51 +415,136 @@ class MarketAnalyst:
 
             latest_date = df["date"].max()
             df_today = df[df["date"] == latest_date].copy()
-
             if df_today.empty:
                 return []
 
             total = len(df_today)
             pct_chgs = df_today["pctChg"].dropna()
+            volumes = df_today["volume"].fillna(0)
 
+            lines = [f"统计日期: {latest_date}", f"样本总数: {total} 只"]
+
+            # ── 1. 基础市场情绪（原有，保留） ──
             up_count = int((pct_chgs > 0).sum())
             down_count = int((pct_chgs < 0).sum())
             flat_count = int((pct_chgs == 0).sum())
-
             median_chg = pct_chgs.median()
             mean_chg = pct_chgs.mean()
-
             limit_up = int((pct_chgs >= 9.8).sum())
             limit_down = int((pct_chgs <= -9.8).sum())
-
             strong_up = int((pct_chgs > 3).sum())
             strong_down = int((pct_chgs < -3).sum())
+            ad_ratio = f"{up_count / down_count:.2f}" if down_count > 0 else "∞"
 
-            # 涨跌比
-            ad_ratio = (
-                f"{up_count / down_count:.2f}" if down_count > 0 else "∞"
+            lines.append("")
+            lines.append("【基础情绪】")
+            lines.append(f"上涨/下跌/平盘: {up_count}/{down_count}/{flat_count}")
+            lines.append(f"涨跌比: {ad_ratio}")
+            lines.append(f"涨跌幅中位数: {median_chg:+.2f}% | 均值: {mean_chg:+.2f}%")
+            lines.append(f"涨停: {limit_up} | 跌停: {limit_down} | 强势(>3%): {strong_up} | 弱势(<-3%): {strong_down}")
+
+            # ── 2. 板块分层表现（按代码前缀） ──
+            def classify_board(symbol: str) -> str:
+                if symbol.startswith("688"):
+                    return "科创板(688)"
+                elif symbol.startswith("300") or symbol.startswith("301"):
+                    return "创业板(300)"
+                elif symbol.startswith("002"):
+                    return "中小板(002)"
+                elif symbol.startswith(("00", "001", "003")):
+                    return "深主板(00)"
+                elif symbol.startswith(("60", "603", "605")):
+                    return "沪主板(60)"
+                elif symbol.startswith("4") or symbol.startswith("8"):
+                    return "北交所(4/8)"
+                else:
+                    return "其他"
+
+            df_today["board"] = df_today["symbol"].apply(classify_board)
+            board_stats = (
+                df_today.groupby("board")["pctChg"]
+                .agg(["count", "median", lambda x: (x > 0).sum(), lambda x: (x < 0).sum()])
+                .rename(columns={"<lambda_0>": "上涨", "<lambda_1>": "下跌"})
+            )
+            board_stats["涨跌比"] = np.where(
+                board_stats["下跌"] > 0,
+                (board_stats["上涨"] / board_stats["下跌"]).round(2),
+                "∞"
             )
 
-            # 成交量同比（取有昨日数据的样本）
-            vol_series = df_today["volume"].dropna()
-            vol_median = vol_series.median() if not vol_series.empty else 0
-            vol_total = vol_series.sum() if not vol_series.empty else 0
+            lines.append("")
+            lines.append("【板块分层表现（按代码前缀）】")
+            for board_name in ["沪主板(60)", "深主板(00)", "中小板(002)", "创业板(300)", "科创板(688)"]:
+                if board_name in board_stats.index:
+                    r = board_stats.loc[board_name]
+                    lines.append(
+                        f"  {board_name}: {int(r['count'])}只 "
+                        f"中位数{r['median']:+.2f}% "
+                        f"涨跌比{r['涨跌比']}"
+                    )
 
-            lines = [
-                f"统计日期: {latest_date}",
-                f"样本总数: {total} 只",
-                f"上涨/下跌/平盘: {up_count}/{down_count}/{flat_count}",
-                f"涨跌比: {ad_ratio}",
-                f"涨跌幅中位数: {median_chg:+.2f}%",
-                f"涨跌幅均值: {mean_chg:+.2f}%",
-                f"涨停: {limit_up} 只 | 跌停: {limit_down} 只",
-                f"强势(>3%): {strong_up} 只 | 弱势(<-3%): {strong_down} 只",
-            ]
+            # ── 3. 成交量集中度 ──
+            vol_sorted = volumes.sort_values(ascending=False)
+            vol_total = vol_sorted.sum()
+            if vol_total > 0:
+                top5_pct = vol_sorted.head(5).sum() / vol_total * 100
+                top10_pct = vol_sorted.head(10).sum() / vol_total * 100
+                top50_pct = vol_sorted.head(50).sum() / vol_total * 100
 
-            if vol_median > 0:
-                lines.append(
-                    f"全市场总成交: {vol_total/1e6:.0f}亿"
-                )
+                lines.append("")
+                lines.append("【成交量集中度】")
+                lines.append(f"TOP5 成交占比: {top5_pct:.1f}%")
+                lines.append(f"TOP10 成交占比: {top10_pct:.1f}%")
+                lines.append(f"TOP50 成交占比: {top50_pct:.1f}%")
+
+                # 集中度判断
+                if top10_pct > 30:
+                    lines.append("  → 高度集中（少数股票主导，警惕流动性风险）")
+                elif top10_pct > 20:
+                    lines.append("  → 中度集中（行情分化，关注龙头）")
+                else:
+                    lines.append("  → 较为分散（普涨/普跌格局）")
+
+                lines.append(f"全市场总成交: {vol_total/1e6:.0f}亿手")
+
+            # ── 4. 涨跌幅分布 ──
+            bins = [-float("inf"), -9.8, -5, -3, -1, 0, 1, 3, 5, 9.8, float("inf")]
+            labels = ["跌停", "-5~-9.8%", "-3~-5%", "-1~-3%", "-1~0%", "0~1%", "1~3%", "3~5%", "5~9.8%", "涨停"]
+            df_today["bucket"] = pd.cut(pct_chgs, bins=bins, labels=labels, right=False)
+            dist = df_today["bucket"].value_counts()
+
+            lines.append("")
+            lines.append("【涨跌幅分布】")
+            for lbl in labels:
+                cnt = int(dist.get(lbl, 0))
+                bar = "█" * min(cnt // 30, 30)
+                lines.append(f"  {lbl:>8}: {cnt:>4d}只 {bar}")
+
+            # ── 5. 市场估值中位数 ──
+            pe_vals = df_today["peTTM"].dropna()
+            pb_vals = df_today["pbMRQ"].dropna()
+
+            # 过滤极端值
+            pe_sane = pe_vals[(pe_vals > 0) & (pe_vals < 500)]
+            pb_sane = pb_vals[(pb_vals > 0) & (pb_vals < 50)]
+
+            lines.append("")
+            lines.append("【市场估值中位数】")
+            if not pe_sane.empty:
+                lines.append(f"  PE(TTM)中位数: {pe_sane.median():.1f} "
+                             f"(正数样本{len(pe_sane)}只)")
+            if not pb_sane.empty:
+                lines.append(f"  PB(MRQ)中位数: {pb_sane.median():.2f} "
+                             f"(正数样本{len(pb_sane)}只)")
+
+            # PE 区间分布
+            pe_bins = [0, 10, 20, 30, 50, 100, 500]
+            pe_labels = ["<10", "10~20", "20~30", "30~50", "50~100", ">100"]
+            pe_dist = pd.cut(pe_sane, bins=pe_bins, labels=pe_labels, right=False).value_counts()
+            lines.append("  PE分布: " + " | ".join(
+                f"{lbl}:{int(pe_dist.get(lbl,0))}只" for lbl in pe_labels
+            ))
+
             return lines
 
         except Exception as e:
