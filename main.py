@@ -31,6 +31,7 @@ from sequoia_x.strategy.ma_volume import MaVolumeStrategy
 from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
 from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
 from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
+from sequoia_x.strategy.rps_multi_period import RpsMultiPeriodStrategy
 from sequoia_x.strategy.private_placement import PrivatePlacementStrategy
 from sequoia_x.analysis.analyst import MarketAnalyst
 
@@ -234,6 +235,7 @@ def main() -> None:
             LimitUpShakeoutStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             UptrendLimitDownStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             RpsBreakoutStrategy(engine=engine, settings=settings, stock_pool=base_pool),
+            RpsMultiPeriodStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             PrivatePlacementStrategy(engine=engine, settings=settings, stock_pool=base_pool),
         ]
 

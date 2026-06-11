@@ -98,7 +98,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 │   ├─ 覆盖率 > 90% → ✅ 继续进行
 │   └─ 覆盖率 ≤ 90% → ❌ 推送告警，跳过选股
 ├─ 2. 基础股票池过滤（~2800 只）
-├─ 3. 7 策略独立选股 + 按分数取前 5
+├─ 3. 8 策略独立选股 + 按分数取前 5
 ├─ 4. DeepSeek LLM 综合研判
 ├─ 5. WxPusher 推送到微信
 └─ 预计耗时 3~5 分钟
@@ -141,6 +141,7 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 | **LimitUpShakeoutStrategy** | 涨停洗盘 | **放量/跌幅比**（洗盘充分度） |
 | **UptrendLimitDownStrategy** | 上涨回调 | **放量倍 × 跌幅**（错杀反弹潜力） |
 | **RpsBreakoutStrategy** | RPS动量突破 | **RPS分数**（全市场动量百分位） |
+| **RpsMultiPeriodStrategy** | 多周期RPS突破 | **综合信号评分**（三周期RPS加权+形态加分） |
 | **PrivatePlacementStrategy** | 定增公告监控 | **公告日期**（最新优先） |
 
 ---
@@ -187,7 +188,7 @@ python main.py --backfill
 python main.py
 ```
 
-日常模式自动完成：增量补数据 → 获取基础股票池 → 7 策略选股 → WxPusher 微信推送。
+日常模式自动完成：增量补数据 → 获取基础股票池 → 8 策略选股 → WxPusher 微信推送。
 
 ---
 
@@ -289,6 +290,7 @@ Sequoia-X/
 │   │   ├── limit_up_shakeout.py # 涨停洗盘策略
 │   │   ├── uptrend_limit_down.py# 上升跌停策略
 │   │   ├── rps_breakout.py      # RPS 突破策略
+│   │   ├── rps_multi_period.py  # 多周期RPS突破策略
 │   │   └── private_placement.py # 定增公告监控
 │   └── notify/
 │       └── wxpusher.py          # WxPusher 微信推送
