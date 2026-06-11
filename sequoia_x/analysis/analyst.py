@@ -241,6 +241,7 @@ class MarketAnalyst:
 
     数据源说明：
     - 大盘指数：新浪行情 API（实时点位）+ 本地 index_daily 表（趋势）
+    - 市场情绪：本地 stock_daily 表（涨跌比/中位数/涨停家数）
     - 个股行情 + 财务：知兔 API（PE/PB/市值/60日涨幅，主数据源）
     - 个股行情兜底：新浪行情 API
     - 个股财务兜底：本地 SQLite（peTTM, pbMRQ）
@@ -265,11 +266,11 @@ class MarketAnalyst:
     def analyze(self, strategies_results: dict[str, list[str]]) -> str:
         """执行完整的多维分析。
 
-        1. 收集实时大盘/行情数据（新浪 API + 本地 index_daily）
+        1. 收集大盘指数 + 市场情绪数据
         2. 对每只候选股采集实时行情 + 财务数据（知兔 API 优先）
         3. 将全部实时数据作为 prompt 上下文 → LLM 分析
         """
-        logger.info("MarketAnalyst: 开始实时数据采集（知兔 API + 新浪 API + SQLite）...")
+        logger.info("MarketAnalyst: 开始实时数据采集（知兔 API + 大盘情绪 + SQLite）...")
         t0 = time.time()
 
         # 1. 收集全局市场背景
@@ -378,6 +379,96 @@ class MarketAnalyst:
             logger.debug(f"本地指数趋势读取失败: {e}")
             return []
 
+    def _fetch_market_breadth(self) -> list[str]:
+        """从本地 stock_daily 表计算市场情绪指标。
+
+        利用全市场 5206 只股票的最新日线数据，计算：
+        - 涨跌比（上涨家数/下跌家数）
+        - 涨跌幅中位数
+        - 涨停家数（涨幅 >= 9.8%）
+        - 跌停家数（跌幅 <= -9.8%）
+        - 涨幅 > 3% 的强势股数量
+        - 跌幅 > 3% 的弱势股数量
+        - 成交量同比变化（估算）
+
+        全部基于本地数据，零网络依赖。
+
+        Returns:
+            格式化的市场情绪字符串列表。
+        """
+        try:
+            import sqlite3
+            import pandas as pd
+
+            conn = sqlite3.connect(self.settings.db_path)
+
+            # 获取所有股票的最新两条日线数据
+            df = pd.read_sql(
+                "SELECT symbol, date, close, pctChg, volume "
+                "FROM stock_daily "
+                "WHERE (symbol, date) IN ("
+                "  SELECT symbol, MAX(date) FROM stock_daily GROUP BY symbol"
+                ")",
+                conn,
+            )
+            conn.close()
+
+            if df.empty:
+                return []
+
+            latest_date = df["date"].max()
+            df_today = df[df["date"] == latest_date].copy()
+
+            if df_today.empty:
+                return []
+
+            total = len(df_today)
+            pct_chgs = df_today["pctChg"].dropna()
+
+            up_count = int((pct_chgs > 0).sum())
+            down_count = int((pct_chgs < 0).sum())
+            flat_count = int((pct_chgs == 0).sum())
+
+            median_chg = pct_chgs.median()
+            mean_chg = pct_chgs.mean()
+
+            limit_up = int((pct_chgs >= 9.8).sum())
+            limit_down = int((pct_chgs <= -9.8).sum())
+
+            strong_up = int((pct_chgs > 3).sum())
+            strong_down = int((pct_chgs < -3).sum())
+
+            # 涨跌比
+            ad_ratio = (
+                f"{up_count / down_count:.2f}" if down_count > 0 else "∞"
+            )
+
+            # 成交量同比（取有昨日数据的样本）
+            vol_series = df_today["volume"].dropna()
+            vol_median = vol_series.median() if not vol_series.empty else 0
+            vol_total = vol_series.sum() if not vol_series.empty else 0
+
+            lines = [
+                f"统计日期: {latest_date}",
+                f"样本总数: {total} 只",
+                f"上涨/下跌/平盘: {up_count}/{down_count}/{flat_count}",
+                f"涨跌比: {ad_ratio}",
+                f"涨跌幅中位数: {median_chg:+.2f}%",
+                f"涨跌幅均值: {mean_chg:+.2f}%",
+                f"涨停: {limit_up} 只 | 跌停: {limit_down} 只",
+                f"强势(>3%): {strong_up} 只 | 弱势(<-3%): {strong_down} 只",
+            ]
+
+            if vol_median > 0:
+                lines.append(
+                    f"全市场总成交: {vol_total/1e6:.0f}亿"
+                )
+            return lines
+
+        except Exception as e:
+            logger.debug(f"市场情绪数据读取失败: {e}")
+            return []
+
     def _gather_market_context(self) -> dict:
         """采集大盘指数行情等实时数据。
 
@@ -388,6 +479,7 @@ class MarketAnalyst:
         ctx = {
             "indices": [],
             "index_trends": [],
+            "market_breadth": [],
             "global_markets": [],
             "errors": [],
         }
@@ -407,6 +499,13 @@ class MarketAnalyst:
             ctx["index_trends"] = trends
         except Exception as e:
             ctx["errors"].append(f"本地指数趋势获取失败: {e}")
+
+        # ── 市场情绪数据（本地 stock_daily 表，零网络依赖） ──
+        try:
+            breadth = self._fetch_market_breadth()
+            ctx["market_breadth"] = breadth
+        except Exception as e:
+            ctx["errors"].append(f"市场情绪获取失败: {e}")
 
         # ── 外盘（通过新浪获取） ──
         try:
@@ -611,6 +710,11 @@ class MarketAnalyst:
             market_lines.append("【大盘趋势（近5日/近20日涨跌幅）】")
             market_lines.extend(market["index_trends"])
 
+        if market.get("market_breadth"):
+            market_lines.append("")
+            market_lines.append("【市场情绪（全市场统计）】")
+            market_lines.extend(market["market_breadth"])
+
         if market.get("global_markets"):
             market_lines.append("")
             market_lines.append("【外盘行情】")
@@ -661,7 +765,7 @@ class MarketAnalyst:
 ## 分析要求
 请对上述候选股票进行多维度综合分析，必须严格基于上面提供的实时数据：
 
-1. **大盘与板块环境** — 调用上面的大盘指数和趋势数据
+1. **大盘与市场情绪** — 调用上面的指数数据、趋势和全市场涨跌比
 2. **实时行情与基本面** — 调用上面的行情/估值数据（PE/PB/60日涨幅等）
 3. **新闻公告** — 调用上面的公告标题，判断是否有重大事项
 4. **综合研判** — 综合所有数据，给出最终推荐
