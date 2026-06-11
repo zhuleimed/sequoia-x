@@ -97,9 +97,9 @@ Phase 4: sync_index_daily()      → 6大指数日线（stock_daily 隔离存储
 ├─ 1. 检查数据完整性 → check_missing(days=5)
 │   ├─ 覆盖率 > 90% → ✅ 继续进行
 │   └─ 覆盖率 ≤ 90% → ❌ 推送告警，跳过选股
-├─ 2. 基础股票池过滤（~2800 只）
+├─ 2. 基础股票池过滤（~2950 只）
 ├─ 3. 8 策略独立选股 + 按分数取前 5
-├─ 4. DeepSeek LLM 综合研判
+├─ 4. **DeepSeek LLM 综合研判**（基于10大市场模块 + 知兔API个股数据）
 ├─ 5. WxPusher 推送到微信
 └─ 预计耗时 3~5 分钟
 ```
@@ -194,7 +194,7 @@ python main.py
 
 ## 🔔 推送配置（WxPusher）
 
-本项目使用 [WxPusher](https://wxpusher.zjiecode.com) 替代原飞书推送，将选股结果推送至微信。
+本项目使用 [WxPusher](https://wxpusher.zjiecode.com) 将选股结果推送至微信。
 
 ### 获取 WxPusher Token
 
@@ -209,6 +209,10 @@ python main.py
 # .env
 WXPUSHER_TOKEN=AT_xxxxxxxxxxxxxxxxxxxxxxxx
 WXPUSHER_TOPIC_IDS=["39277"]
+
+# 知兔 API（可选，用于个股实时行情含PE/PB/市值/60日涨幅）
+# 申请地址：https://www.zhituapi.com/gettoken.html
+ZHITU_TOKEN=your_zhitu_api_token_here
 ```
 
 ### 消息示例
@@ -246,7 +250,7 @@ WXPUSHER_TOPIC_IDS=["39277"]
 |:---:|---------|---------|:----:|
 | 17:45 同步成功 | `run_full()` 正常返回 | 股票数、退市清理数、新股发现数、补填天数、耗时 | 📊 数据同步完成 |
 | 17:45 同步失败 | `run_full()` 异常 | 错误信息、股票数 | ⚠️ 数据同步失败 |
-| 20:55 选股正常 | 数据覆盖率 > 85% | LLM 综合研判报告（含大盘/个股/财务/舆情分析） | 📈 AI 选股研判 |
+| 20:55 选股正常 | 数据覆盖率 > 85% | **LLM 综合研判报告**（10大市场模块 + 知兔API个股行情/PE/PB/60日涨幅 + 公告新闻） | 📈 AI 选股研判 |
 | 20:55 数据不足 | 覆盖率 ≤ 85% | 覆盖率、有数据/总股票数、可能原因 | ❌ 选股已取消 |
 
 ### 回填数据加速
@@ -292,6 +296,8 @@ Sequoia-X/
 │   │   ├── rps_breakout.py      # RPS 突破策略
 │   │   ├── rps_multi_period.py  # 多周期RPS突破策略
 │   │   └── private_placement.py # 定增公告监控
+│   ├── analysis/
+│   │   └── analyst.py           # LLM 分析引擎（10大市场模块 + 知兔API/Sina/SQLite三源采集）
 │   └── notify/
 │       └── wxpusher.py          # WxPusher 微信推送
 └── tests/                       # 属性测试（pytest + hypothesis）

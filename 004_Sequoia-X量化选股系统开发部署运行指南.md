@@ -21,6 +21,7 @@
 | WxPusher Token | `AT_hKGG0UfwrCP7bpcsO8cbQkrc4bZ9G3RX` |
 | WxPusher Topic ID | `39277` |
 | DeepSeek API Key | `sk-abb7f3b79c0c4f868156cdf92f45e141` |
+| 知兔API Token | `2C0E4763-3F63-4174-9CE1-806A10D58FC3` |
 | 定时执行 | 交易日 20:55（服务器 cron） |
 | 监控报告 | 交易日 21:15（WorkBuddy 自动化） |
 
@@ -33,7 +34,7 @@
 ├── main.py                          # 主入口（argparse 分发日常/回填模式）
 ├── pyproject.toml                   # 依赖声明 + ruff/pytest 配置
 ├── uv.lock                          # uv 锁定依赖版本
-├── .env                             # 环境变量（WxPusher Token, DeepSeek Key）
+├── .env                             # 环境变量（WxPusher Token, DeepSeek Key, 知兔Token）
 ├── .env.example                     # 环境变量模板
 ├── .gitignore                       # Git 忽略规则
 ├── README.md                        # GitHub 页面 README
@@ -61,6 +62,9 @@
 │   │   ├── rps_breakout.py          # RPS动量突破策略
 │   │   ├── rps_multi_period.py      # 多周期RPS突破策略
 │   │   └── private_placement.py     # 定增公告监控策略
+│   ├── analysis/
+│   │   ├── __init__.py
+│   │   └── analyst.py               # LLM 多维度分析引擎（10大市场模块 + 三源数据采集）
 │   ├── notify/
 │   │   ├── __init__.py
 │   │   └── wxpusher.py              # WxPusher 微信推送
