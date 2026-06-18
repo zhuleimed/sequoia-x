@@ -266,9 +266,13 @@ class DataSync:
     # ── 交易日历 ──
 
     def is_trade_day(self, check_date: date | None = None) -> bool:
-        """通过 baostock query_trade_dates 判断指定日期是否为交易日。
+        """判断指定日期是否为 A 股交易日。
 
-        采用 fail-open 策略：任何异常或 API 失败时假定为交易日，避免漏同步。
+        判断策略（三层）：
+        1. 周末过滤 — 周六/周日一定不开盘（最快路径）
+        2. baostock query_trade_dates — 在线时精确判断（含节假日）
+        3. chinese_calendar 离线库 — baostock 不可用时回退
+        4. fail-open — 以上均失败时假定为交易日，避免漏数据
 
         Args:
             check_date: 待检查日期，默认当天。
@@ -280,28 +284,41 @@ class DataSync:
             check_date = date.today()
         date_str: str = check_date.strftime("%Y-%m-%d")
 
-        if not self._bs_login():
-            logger.warning("is_trade_day: baostock 登录失败，假定为交易日")
-            return True
+        # 第1层：周末一定不开盘
+        if check_date.weekday() >= 5:  # 5=周六, 6=周日
+            logger.info(f"is_trade_day: {date_str} 是周末，非交易日")
+            return False
 
-        import baostock as bs
+        # 第2层：baostock 在线精确判断
+        if self._bs_login():
+            import baostock as bs
+            try:
+                rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
+                if rs.error_code == "0":
+                    data = self._bs_get_data(rs)
+                    if data is not None and not data.empty:
+                        is_trading = data["is_trading_day"].iloc[0]
+                        return is_trading == "1"
+            except Exception as e:
+                logger.debug(f"is_trade_day: baostock 查询异常 {e}，尝试离线判断")
+
+        # 第3层：chinese_calendar 离线节假日判断
         try:
-            rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
-            if rs.error_code != "0":
-                logger.warning(
-                    f"is_trade_day: query_trade_dates 返回错误 "
-                    f"code={rs.error_code}，假定为交易日"
-                )
-                return True
-            data = self._bs_get_data(rs)
-            if data.empty:
-                logger.warning("is_trade_day: 查询结果为空，假定为交易日")
-                return True
-            is_trading = data["is_trading_day"].iloc[0]
-            return is_trading == "1"
+            from chinese_calendar import is_workday
+            result = is_workday(check_date)
+            if result:
+                logger.info(f"is_trade_day: {date_str} chinese_calendar 判断为工作日")
+            else:
+                logger.info(f"is_trade_day: {date_str} chinese_calendar 判断为节假日")
+            return result
+        except ImportError:
+            logger.debug("is_trade_day: chinese_calendar 未安装")
         except Exception as e:
-            logger.warning(f"is_trade_day 异常: {e}，假定为交易日")
-            return True
+            logger.debug(f"is_trade_day: chinese_calendar 异常 {e}")
+
+        # 第4层：fail-open，假定为交易日
+        logger.warning(f"is_trade_day: {date_str} 所有数据源均不可用，假定为交易日")
+        return True
 
     # ── 股票列表同步 ──
 
