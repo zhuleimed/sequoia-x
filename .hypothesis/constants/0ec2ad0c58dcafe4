@@ -1,0 +1,4 @@
+# file: G:\中心同步盘_20251027\文档\学习\001_量化平台\013_sequoia-x\sequoia_x\data\engine.py
+# hypothesis_version: 6.155.2
+
+[200, 500, '%Y-%m-%d', '.', '0', '1', '6', '9', 'amount', 'append', 'close', 'coerce', 'd', 'date', 'high', 'low', 'multi', 'open', 'sh', 'stock_daily', 'symbol', 'sz', 'turnover', 'volume', '所有股票已是最新，无需更新', '无新数据（可能非交易日）', '重连失败，终止回填']
