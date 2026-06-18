@@ -281,7 +281,8 @@ python -u fill_extra_fields.py     # 补全扩展字段(一次性)
 | 2026-06-08 | v1.0~v1.4 | 初始部署、WxPusher集成、7策略、LLM分析 |
 | **2026-06-10** | **v2.0** | **重大重构**：数据同步模块独立为 DataSync 类；修复 start<today_str Bug；get_active_stocks 增加 type/status 过滤；连续错误阈值 50→10；_write_to_db 保留停牌数据、空值前向填充；新增 fill_extra_fields.py |
 | **2026-06-12** | **v2.1** | 同步时间 17:45→18:10；请求间隔 0.05s→0.15s；重连逻辑增强(5次指数退避)；cron %转义修复；TencentSource 双轨初步集成 |
-| **2026-06-18** | **v2.2** | **全面双轨化**：Phase 3 repair_missing 新增 Tencent 回退；Phase 4 新增 baostock 健康检查(跳过不卡死)；Phase 5 sync_index_daily 新增 Tencent 回退；日志降级(每只→DEBUG) + 进度日志(每30s)；SQLite PRAGMA 优化(WAL+NORMAL)；停牌数据填充逻辑完善；cron 分拆为同步(18:10)和选股(19:00) |
+| **2026-06-18** | **v2.2** | **全面双轨化** |
+| **2026-06-18** | **v2.3** | **is_trade_day三层判断：周末过滤→baostock→chinese_calendar+fail-open** |**：Phase 3 repair_missing 新增 Tencent 回退；Phase 4 新增 baostock 健康检查(跳过不卡死)；Phase 5 sync_index_daily 新增 Tencent 回退；日志降级(每只→DEBUG) + 进度日志(每30s)；SQLite PRAGMA 优化(WAL+NORMAL)；停牌数据填充逻辑完善；cron 分拆为同步(18:10)和选股(19:00) |
 
 ---
 
