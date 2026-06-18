@@ -627,7 +627,7 @@ class DataSync:
         # baostock 是否可用的标记（首次失败后跳过，直接走 Tencent）
         baostock_available: bool = True
         skip_baostock_count: int = 0
-        skip_baostock_retry_threshold: int = 50  # 跳过50次后再试一次 baostock
+        skip_baostock_retry_threshold: int = 500  # 跳过500次后再试一次 baostock（baostock不稳定时避免频繁重试拖慢Tencent）
 
         def _log_batch_progress(current_idx: int) -> None:
             nonlocal batch_start_time, batch_start_count
