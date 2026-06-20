@@ -550,6 +550,21 @@ class DataSync:
             if not symbols:
                 symbols = self.engine.get_all_symbols()
 
+            # 补充 stock_list 中有但尚未拉取过数据的股票（新股）
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    listed = conn.execute(
+                        "SELECT symbol FROM stock_list WHERE delisted_date IS NULL"
+                    ).fetchall()
+                listed_syms = set(s[0] for s in listed)
+                existing = set(symbols)
+                new_syms = sorted(listed_syms - existing)
+                if new_syms:
+                    symbols.extend(new_syms)
+                    logger.info(f"sync_daily: 补充 {len(new_syms)} 只新股: {' '.join(new_syms[:10])}{'...' if len(new_syms) > 10 else ''}")
+            except Exception as e:
+                logger.debug(f"sync_daily: 查询 stock_list 补充新股失败: {e}")
+
             # 获取每个 symbol 的最新日期（Bug 修复 #1：作用域统一在块开头）
             last_dates: dict[str, str] = self._get_local_last_dates()
 
@@ -576,6 +591,21 @@ class DataSync:
             symbols = self.engine.get_local_symbols()
             if not symbols:
                 symbols = self.engine.get_all_symbols()
+
+            # 补充 stock_list 中有但尚未拉取过数据的股票（新股）
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    listed = conn.execute(
+                        "SELECT symbol FROM stock_list WHERE delisted_date IS NULL"
+                    ).fetchall()
+                listed_syms = set(s[0] for s in listed)
+                existing = set(symbols)
+                new_syms = sorted(listed_syms - existing)
+                if new_syms:
+                    symbols.extend(new_syms)
+                    logger.info(f"sync_daily force: 补充 {len(new_syms)} 只新股: {' '.join(new_syms[:10])}{'...' if len(new_syms) > 10 else ''}")
+            except Exception as e:
+                logger.debug(f"sync_daily force: 查询 stock_list 补充新股失败: {e}")
             last_dates = self._get_local_last_dates()
             symbol_starts = {}
             for sym in symbols:
