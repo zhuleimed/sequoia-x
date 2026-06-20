@@ -171,7 +171,7 @@ def main() -> None:
             return
 
         # ═══════════════════════════════════════════════
-        #  日常模式（20:55 执行）
+        #  日常模式（19:00 执行）
         # ═══════════════════════════════════════════════
         logger.info("=== 日常模式 ===")
 
@@ -345,7 +345,7 @@ def _push_data_alert(
     Args:
         settings: 配置对象
         completeness: check_data_completeness() 返回的字典
-        mode: "strategy"（20:55 选股前检查失败）或 "sync"（19:10 同步失败）
+        mode: "strategy"（19:00 选股前检查失败）或 "sync"（19:10 同步失败）
     """
     from wxpusher import WxPusher
     from sequoia_x.core.logger import get_logger
@@ -416,7 +416,7 @@ def _push_sync_summary(settings, result: dict, elapsed: float) -> None:
         f"缺失补填: {result["backfilled"]} 条\n"
         f"最新日期: {result['latest_date']}\n"
         f"耗时: {elapsed:.0f} 秒\n\n"
-        f"20:55 将自动执行选股流程"
+        f"19:00 将自动执行选股流程"
     )
 
     try:

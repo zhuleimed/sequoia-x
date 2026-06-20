@@ -112,6 +112,8 @@ class DataSync:
     def _open_db(self) -> None:
         """打开持久化 SQLite 连接（批量写入优化）。"""
         self._db_conn = sqlite3.connect(self.db_path)
+        self._db_conn.execute("PRAGMA journal_mode=WAL")
+        self._db_conn.execute("PRAGMA synchronous=NORMAL")
         self._batch_buffer: list[dict] = []
 
     def _close_db(self) -> None:
@@ -223,8 +225,6 @@ class DataSync:
                 records,
             )
             self._db_conn.commit()
-
-        return count
 
         logger.info(f"_write_to_db: 写入 {count} 条记录（{df['date'].nunique()} 个日期）")
         return count
@@ -735,10 +735,10 @@ class DataSync:
                                     logger.info(f"sync_daily: baostock 返回错误 {bs_rs.error_code}，切换 Tencent")
                         except Exception as bs_e:
                             logger.debug(f"sync_daily {sym}: baostock exception {bs_e}")
-                        if baostock_available:
-                            baostock_available = False
-                            skip_baostock_count = 0
-                            logger.info("sync_daily: baostock 不可用，切换到 Tencent 直连模式")
+                            if baostock_available:
+                                baostock_available = False
+                                skip_baostock_count = 0
+                                logger.info("sync_daily: baostock 异常，切换到 Tencent 直连模式")
 
                     # ===== baostock 跳过或失败，尝试 Tencent =====
                     if data is None:
@@ -840,12 +840,12 @@ class DataSync:
         诊断逻辑：
         1. 通过 _get_local_last_dates 获取各 symbol 最新日期
         2. 找到全局 latest_date（所有 symbol 中最新的日期）
-        3. 从 latest_date 往前推 days 个日历日作为检查区间
+        3. 从 latest_date 往前推 days*2 个日历日作为检查区间（确保覆盖 N 个交易日）
         4. 用 baostock query_trade_dates 获取区间内的理论交易日列表
         5. 对每个 symbol，查询其在交易日列表中的实际覆盖，标记缺失
 
         Args:
-            days: 检查最近多少天（默认 5）。
+            days: 检查最近多少个交易日（默认 5）。
 
         Returns:
             dict:
@@ -870,7 +870,8 @@ class DataSync:
         all_dates: list[str] = list(last_dates.values())
         latest_date: str = max(all_dates)
         dt_latest: datetime = datetime.strptime(latest_date, "%Y-%m-%d")
-        dt_start: datetime = dt_latest - timedelta(days=days)
+        # 用 days*2 日历日确保覆盖 N 个交易日（周末/节假日多退少补）
+        dt_start: datetime = dt_latest - timedelta(days=days * 2)
         start_str: str = dt_start.strftime("%Y-%m-%d")
 
         # 获取检查区间内的理论交易日列表
@@ -1026,12 +1027,11 @@ class DataSync:
 
         self._open_db()  # 批量写入优化
 
-        import baostock as bs
-
         logger.info(f"repair_missing: 开始修复 {len(ranked)} 只股票")
         affected: int = 0
         total_filled: int = 0
         failed_retry: list[tuple[str, str, str]] = []  # (sym, earliest, latest)
+        _last_progress: float = time.time()  # 进度日志时间戳
 
         try:
             for sym, missing_dates in ranked:
@@ -1057,7 +1057,6 @@ class DataSync:
                         if bs_data is not None and not bs_data.empty:
                             data = bs_data
                     if data is None:
-                        from sequoia_x.data.tencent_source import TencentSource
                         tc_code = TencentSource.to_baostock_code(bs_code)
                         tc = TencentSource(request_interval=0.15)
                         tc_df = tc.get_daily(tc_code, 30)
@@ -1128,7 +1127,6 @@ class DataSync:
                             if bs_data is not None and not bs_data.empty:
                                 data = bs_data
                         if data is None:
-                            from sequoia_x.data.tencent_source import TencentSource
                             tc_code = TencentSource.to_baostock_code(sym)
                             tc = TencentSource(request_interval=0.15)
                             tc_df = tc.get_daily(tc_code, 30)
@@ -1418,21 +1416,17 @@ class DataSync:
 
         try:
             import baostock as bs
-            lg = bs.login()
-            if lg.error_code == "0":
-                logger.info("_fill_valuation_gaps: baostock 登录成功")
-            else:
+
+            if not self._bs_login():
                 logger.warning("_fill_valuation_gaps: baostock 登录失败，跳过")
                 return {"status": "skipped", "filled": 0}
 
-            # 查找估值字段为空的记录
-            db = self._db_conn if hasattr(self, '_db_conn') and self._db_conn else None
             self._open_db()
             # 快速探测 baostock 是否真的可用
             test_rs = bs.query_trade_dates(start_date=today_str, end_date=today_str)
             if test_rs.error_code != "0":
                 logger.warning("_fill_valuation_gaps: baostock 不可用，跳过（不影响管线）")
-                bs.logout()
+                self._bs_logout()
                 self._close_db()
                 return {"status": "skipped", "filled": 0, "reason": "baostock 不可用"}
 
@@ -1450,6 +1444,7 @@ class DataSync:
                 bs.logout()
                 return {"status": "ok", "filled": 0}
 
+            t0 = time.time()
             logger.info(f"_fill_valuation_gaps: 发现 {len(null_rows)} 条缺失估值字段的记录")
             filled = 0
             failed = 0
@@ -1491,7 +1486,7 @@ class DataSync:
                     )
 
             self._db_conn.commit()
-            bs.logout()
+            self._bs_logout()
             self._close_db()
             logger.info(f"_fill_valuation_gaps: 回填 {filled} 条，失败 {failed} 条")
             return {"status": "ok", "filled": filled, "failed": failed}
@@ -1564,8 +1559,7 @@ class DataSync:
                 except Exception:
                     pass
                 if data is None:
-                    from sequoia_x.data.tencent_source import TencentSource
-                    tc_code = bs_code
+                    tc_code = TencentSource.to_baostock_code(bs_code)
                     tc = TencentSource(request_interval=0.15)
                     tc_df = tc.get_daily(tc_code, 30)
                     if tc_df is not None and not tc_df.empty:
@@ -1573,9 +1567,9 @@ class DataSync:
                         mask = tc_df["date"].between(start_date, today_str)
                         idx_val = tc_df[mask].copy()
                         if not idx_val.empty:
-                            for col_rename in [("open","open"),("high","high"),("low","low"),("close","close"),("volume","volume"),("amount","amount")]:
-                                if col_rename[0] not in idx_val.columns:
-                                    idx_val[col_rename[0]] = 0.0
+                            for col in ["open", "high", "low", "close", "volume", "amount"]:
+                                if col not in idx_val.columns:
+                                    idx_val[col] = 0.0
                             idx_val["symbol"] = bs_code
                             data = idx_val
                             logger.info(f"sync_index_daily {name}: baostock 失败，Tencent 补 {len(data)} 条")
