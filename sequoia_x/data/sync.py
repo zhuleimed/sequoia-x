@@ -1441,7 +1441,7 @@ class DataSync:
 
             if not null_rows:
                 logger.info("_fill_valuation_gaps: 无估值字段缺失")
-                bs.logout()
+                self._bs_logout()
                 return {"status": "ok", "filled": 0}
 
             t0 = time.time()
@@ -1567,7 +1567,7 @@ class DataSync:
                         mask = tc_df["date"].between(start_date, today_str)
                         idx_val = tc_df[mask].copy()
                         if not idx_val.empty:
-                            for col in ["open", "high", "low", "close", "volume", "amount"]:
+                            for col in ["open", "high", "low", "close", "volume", "amount", "pctChg"]:
                                 if col not in idx_val.columns:
                                     idx_val[col] = 0.0
                             idx_val["symbol"] = bs_code
