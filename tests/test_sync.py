@@ -632,23 +632,32 @@ class TestSyncIndexDailyFallback:
 # ═══════════════════════════════════════════════════
 
 class TestNewStockSync:
-    """验证新股被 stock_list 发现后能被 sync_daily 纳入同步队列。"""
+    """验证新股被 get_active_stocks 发现后能被 sync_daily 纳入同步队列。"""
 
     @patch("sequoia_x.data.sync.DataSync.is_trade_day", return_value=True)
     @patch("sequoia_x.data.sync.DataEngine.get_local_symbols")
+    @patch("sequoia_x.data.sync.DataSync.get_active_stocks")
     @patch("baostock.query_history_k_data_plus")
     @patch("baostock.login")
     @patch("baostock.query_trade_dates")
-    def test_new_stock_in_stock_list_is_included_in_sync(
-        self, mock_qt, mock_login, mock_query, mock_local_syms, mock_trade
+    def test_new_stock_included_in_sync(
+        self, mock_qt, mock_login, mock_query, mock_active, mock_local_syms, mock_trade
     ):
-        """新股（在 stock_list 中但不在 stock_daily 中）应被 sync_daily 纳入拉取队列。"""
+        """新股（baostock 有但 stock_daily 无）应被 sync_daily 纳入拉取队列。"""
         mock_login.return_value = MagicMock(error_code="0")
         mock_qt.return_value = make_trade_days_bs("2024-01-02", "2024-01-05")
         mock_trade.return_value = True
 
         # get_local_symbols 只返回 2 只旧股票
         mock_local_syms.return_value = ["600000", "600001"]
+
+        # get_active_stocks 返回 3 只（含新股 688888）
+        mock_active.return_value = {
+            "symbols": ["600000", "600001", "688888"],
+            "new_listed": ["688888"],
+            "delisted": [],
+            "count": 3,
+        }
 
         # baostock 查询成功（每次调用返回新数据，避免 _bs_get_data 消费后耗尽）
         mock_query.side_effect = [
@@ -661,15 +670,6 @@ class TestNewStockSync:
             sync = make_sync(tmp_dir)
             conn = sqlite3.connect(sync.db_path)
 
-            # 创建 stock_list 表（由 sync_stock_list 按需创建，但测试中直接造数据）
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS stock_list ("
-                "symbol TEXT PRIMARY KEY,"
-                "delisted_date TEXT,"
-                "updated_at TEXT DEFAULT (datetime('now','localtime'))"
-                ")"
-            )
-
             # 预置 2 只旧股票的数据
             for sym in ["600000", "600001"]:
                 for d in ["2024-01-02", "2024-01-03", "2024-01-04"]:
@@ -679,13 +679,6 @@ class TestNewStockSync:
                         "VALUES (?, ?, 10, 11, 9, 10.5, 1e6)",
                         (sym, d)
                     )
-
-            # 在 stock_list 中预置 3 只股票（包含 1 只新股 "688888"）
-            for sym in ["600000", "600001", "688888"]:
-                conn.execute(
-                    "INSERT OR REPLACE INTO stock_list (symbol) VALUES (?)",
-                    (sym,)
-                )
             conn.commit()
             conn.close()
 
@@ -700,15 +693,12 @@ class TestNewStockSync:
                     mock_rt.return_value = {"amount": 2e7}
                     result = sync.sync_daily(force=True)
 
-            # 新股 "688888" 应从 stock_list 中被补充到拉取队列
-            # 方式1: 检查 query_history_k_data_plus 是否被调用（每只股票一次）
-            # 至少 3 次 baostock 调用（600000, 600001, 688888）
-            # 注意：新股 "688888" 代码以 6 开头 → sh.688888，会被 baostock 查询
+            # 新股应从 get_active_stocks 中被补充到拉取队列
             assert mock_query.call_count >= 3, (
                 f"baostock 应至少被调用 3 次（2只旧 + 1只新股），实际 {mock_query.call_count}"
             )
 
-            # 方式2: 验证新股数据确实写入了 stock_daily
+            # 验证新股数据确实写入了 stock_daily
             conn = sqlite3.connect(sync.db_path)
             new_stock_rows = conn.execute(
                 "SELECT COUNT(*) FROM stock_daily WHERE symbol='688888'"
