@@ -189,6 +189,131 @@ class TestBaostockAvailable:
 
 
 # ═══════════════════════════════════════════════════
+# pctChg: Tencent 回退时始终设置 pctChg（默认 0.0）
+# ═══════════════════════════════════════════════════
+
+class TestTencentPctChg:
+    """验证 Tencent 回退时 pctChg 始终被设置，不会出现 NaN。"""
+
+    @patch("sequoia_x.data.sync.DataSync.is_trade_day", return_value=True)
+    @patch("sequoia_x.data.sync.DataSync._get_local_last_dates")
+    @patch("sequoia_x.data.sync.DataEngine.get_local_symbols")
+    @patch("baostock.query_history_k_data_plus")
+    @patch("baostock.login")
+    @patch("baostock.query_trade_dates")
+    def test_pctchg_never_nan_on_tencent_fallback(
+        self, mock_qt, mock_login, mock_query, mock_symbols, mock_dates, mock_trade
+    ):
+        """baostock 失败走 Tencent 时，写入 stock_daily 的 pctChg 不应为 NULL。"""
+        mock_login.return_value = MagicMock(error_code="0")
+        mock_qt.return_value = make_trade_days_bs("2024-01-02", "2024-01-05")
+        mock_trade.return_value = True
+        mock_symbols.return_value = ["600000"]
+        mock_dates.return_value = {"600000": "2024-01-04"}
+
+        # baostock 返回错误
+        mock_query.return_value = make_bs_result([], error_code="10002007")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sync = make_sync(tmp_dir)
+            conn = sqlite3.connect(sync.db_path)
+            for d in ["2024-01-02", "2024-01-03", "2024-01-04"]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO stock_daily "
+                    "(symbol, date, open, high, low, close, volume) "
+                    "VALUES (?, ?, 10, 11, 9, 10.5, 1e6)",
+                    ("600000", d)
+                )
+            conn.commit()
+            conn.close()
+
+            # Tencent get_daily 只返回 1 条数据 → pctChg 应默认 0.0（无条件分支）
+            with patch.object(TencentSource, "get_daily") as mock_tc:
+                tc_df_1row = pd.DataFrame({
+                    "date": ["2024-01-05"],
+                    "open": [10.5], "close": [10.8],
+                    "high": [11.2], "low": [10.3], "volume": [1.2e6],
+                })
+                mock_tc.return_value = tc_df_1row
+
+                with patch.object(TencentSource, "get_realtime") as mock_rt:
+                    mock_rt.return_value = {"amount": 1.2e7}
+                    result = sync.sync_daily(force=True)
+
+            assert result["status"] == "ok"
+
+            # 验证 pctChg 在数据库中不为 NULL
+            conn = sqlite3.connect(sync.db_path)
+            row = conn.execute(
+                "SELECT pctChg FROM stock_daily WHERE symbol='600000' AND date='2024-01-05'"
+            ).fetchone()
+            conn.close()
+            assert row is not None, "2024-01-05 的数据行应存在"
+            assert row[0] is not None, f"pctChg 不应为 NULL，实际 {row[0]}"
+            # len(tc_df)=1 < 2，无条件分支 → pctChg=0.0
+            assert row[0] == 0.0, f"len(tc_df)<2 时 pctChg 应为 0.0，实际 {row[0]}"
+
+    @patch("sequoia_x.data.sync.DataSync.is_trade_day", return_value=True)
+    @patch("sequoia_x.data.sync.DataSync._get_local_last_dates")
+    @patch("sequoia_x.data.sync.DataEngine.get_local_symbols")
+    @patch("baostock.query_history_k_data_plus")
+    @patch("baostock.login")
+    @patch("baostock.query_trade_dates")
+    def test_pctchg_calculated_with_2_rows(
+        self, mock_qt, mock_login, mock_query, mock_symbols, mock_dates, mock_trade
+    ):
+        """Tencent 返回 2 条以上数据时，pctChg 应从收盘价计算得出。"""
+        mock_login.return_value = MagicMock(error_code="0")
+        mock_qt.return_value = make_trade_days_bs("2024-01-02", "2024-01-06")
+        mock_trade.return_value = True
+        mock_symbols.return_value = ["600000"]
+        mock_dates.return_value = {"600000": "2024-01-04"}
+
+        mock_query.return_value = make_bs_result([], error_code="10002007")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sync = make_sync(tmp_dir)
+            conn = sqlite3.connect(sync.db_path)
+            for d in ["2024-01-02", "2024-01-03", "2024-01-04"]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO stock_daily "
+                    "(symbol, date, open, high, low, close, volume) "
+                    "VALUES (?, ?, 10, 11, 9, 10.5, 1e6)",
+                    ("600000", d)
+                )
+            conn.commit()
+            conn.close()
+
+            with patch.object(TencentSource, "get_daily") as mock_tc:
+                # 2 条数据：前收盘 10.0，今收 10.5 → pctChg = +5.00%
+                tc_df_2row = pd.DataFrame({
+                    "date": ["2024-01-04", "2024-01-05"],
+                    "open": [10.0, 10.5],
+                    "close": [10.0, 10.5],
+                    "high": [10.2, 10.8],
+                    "low": [9.8, 10.2],
+                    "volume": [1e6, 1.2e6],
+                })
+                mock_tc.return_value = tc_df_2row
+
+                with patch.object(TencentSource, "get_realtime") as mock_rt:
+                    mock_rt.return_value = {"amount": 1.2e7}
+                    result = sync.sync_daily(force=True)
+
+            assert result["status"] == "ok"
+
+            conn = sqlite3.connect(sync.db_path)
+            row = conn.execute(
+                "SELECT pctChg FROM stock_daily WHERE symbol='600000' AND date='2024-01-05'"
+            ).fetchone()
+            conn.close()
+            assert row is not None
+            assert row[0] is not None, f"pctChg 不应为 NULL"
+            # (10.5 - 10.0) / 10.0 * 100 = 5.0
+            assert abs(row[0] - 5.0) < 0.01, f"pctChg 应为 5.0，实际 {row[0]}"
+
+
+# ═══════════════════════════════════════════════════
 # Bug#2: _fill_valuation_gaps 使用统一会话管理
 # ═══════════════════════════════════════════════════
 

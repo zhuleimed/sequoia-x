@@ -794,11 +794,14 @@ class DataSync:
                                     # 从实时查询补充 amount
                                     rt = tc.get_realtime(tc_code)
                                     latest["amount"] = rt["amount"] if rt else 0.0
-                                    # 计算 pctChg
+                                    # 计算 pctChg（始终设置，默认 0.0）
+                                    latest["pctChg"] = 0.0
                                     if len(tc_df) >= 2:
                                         prev_close = tc_df.iloc[-2]["close"]
                                         if prev_close and prev_close > 0:
-                                            latest["pctChg"] = round((latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2)
+                                            latest["pctChg"] = round(
+                                                (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
+                                            )
                                     latest["turnover"] = 0.0
                                     latest["peTTM"] = None
                                     latest["pbMRQ"] = None
@@ -1437,9 +1440,9 @@ class DataSync:
         return count
 
     def _fill_valuation_gaps(self, days: int = 5) -> dict:
-        """回填 peTTM/pbMRQ/psTTM/pcfNcfTTM 为空的记录（用 baostock 更新）。
+        """回填 peTTM/pbMRQ/psTTM/pcfNcfTTM/pctChg 为空的记录（用 baostock 更新）。
 
-        当数据由 TencentSource 写入时不含估值字段，此方法在 baostock 可用时回填。
+        当数据由 TencentSource 写入时不含估值字段和涨跌幅，此方法在 baostock 可用时回填。
         """
         today_str: str = date.today().strftime("%Y-%m-%d")
         start_date: str = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -1464,18 +1467,19 @@ class DataSync:
             null_rows = self._db_conn.execute(
                 "SELECT symbol, date FROM stock_daily "
                 "WHERE date >= ? AND date <= ? "
-                "AND (peTTM IS NULL OR pbMRQ IS NULL OR psTTM IS NULL OR pcfNcfTTM IS NULL) "
+                "AND (peTTM IS NULL OR pbMRQ IS NULL OR psTTM IS NULL "
+                "     OR pcfNcfTTM IS NULL OR pctChg IS NULL) "
                 "ORDER BY symbol, date",
                 (start_date, today_str)
             ).fetchall()
 
             if not null_rows:
-                logger.info("_fill_valuation_gaps: 无估值字段缺失")
+                logger.info("_fill_valuation_gaps: 无缺失字段")
                 self._bs_logout()
                 return {"status": "ok", "filled": 0}
 
             t0 = time.time()
-            logger.info(f"_fill_valuation_gaps: 发现 {len(null_rows)} 条缺失估值字段的记录")
+            logger.info(f"_fill_valuation_gaps: 发现 {len(null_rows)} 条缺失字段的记录")
             filled = 0
             failed = 0
 
@@ -1484,7 +1488,7 @@ class DataSync:
                     bs_code = self.engine._to_baostock_code(sym)
                     rs = bs.query_history_k_data_plus(
                         bs_code,
-                        "peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                        "peTTM,pbMRQ,psTTM,pcfNcfTTM,pctChg",
                         start_date=dt, end_date=dt,
                         frequency="d", adjustflag="2",
                     )
@@ -1496,10 +1500,11 @@ class DataSync:
                             pb = row.get("pbMRQ")
                             ps = row.get("psTTM")
                             pcf = row.get("pcfNcfTTM")
+                            pct = row.get("pctChg")
                             self._db_conn.execute(
-                                "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=? "
+                                "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=?, pctChg=? "
                                 "WHERE symbol=? AND date=?",
-                                (pe, pb, ps, pcf, sym, dt)
+                                (pe, pb, ps, pcf, pct, sym, dt)
                             )
                             filled += 1
                 except Exception as e:
