@@ -415,8 +415,7 @@ def _push_sync_summary(settings, result: dict, elapsed: float) -> None:
         f"新股发现: {result['new_listed']} 只\n"
         f"缺失补填: {result["backfilled"]} 条\n"
         f"最新日期: {result['latest_date']}\n"
-        f"耗时: {elapsed:.0f} 秒\n\n"
-        f"19:00 将自动执行选股流程"
+        f"耗时: {elapsed:.0f} 秒"
     )
 
     try:
