@@ -47,8 +47,8 @@ P018_DIR: str = "/public/home/hpc/zhulei/superman/quant/code/018_unified_trading
 #       "cmd":      命令参数列表（不含 python 自身）
 #       "cwd":      工作目录
 #       "python":   Python 可执行文件路径
-#       "required": True=失败终止管线，False=失败告警继续
-#       "timeout":  超时秒数（0=不限制）
+#       "required": True=进程崩溃退出时终止管线；False=失败告警继续
+#       "timeout":  超时秒数，到达后强制 kill 该进程（0=不限制）
 #   }
 #
 
@@ -70,7 +70,7 @@ STEPS: list[dict] = [
         "cmd": ["main.py"],
         "cwd": str(PROJECT_DIR),
         "python": PY312,
-        "required": True,
+        "required": False,   # 可选：失败不阻断管线，继续 018
         "timeout": 3600,  # 1h
     },
     # ── 3. 018 LSTM 策略（可选） ──
