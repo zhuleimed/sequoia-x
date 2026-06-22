@@ -51,11 +51,16 @@ class PipelineStatus:
             pass
         return None
 
-    def _save(self) -> None:
+    def save(self) -> None:
+        """保存状态到文件（公开方法）。"""
+        if self.data is None:
+            return
         STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATUS_FILE.write_text(
             json.dumps(self.data, ensure_ascii=False, indent=2)
         )
+
+    _save = save  # 向下兼容内部调用
 
     # ── 生命周期 ──
 
