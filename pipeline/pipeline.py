@@ -61,7 +61,7 @@ STEPS: list[dict] = [
         "cwd": str(PROJECT_DIR),
         "python": PY312,
         "required": True,
-        "timeout": 14400,  # 4h
+        "timeout": 10800,  # 3h
     },
     # ── 2. 策略选股 + LLM（必需） ──
     {
@@ -71,7 +71,7 @@ STEPS: list[dict] = [
         "cwd": str(PROJECT_DIR),
         "python": PY312,
         "required": False,   # 可选：失败不阻断管线，继续 018
-        "timeout": 3600,  # 1h
+        "timeout": 1800,  # 30min
     },
     # ── 3. 018 LSTM 策略（可选） ──
     {
