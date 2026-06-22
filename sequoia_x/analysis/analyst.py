@@ -276,11 +276,27 @@ class MarketAnalyst:
         # 1. 收集全局市场背景
         market = self._gather_market_context()
 
-        # 2. 收集每只股票的详细信息
-        all_codes: list[str] = []
+        # 2. 限流：按策略选中次数排序，只给 LLM 分析前 10 只
+        #    多策略重叠的股票信号更强，优先入选
+        from collections import Counter
+        stock_freq: Counter = Counter()
         for symbols in strategies_results.values():
-            all_codes.extend(symbols)
-        all_codes = list(set(all_codes))  # 去重
+            stock_freq.update(symbols)
+        top10: set[str] = {sym for sym, _ in stock_freq.most_common(10)}
+
+        # 过滤策略结果：仅保留 top10 中的股票
+        filtered_results: dict[str, list[str]] = {
+            name: [s for s in syms if s in top10]
+            for name, syms in strategies_results.items()
+        }
+
+        all_codes: list[str] = list(top10)
+        dropped: int = len(stock_freq) - len(top10)
+        if dropped > 0:
+            logger.info(
+                f"LLM 分析限流: 共 {len(stock_freq)} 只候选，"
+                f"取前 10 只（多策略重叠优先），跳过 {dropped} 只"
+            )
 
         stocks_detail = []
         for code in all_codes:
@@ -294,7 +310,7 @@ class MarketAnalyst:
         )
 
         # 3. 构建 prompt（所有数据都是实时采集的）
-        prompt = self._build_prompt(strategies_results, market, stocks_detail)
+        prompt = self._build_prompt(filtered_results, market, stocks_detail)
 
         # 4. 调用 LLM
         logger.info(f"MarketAnalyst: 调用 DeepSeek API ({self.model})...")
