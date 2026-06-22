@@ -226,7 +226,7 @@ class DataSync:
             )
             self._db_conn.commit()
 
-        logger.info(f"_write_to_db: 写入 {count} 条记录（{df['date'].nunique()} 个日期）")
+        logger.debug(f"_write_to_db: 写入 {count} 条记录（{df['date'].nunique()} 个日期）")
         return count
 
     def _log_sync(self, result: dict, duration: float) -> None:
@@ -654,6 +654,7 @@ class DataSync:
         baostock_available: bool = True
         skip_baostock_count: int = 0
         skip_baostock_retry_threshold: int = 500  # 跳过500次后再试一次 baostock（baostock不稳定时避免频繁重试拖慢Tencent）
+        tencent_success_count: int = 0  # 当前 Tencent 连续模式下成功拉取的股票数
 
         def _log_batch_progress(current_idx: int) -> None:
             nonlocal batch_start_time, batch_start_count
@@ -661,13 +662,22 @@ class DataSync:
             elapsed = now - batch_start_time
             batch_count = current_idx - batch_start_count
             rate = f"{elapsed / batch_count:.2f}s" if batch_count > 0 else "N/A"
-            conn_age = requests_since_login
+            # 本批股票代码范围
+            batch_syms = symbols_list[batch_start_count:current_idx]
+            sym_range = f"{batch_syms[0]}~{batch_syms[-1]}" if len(batch_syms) >= 2 else (batch_syms[0] if batch_syms else "?")
+            # 数据来源标识
+            if baostock_available:
+                source_tag = "baostock"
+                source_detail = ""
+            else:
+                source_tag = "Tencent"
+                source_detail = f" Tencent已成功{tencent_success_count}只"
             logger.info(
-                f"sync_daily 进度: {current_idx}/{len(symbols_list)} "
-                f"(有效写入 {stock_count}) "
-                f"[本批次{batch_count}只 {elapsed:.0f}s {rate}/只 "
-                f"连续错误{consecutive_errors} "
-                f"连接已用{conn_age}次请求]"
+                f"sync_daily 进度: [{current_idx}/{len(symbols_list)}] "
+                f"成功{stock_count}只 [{sym_range}] "
+                f"[来源:{source_tag}{source_detail} "
+                f"本批{batch_count}只 {elapsed:.0f}s {rate}/只 "
+                f"连续错误{consecutive_errors}]"
             )
             batch_start_time = now
             batch_start_count = current_idx
@@ -754,27 +764,30 @@ class DataSync:
                                     data = bs_data
                                     if not baostock_available:
                                         baostock_available = True
-                                        logger.info("sync_daily: baostock 恢复可用")
+                                        tencent_success_count = 0
+                                        logger.info("sync_daily: baostock 恢复可用（Tencent已成功拉取完成，恢复全字段拉取）")
                             else:
                                 if baostock_available:
                                     baostock_available = False
-                                    logger.info(f"sync_daily: baostock 返回错误 {bs_rs.error_code}，切换 Tencent")
+                                    tencent_success_count = 0
+                                    logger.info(f"sync_daily: baostock 返回错误 {bs_rs.error_code}（{sym}），切换至 Tencent")
                         except Exception as bs_e:
                             logger.debug(f"sync_daily {sym}: baostock exception {bs_e}")
                             if baostock_available:
                                 baostock_available = False
                                 skip_baostock_count = 0
-                                logger.info("sync_daily: baostock 异常，切换到 Tencent 直连模式")
+                                tencent_success_count = 0
+                                logger.info(f"sync_daily: baostock 异常（{sym}），切换至 Tencent 直连模式（不含估值/涨跌幅字段，同步完成后将回填）")
 
                     # ===== baostock 跳过或失败，尝试 Tencent =====
                     if data is None:
                         skip_baostock_count += 1
                         # 每跳过 50 次尝试重连一次 baostock
-                        if (not baostock_available and 
+                        if (not baostock_available and
                             skip_baostock_count >= skip_baostock_retry_threshold):
                             baostock_available = True
                             skip_baostock_count = 0
-                            logger.info("sync_daily: 达到阈值，尝试恢复 baostock")
+                            logger.info(f"sync_daily: 已达 {skip_baostock_retry_threshold} 只阈值（Tencent成功{tencent_success_count}只），恢复 baostock 接口拉取全字段数据")
                         if baostock_available:
                             continue  # 让下一轮循环再试 baostock
                         logger.debug(f"sync_daily {sym}: baostock 不可用，使用 Tencent")
@@ -805,6 +818,7 @@ class DataSync:
                                     latest["pcfNcfTTM"] = None
                                     data = latest
                                     consecutive_errors = 0
+                                    tencent_success_count += 1
                                     logger.debug(f"sync_daily {sym}: Tencent 替代成功")
                         except Exception as tc_e:
                             logger.debug(f"sync_daily {sym}: Tencent also failed {tc_e}")

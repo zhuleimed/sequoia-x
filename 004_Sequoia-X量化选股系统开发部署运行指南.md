@@ -46,6 +46,9 @@
 ├── 数据同步框架需求与运行指南.md         ← 同步模块详细文档
 ├── data/
 │   └── sequoia_v2.db                # SQLite 数据库（运行时生成）
+├── pipeline/                         # 全自动管线编排器
+│   ├── pipeline.py                  # 主编排器（步骤配置 + 顺序执行）
+│   └── status.py                    # 状态文件读写 + WxPusher 推送
 ├── logs/                            # 运行日志（运行时生成）
 ├── sequoia_x/
 │   ├── __init__.py
@@ -80,33 +83,33 @@
 
 ## 2. 整体架构
 
-### 2.1 执行流程（双时段拆分）
+### 2.1 执行流程（全自动管线）
 
 ```
-=== 时段1: 数据同步 (18:10) ===
+=== 全自动管线（cron 唯一入口 18:10）===
   │
-  ├─ Phase 1: sync_stock_list() — baostock 全量列表对比(上市/退市检测)
-  ├─ Phase 2: sync_daily() — 增量日线同步(baostock优先→Tencent回退)
-  ├─ Phase 3: repair_missing(days=5) — 诊断缺失 + 自动补填(含Tencent回退)
-  ├─ Phase 4: _fill_valuation_gaps(days=5) — baostock回填估值字段(跳过不卡死)
-  ├─ Phase 5: sync_index_daily() — 6大指数日线同步(baostock→Tencent)
-  └─ WxPusher 推送同步摘要到微信
-
-=== 时段2: 策略选股 (19:00) ===
+  ├─ Step 1: 数据同步（main.py --sync-only）
+  │    ├─ Phase 1: sync_stock_list() — baostock 全量列表对比(上市/退市检测)
+  │    ├─ Phase 2: sync_daily() — 增量日线同步(baostock优先→Tencent回退)
+  │    ├─ Phase 3: repair_missing(days=5) — 诊断缺失 + 自动补填(含Tencent回退)
+  │    ├─ Phase 4: _fill_valuation_gaps(days=5) — baostock回填估值字段(跳过不卡死)
+  │    ├─ Phase 5: sync_index_daily() — 6大指数日线同步(baostock→Tencent)
+  │    └─ 完成 → status.json 写入 sync=completed
   │
-  ├─ 第1层：check_missing(days=5) 数据完整性检查
-  │    覆盖率>90%继续，否则告警跳过
-  ├─ 第2层：get_base_stock_pool() 基础股票池过滤
-  │    ├─ 剔除 科创板(688/689)、创业板(300/301)、北交所(4xx/8xx)
-  │    ├─ 剔除 ST/*ST/退市股
-  │    ├─ 剔除 上市不满1年的次新股
-  │    ├─ 剔除 最新收盘价<2元的低价股
-  │    └─ 输出 ≈ 2,500~3,000 只
-  ├─ 第3层：7个策略独立选股 + 打分(取前5)
-  ├─ 第4层：MarketAnalyst 数据采集(知兔API+新浪+本地DB)
-  ├─ 第5层：DeepSeek LLM 综合研判
-  ├─ 第6层：保存选股结果
-  └─ 第7层：WxPusher 推送分析报告到微信
+  ├─ Step 2: 策略选股+LLM（main.py）
+  │    ├─ 第1层：check_missing(days=5) 数据完整性检查（覆盖率>90%继续，否则告警跳过）
+  │    ├─ 第2层：get_base_stock_pool() 基础股票池过滤（≈2,500~3,000 只）
+  │    ├─ 第3层：7个策略独立选股 + 打分(取前5)
+  │    ├─ 第4层：MarketAnalyst 数据采集(知兔API+新浪+本地DB)
+  │    ├─ 第5层：DeepSeek LLM 综合研判
+  │    ├─ 第6层：保存选股结果
+  │    └─ 第7层：WxPusher 推送分析报告到微信
+  │
+  ├─ Step 3: 018 LSTM 策略（可选）
+  ├─ Step 4: 018 指标策略（可选）
+  └─ Step 5+: 未来项目
+       │
+  └─ 推送全管线汇总到微信
 ```
 
 ### 2.2 数据流架构
@@ -205,39 +208,46 @@ python main.py               # 完整测试(含LLM)
 
 ### 7.1 执行层 — 服务器 Cron
 
-**当前配置：**
+**当前配置（唯一入口）：**
 
-```bash
-# 同步 + 选股分拆为两个时段：
-
-# ===== Sequoia-X 数据同步(18:10) =====
+```cron
+# ===== Sequoia-X 全自动管线（唯一入口，18:10 启动，顺序执行 sync→strategy→018）=====
 10 18 * * 1-5 cd /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x \
-  && /home/zhulei/anaconda3/envs/zhulei_py312/bin/python main.py --sync-only \
-  >> logs/sync_$(date +\%Y\%m\%d).log 2>&1
+  && /home/zhulei/anaconda3/envs/zhulei_py312/bin/python pipeline/pipeline.py \
+  >> logs/pipeline_$(date +\%Y\%m\%d).log 2>&1
+```
 
-# ===== Sequoia-X 策略选股(19:00) =====
-0 19 * * 1-5 cd /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x \
-  && /home/zhulei/anaconda3/envs/zhulei_py312/bin/python main.py \
-  >> logs/daily_$(date +\%Y\%m\%d).log 2>&1
+**旧配置（已弃用）：**
+```cron
+# 以下条目已由上面 pipeline 统一编排
+# 10 18 * * 1-5 ... main.py --sync-only    → pipeline Step 1
+# 0 19 * * 1-5 ... main.py                 → pipeline Step 2
+# 15 19 * * 1-5 ... 018 lstm               → pipeline Step 3
+# 20 19 * * 1-5 ... 018 indicator           → pipeline Step 4
 ```
 
 **注意：** cron 中 `%` 必须转义为 `\%`
 
 | 时间 | 项目 | 说明 |
 |:----:|:----|:------|
-| **18:10** | **Sequoia-X 数据同步** | 5阶段管线(含双轨数据源) |
-| **19:00** | **Sequoia-X 策略选股** | 数据检查+7策略+LLM+推送 |
-| 19:05 | 015 指标扫描模拟盘 | 独立项目 |
-| 19:10 | 016 ETF LSTM 预测 | 独立项目 |
+| **18:10** | **全自动管线启动** | 同步→选股→018 链式执行，上一步完成即下一步 |
+
+**状态文件：** `/public/home/hpc/zhulei/superman/quant/code/pipeline_status.json`
+
+**新增项目：** 在 `pipeline/pipeline.py` 的 `STEPS` 列表加一项即可，无需改 cron。
 
 ### 7.3 日志查看
 
 ```bash
-# 查看同步日志
-tail -50 logs/sync_$(date +\%Y\%m\%d).log
+# 查看管线主流程日志
+tail -50 logs/pipeline_$(date +\%Y\%m\%d).log
 
-# 查看选股日志
-tail -50 logs/daily_$(date +\%Y\%m\%d).log
+# 查看各步骤运行进度
+cat /public/home/hpc/zhulei/superman/quant/code/pipeline_status.json
+
+# 查看同步明细（logs/ 下各步骤独立日志）
+tail -50 logs/sync_$(date +\%Y\%m\%d).log     # pipeline Step 1
+tail -50 logs/daily_$(date +\%Y\%m\%d).log     # pipeline Step 2
 ```
 
 ---
@@ -283,6 +293,8 @@ python -u fill_extra_fields.py     # 补全扩展字段(一次性)
 | **2026-06-12** | **v2.1** | 同步时间 17:45→18:10；请求间隔 0.05s→0.15s；重连逻辑增强(5次指数退避)；cron %转义修复；TencentSource 双轨初步集成 |
 | **2026-06-18** | **v2.2** | **全面双轨化** |
 | **2026-06-18** | **v2.3** | **is_trade_day三层判断：周末过滤→baostock→chinese_calendar+fail-open** |**：Phase 3 repair_missing 新增 Tencent 回退；Phase 4 新增 baostock 健康检查(跳过不卡死)；Phase 5 sync_index_daily 新增 Tencent 回退；日志降级(每只→DEBUG) + 进度日志(每30s)；SQLite PRAGMA 优化(WAL+NORMAL)；停牌数据填充逻辑完善；cron 分拆为同步(18:10)和选股(19:00) |
+| **2026-06-20** | **v2.4** | **Bug 修复(11项)+全面测试覆盖**：baostock_available 复位修复、会话管理统一、NameError、Tencent 代码格式、pctChg 缺失、PRAGMA WAL/NORMAL、check_missing 区间修正、新股自动补充等。详见[数据同步框架指南](./数据同步框架需求与运行指南.md)版本历史 |
+| **2026-06-22** | **v2.5** | **全自动管线**：新增 `pipeline/pipeline.py` 统一编排 sync→strategy→018→未来项目；cron 单入口 18:10；status.json 实时进度。日志优化：逐只写入降为 DEBUG，每百只带代码范围 + 数据来源标识 |
 
 ---
 
