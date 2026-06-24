@@ -25,3 +25,4 @@ Thumbs.db
 # Test
 .pytest_cache/
 hypothesis/
+.hypothesis/

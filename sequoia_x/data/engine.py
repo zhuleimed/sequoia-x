@@ -64,6 +64,28 @@ _CREATE_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_symbol_date ON stock_daily (symbol, date);
 """
 
+_CREATE_ARCHIVE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_daily_archive (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol      TEXT    NOT NULL,
+    date        TEXT    NOT NULL,
+    open        REAL,
+    high        REAL,
+    low         REAL,
+    close       REAL,
+    volume      REAL,
+    turnover    REAL,
+    amount      REAL,
+    pctChg      REAL,
+    peTTM       REAL,
+    pbMRQ       REAL,
+    psTTM       REAL,
+    pcfNcfTTM   REAL,
+    delisted_at TEXT,
+    UNIQUE (symbol, date)
+);
+"""
+
 _CREATE_SYNC_LOG_SQL = """
 CREATE TABLE IF NOT EXISTS sync_log (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +121,7 @@ class DataEngine:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_INDEX_TABLE_SQL)
+            conn.execute(_CREATE_ARCHIVE_TABLE_SQL)
             conn.execute(_CREATE_SYNC_LOG_SQL)
             # 为旧版 sync_log 表补充新字段（兼容已有数据库）
             _migrate_columns(conn, "sync_log", [

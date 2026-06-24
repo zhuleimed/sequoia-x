@@ -23,14 +23,15 @@
 
 5206 只 A 股 + 6 个指数日线数据自动同步，双数据源抗故障。
 
-### 五阶段同步管线
+### 六阶段同步管线
 
 ```
-Phase 1: sync_stock_list()        → 上市/退市检测（type="1" status="1" 过滤）
-Phase 2: sync_daily()             → 增量日线同步（baostock优先→TencentSource回退）
-Phase 3: repair_missing(days=5)   → 缺失补填（双源回退 + 2轮重试）
-Phase 4: _fill_valuation_gaps()   → 估值字段回填（baostock健康检查，失败跳过）
-Phase 5: sync_index_daily()       → 6大指数日线（上证/深证/沪深300/上证50/中证500/深证综指）
+Phase 1:  sync_stock_list()         → 上市/退市检测（type="1" status="1" 过滤）
+Phase 1b: _archive_delisted_stocks() → 退市数据归档至 stock_daily_archive
+Phase 2:  sync_daily()              → 增量日线同步（baostock优先→TencentSource回退）
+Phase 3:  repair_missing(days=5)    → 缺失补填（双源回退 + 2轮重试）
+Phase 4:  _fill_valuation_gaps()    → 估值字段回填（baostock健康检查，失败跳过）
+Phase 5:  sync_index_daily()        → 6大指数日线（上证/深证/沪深300/上证50/中证500/深证综指）
 ```
 
 ### 双轨数据源
@@ -40,15 +41,16 @@ Phase 5: sync_index_daily()       → 6大指数日线（上证/深证/沪深300
 | **Baostock** | 主数据源 | 全字段（含peTTM/pbMRQ等） | 有时断连 |
 | **TencentSource** | 备用 | OHLCV（估值字段=None） | **稳定** 0.34s/只 |
 
-切换逻辑：baostock 失败 → 自动切 Tencent → 每 50 只再试一次 baostock。
+切换逻辑：baostock → 失败自动切 Tencent → 每 200 只尝试恢复 baostock。3 变量状态机，简洁可靠。
 
 ### 核心特性
 
 | 特性 | 说明 |
 |:------|:------|
-| 双轨抗故障 | baostock 故障时自动切换腾讯/新浪 API |
+| 双轨抗故障 | baostock 故障时自动切换 Tencent API |
 | 停牌数据保全 | volume=0，价格沿用前值，不允许数据空洞 |
 | 主动重连 | 每 1400 次请求主动重建连接，避免限流 |
+| 退市数据归档 | 退市股行情移至 stock_daily_archive，主表仅含活跃股 |
 | 指数同步 | 6 大指数日线独立存储于 index_daily 表 |
 | SQLite 优化 | WAL 模式 + synchronous=NORMAL |
 

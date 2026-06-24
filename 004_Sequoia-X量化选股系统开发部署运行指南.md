@@ -90,6 +90,7 @@
   │
   ├─ Step 1: 数据同步（main.py --sync-only）
   │    ├─ Phase 1: sync_stock_list() — baostock 全量列表对比(上市/退市检测)
+  │    ├─ Phase 1b: _archive_delisted_stocks() — 退市数据归档至 stock_daily_archive
   │    ├─ Phase 2: sync_daily() — 增量日线同步(baostock优先→Tencent回退)
   │    ├─ Phase 3: repair_missing(days=5) — 诊断缺失 + 自动补填(含Tencent回退)
   │    ├─ Phase 4: _fill_valuation_gaps(days=5) — baostock回填估值字段(跳过不卡死)
@@ -295,6 +296,7 @@ python -u fill_extra_fields.py     # 补全扩展字段(一次性)
 | **2026-06-18** | **v2.3** | **is_trade_day三层判断：周末过滤→baostock→chinese_calendar+fail-open** |**：Phase 3 repair_missing 新增 Tencent 回退；Phase 4 新增 baostock 健康检查(跳过不卡死)；Phase 5 sync_index_daily 新增 Tencent 回退；日志降级(每只→DEBUG) + 进度日志(每30s)；SQLite PRAGMA 优化(WAL+NORMAL)；停牌数据填充逻辑完善；cron 分拆为同步(18:10)和选股(19:00) |
 | **2026-06-20** | **v2.4** | **Bug 修复(11项)+全面测试覆盖**：baostock_available 复位修复、会话管理统一、NameError、Tencent 代码格式、pctChg 缺失、PRAGMA WAL/NORMAL、check_missing 区间修正、新股自动补充等。详见[数据同步框架指南](./数据同步框架需求与运行指南.md)版本历史 |
 | **2026-06-22** | **v2.5** | **全自动管线**：新增 `pipeline/pipeline.py` 统一编排 sync→strategy→018→未来项目；cron 单入口 18:10；status.json 实时进度。日志优化：逐只写入降为 DEBUG，每百只带代码范围 + 数据来源标识 |
+| **2026-06-24** | **v2.6** | **退市数据归档 + 数据源切换简化 + 018 指标策略修复**：① Phase 1b 退市股行情迁入 stock_daily_archive；② 数据源切换 6→3 变量状态机；③ 018 DynamicIndicator 目标股持久化、选股池扩大至 HS300+ZZ500、TOP_N 10→20 |
 
 ---
 

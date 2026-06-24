@@ -641,20 +641,16 @@ class DataSync:
 
         stock_count: int = 0
         symbols_list: list[str] = list(symbol_starts.keys())
-        consecutive_errors: int = 0
-        max_consecutive_errors: int = 10
-
-        # 主动重连与速度监控参数
+        # ── 数据源状态机 ──
+        # baostock 提供全字段（含 peTTM/pbMRQ 等估值），Tencent 为降级替代
+        data_source: str = "baostock"            # "baostock" | "tencent"
+        tencent_count_since_switch: int = 0      # Tencent 模式下累计处理数
+        TENCENT_BATCH_SIZE: int = 200            # 每 200 只尝试恢复 baostock
         requests_since_login: int = 0
         max_requests_per_conn: int = 1400
         batch_start_time: float = time.time()
         batch_start_count: int = 0
         log_batch_size: int = 100
-        # baostock 是否可用的标记（首次失败后跳过，直接走 Tencent）
-        baostock_available: bool = True
-        skip_baostock_count: int = 0
-        skip_baostock_retry_threshold: int = 500  # 跳过500次后再试一次 baostock（baostock不稳定时避免频繁重试拖慢Tencent）
-        tencent_success_count: int = 0  # 当前 Tencent 连续模式下成功拉取的股票数
 
         def _log_batch_progress(current_idx: int) -> None:
             nonlocal batch_start_time, batch_start_count
@@ -666,24 +662,23 @@ class DataSync:
             batch_syms = symbols_list[batch_start_count:current_idx]
             sym_range = f"{batch_syms[0]}~{batch_syms[-1]}" if len(batch_syms) >= 2 else (batch_syms[0] if batch_syms else "?")
             # 数据来源标识
-            if baostock_available:
+            if data_source == "baostock":
                 source_tag = "baostock"
                 source_detail = ""
             else:
                 source_tag = "Tencent"
-                source_detail = f" Tencent已成功{tencent_success_count}只"
+                source_detail = f" Tencent累计{tencent_count_since_switch}只"
             logger.info(
                 f"sync_daily 进度: [{current_idx}/{len(symbols_list)}] "
                 f"成功{stock_count}只 [{sym_range}] "
                 f"[来源:{source_tag}{source_detail} "
-                f"本批{batch_count}只 {elapsed:.0f}s {rate}/只 "
-                f"连续错误{consecutive_errors}]"
+                f"本批{batch_count}只 {elapsed:.0f}s {rate}/只]"
             )
             batch_start_time = now
             batch_start_count = current_idx
 
         def _proactive_reconnect() -> bool:
-            nonlocal requests_since_login, consecutive_errors
+            nonlocal requests_since_login
             logger.info(
                 f"sync_daily: 主动重连"
                 f"(已执行 {requests_since_login} 次请求)"
@@ -693,7 +688,6 @@ class DataSync:
             ok = self._bs_login()
             if ok:
                 requests_since_login = 0
-                consecutive_errors = 0
                 logger.info("sync_daily: 主动重连成功")
             else:
                 logger.error("sync_daily: 主动重连失败")
@@ -704,50 +698,53 @@ class DataSync:
                 bs_code = self.engine._to_baostock_code(sym)
                 start = symbol_starts[sym]
 
-                # ① 主动重连: 每连接1400次请求后重新登录
+                # ① 主动重连: 每 1400 次请求重新登录（baostock 连接有上限）
                 if requests_since_login >= max_requests_per_conn and i > 0:
                     if not _proactive_reconnect():
                         logger.error("sync_daily: 主动重连失败，终止同步")
                         break
 
-                # ② 速度监控: 最近50只平均>4s/只，提前重连
-                if (i - batch_start_count) >= 50 and i > 0:
-                    batch_elapsed = time.time() - batch_start_time
-                    avg_per_stock = batch_elapsed / (i - batch_start_count)
-                    if avg_per_stock > 4.0 and requests_since_login > 500:
-                        logger.warning(
-                            f"sync_daily: 检测到连接减速 "
-                            f"(最近{i - batch_start_count}只平均{avg_per_stock:.2f}s/只)"
-                        )
-                        _proactive_reconnect()
+                data = None
 
-                try:
-                    if consecutive_errors >= max_consecutive_errors:
-                        logger.warning(
-                            f"sync_daily: 连续{consecutive_errors}次错误，尝试重连baostock..."
+                # ===== 阶段 A：尝试 baostock（全字段，含估值/涨跌幅）=====
+                if data_source == "baostock":
+                    try:
+                        bs_rs = bs.query_history_k_data_plus(
+                            bs_code,
+                            "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                            start_date=start,
+                            end_date=today_str,
+                            frequency="d",
+                            adjustflag="2",
                         )
-                        self._bs_logout()
-                        reconnect_ok = False
-                        for retry in range(5):
-                            wait = 2 ** retry
-                            logger.info(f"sync_daily: 等待{wait}s后第{retry+1}次重连...")
-                            time.sleep(wait)
-                            if self._bs_login():
-                                consecutive_errors = 0
-                                requests_since_login = 0
-                                reconnect_ok = True
-                                logger.info(f"sync_daily: baostock重连成功(第{retry+1}次)")
-                                break
-                            logger.warning(f"sync_daily: 第{retry+1}次重连失败")
-                        if not reconnect_ok:
-                            logger.error("sync_daily: baostock 5次重连均失败，终止")
-                            break
+                        requests_since_login += 1
+                        if bs_rs.error_code == "0":
+                            bs_data = self._bs_get_data(bs_rs)
+                            if bs_data is not None and not bs_data.empty:
+                                bs_data["symbol"] = sym
+                                bs_data.rename(columns={"turn": "turnover"}, inplace=True)
+                                data = bs_data
+                        if data is None:
+                            # baostock 返回异常 → 降级至 Tencent
+                            data_source = "tencent"
+                            tencent_count_since_switch = 0
+                            logger.info(f"sync_daily: baostock 不可用（{sym}），降级至 Tencent")
+                    except Exception as bs_e:
+                        logger.debug(f"sync_daily {sym}: baostock exception {bs_e}")
+                        data_source = "tencent"
+                        tencent_count_since_switch = 0
+                        logger.info(f"sync_daily: baostock 异常（{sym}），降级至 Tencent")
 
-                    data = None
-                    # ===== 尝试 baostock（如上次失败则跳过）=====
-                    if baostock_available:
+                # ===== 阶段 B：baostock 不可用，Tencent 降级拉取 =====
+                #   Tencent 不含估值字段，同步完成后由 _fill_valuation_gaps 回填
+                if data is None:
+                    tencent_count_since_switch += 1
+
+                    # 每拉取 TENCENT_BATCH_SIZE 只后尝试一次恢复 baostock
+                    if tencent_count_since_switch >= TENCENT_BATCH_SIZE:
+                        tencent_count_since_switch = 0
                         try:
-                            bs_rs = bs.query_history_k_data_plus(
+                            bs_retry = bs.query_history_k_data_plus(
                                 bs_code,
                                 "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                                 start_date=start,
@@ -756,54 +753,29 @@ class DataSync:
                                 adjustflag="2",
                             )
                             requests_since_login += 1
-                            if bs_rs.error_code == "0":
-                                bs_data = self._bs_get_data(bs_rs)
+                            if bs_retry.error_code == "0":
+                                bs_data = self._bs_get_data(bs_retry)
                                 if bs_data is not None and not bs_data.empty:
                                     bs_data["symbol"] = sym
                                     bs_data.rename(columns={"turn": "turnover"}, inplace=True)
                                     data = bs_data
-                                    if not baostock_available:
-                                        baostock_available = True
-                                        tencent_success_count = 0
-                                        logger.info("sync_daily: baostock 恢复可用（Tencent已成功拉取完成，恢复全字段拉取）")
-                            else:
-                                if baostock_available:
-                                    baostock_available = False
-                                    tencent_success_count = 0
-                                    logger.info(f"sync_daily: baostock 返回错误 {bs_rs.error_code}（{sym}），切换至 Tencent")
+                                    data_source = "baostock"
+                                    logger.info("sync_daily: baostock 恢复，切回全字段拉取")
                         except Exception as bs_e:
-                            logger.debug(f"sync_daily {sym}: baostock exception {bs_e}")
-                            if baostock_available:
-                                baostock_available = False
-                                skip_baostock_count = 0
-                                tencent_success_count = 0
-                                logger.info(f"sync_daily: baostock 异常（{sym}），切换至 Tencent 直连模式（不含估值/涨跌幅字段，同步完成后将回填）")
+                            logger.debug(f"sync_daily {sym}: baostock 恢复尝试失败: {bs_e}")
 
-                    # ===== baostock 跳过或失败，尝试 Tencent =====
+                    # Tencent 降级（仅当日最新数据）
                     if data is None:
-                        skip_baostock_count += 1
-                        # 每跳过 50 次尝试重连一次 baostock
-                        if (not baostock_available and
-                            skip_baostock_count >= skip_baostock_retry_threshold):
-                            baostock_available = True
-                            skip_baostock_count = 0
-                            logger.info(f"sync_daily: 已达 {skip_baostock_retry_threshold} 只阈值（Tencent成功{tencent_success_count}只），恢复 baostock 接口拉取全字段数据")
-                        if baostock_available:
-                            continue  # 让下一轮循环再试 baostock
-                        logger.debug(f"sync_daily {sym}: baostock 不可用，使用 Tencent")
                         try:
                             tc_code = TencentSource.to_baostock_code(bs_code)
                             tc = TencentSource()
                             tc_df = tc.get_daily(tc_code, 5)
                             if tc_df is not None and not tc_df.empty:
-                                # 取最新一行（对应今天）
                                 latest = tc_df.iloc[-1:].copy()
                                 if not latest.empty:
                                     latest["symbol"] = sym
-                                    # 从实时查询补充 amount
                                     rt = tc.get_realtime(tc_code)
                                     latest["amount"] = rt["amount"] if rt else 0.0
-                                    # 计算 pctChg（始终设置，默认 0.0）
                                     latest["pctChg"] = 0.0
                                     if len(tc_df) >= 2:
                                         prev_close = tc_df.iloc[-2]["close"]
@@ -817,34 +789,17 @@ class DataSync:
                                     latest["psTTM"] = None
                                     latest["pcfNcfTTM"] = None
                                     data = latest
-                                    consecutive_errors = 0
-                                    tencent_success_count += 1
                                     logger.debug(f"sync_daily {sym}: Tencent 替代成功")
                         except Exception as tc_e:
                             logger.debug(f"sync_daily {sym}: Tencent also failed {tc_e}")
 
-                    if data is None:
-                        consecutive_errors += 1
-                        if consecutive_errors <= 3:
-                            logger.debug(f"sync_daily {sym}: 所有数据源均失败 连续第{consecutive_errors}次")
-                        continue
-
-                    written = self._write_to_db(data)
-                    if written > 0:
-                        stock_count += 1
-                        consecutive_errors = 0
-                    else:
-                        consecutive_errors += 1
-                        if consecutive_errors <= 3:
-                            logger.debug(f"sync_daily {sym}: 写入0条 连续第{consecutive_errors}次")
-
-                except Exception as e:
-                    consecutive_errors += 1
-                    if consecutive_errors <= 3:
-                        logger.warning(
-                            f"sync_daily {sym}: {e} 连续第{consecutive_errors}次"
-                        )
+                if data is None:
+                    logger.debug(f"sync_daily {sym}: 双数据源均失败，跳过")
                     continue
+
+                written = self._write_to_db(data)
+                if written > 0:
+                    stock_count += 1
 
                 time.sleep(0.15)
 
@@ -1588,6 +1543,8 @@ class DataSync:
                     continue
 
                 data = None
+
+                # 尝试 baostock（优先）
                 try:
                     rs = bs.query_history_k_data_plus(
                         bs_code,
@@ -1601,23 +1558,30 @@ class DataSync:
                         bs_data = self._bs_get_data(rs)
                         if bs_data is not None and not bs_data.empty:
                             data = bs_data
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"sync_index_daily {name}: baostock 异常 {e}")
+
+                # baostock 不可用 → Tencent 降级
                 if data is None:
-                    tc_code = TencentSource.to_baostock_code(bs_code)
-                    tc = TencentSource(request_interval=0.15)
-                    tc_df = tc.get_daily(tc_code, 30)
-                    if tc_df is not None and not tc_df.empty:
-                        tc_df["date"] = tc_df["date"].astype(str)
-                        mask = tc_df["date"].between(start_date, today_str)
-                        idx_val = tc_df[mask].copy()
-                        if not idx_val.empty:
-                            for col in ["open", "high", "low", "close", "volume", "amount", "pctChg"]:
-                                if col not in idx_val.columns:
-                                    idx_val[col] = 0.0
-                            idx_val["symbol"] = bs_code
-                            data = idx_val
-                            logger.info(f"sync_index_daily {name}: baostock 失败，Tencent 补 {len(data)} 条")
+                    logger.info(f"sync_index_daily {name}: baostock 不可用，切换 Tencent")
+                    try:
+                        tc_code = TencentSource.to_baostock_code(bs_code)
+                        tc = TencentSource(request_interval=0.15)
+                        tc_df = tc.get_daily(tc_code, 30)
+                        if tc_df is not None and not tc_df.empty:
+                            tc_df["date"] = tc_df["date"].astype(str)
+                            mask = tc_df["date"].between(start_date, today_str)
+                            idx_val = tc_df[mask].copy()
+                            if not idx_val.empty:
+                                for col in ["open", "high", "low", "close", "volume", "amount", "pctChg"]:
+                                    if col not in idx_val.columns:
+                                        idx_val[col] = 0.0
+                                idx_val["symbol"] = bs_code
+                                data = idx_val
+                                logger.info(f"sync_index_daily {name}: Tencent 补 {len(data)} 条")
+                    except Exception as tc_e:
+                        logger.debug(f"sync_index_daily {name}: Tencent also failed {tc_e}")
+
                 if data is None:
                     logger.warning(f"sync_index_daily {name}: 双数据源均失败，跳过")
                     continue
@@ -1636,6 +1600,76 @@ class DataSync:
             import traceback
             logger.error(f"sync_index_daily 异常: {e}\n{traceback.format_exc()}")
             return {"status": "error", "index_count": index_count, "error": str(e)}
+
+    # ── 退市数据归档 ──
+
+    def _archive_delisted_stocks(self) -> int:
+        """将 stock_list 中已退市股票的数据从 stock_daily 移至 stock_daily_archive。
+
+        退市股仍保留在 stock_list（标记 delisted_date），但其行情数据从主表中清理，
+        确保 get_local_symbols()、策略计算和推送统计不再包含退市股。
+
+        Returns:
+            归档的股票数量。
+        """
+        import sqlite3
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 查出 stock_list 中已退市、且 stock_daily 中仍有数据的股票
+                rows = conn.execute(
+                    "SELECT sl.symbol, sl.delisted_date FROM stock_list sl "
+                    "WHERE sl.delisted_date IS NOT NULL "
+                    "AND EXISTS (SELECT 1 FROM stock_daily sd WHERE sd.symbol = sl.symbol)"
+                ).fetchall()
+
+                if not rows:
+                    return 0
+
+                delisted_pairs = [(sym, dd) for sym, dd in rows]
+                logger.info(
+                    f"_archive_delisted_stocks: 发现 {len(delisted_pairs)} 只退市股票需归档: "
+                    + ", ".join(sym for sym, _ in delisted_pairs[:10])
+                    + ("..." if len(delisted_pairs) > 10 else "")
+                )
+
+                archived_count = 0
+                for sym, delisted_date in delisted_pairs:
+                    # 查出该股票在 stock_daily 中的记录数
+                    cnt_row = conn.execute(
+                        "SELECT COUNT(*) FROM stock_daily WHERE symbol = ?", (sym,)
+                    ).fetchone()
+                    record_count = cnt_row[0] if cnt_row else 0
+                    if record_count == 0:
+                        continue
+
+                    # 迁移到归档表
+                    conn.execute(
+                        """INSERT OR IGNORE INTO stock_daily_archive
+                           (symbol, date, open, high, low, close, volume, turnover,
+                            amount, pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM, delisted_at)
+                           SELECT symbol, date, open, high, low, close, volume, turnover,
+                                  amount, pctChg, peTTM, pbMRQ, psTTM, pcfNcfTTM, ?
+                           FROM stock_daily WHERE symbol = ?""",
+                        (delisted_date, sym),
+                    )
+                    # 从主表删除
+                    conn.execute("DELETE FROM stock_daily WHERE symbol = ?", (sym,))
+                    archived_count += 1
+                    logger.debug(
+                        f"_archive_delisted_stocks: {sym} 已归档 "
+                        f"({record_count} 条记录, delisted_at={delisted_date})"
+                    )
+
+                conn.commit()
+                logger.info(
+                    f"_archive_delisted_stocks: 完成，已归档 {archived_count} 只退市股票"
+                )
+                return archived_count
+
+        except Exception as e:
+            logger.error(f"_archive_delisted_stocks 异常: {e}")
+            return 0
 
     # ── 完整同步管线 ──
 
@@ -1684,6 +1718,11 @@ class DataSync:
                 "phases": phases,
                 "error": "Phase 1 stock_list 失败",
             }
+
+        # Phase 1b: 退市数据归档（Phase 1 成功后清理退市股行情数据）
+        archived = self._archive_delisted_stocks()
+        if archived > 0:
+            logger.info(f"Phase 1b 归档完成: {archived} 只退市股票已移入 stock_daily_archive")
 
         # Phase 2: 增量日线同步
         logger.info("run_full Phase 2: 增量日线同步")
