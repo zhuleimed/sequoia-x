@@ -61,7 +61,7 @@ STEPS: list[dict] = [
         "cwd": str(PROJECT_DIR),
         "python": PY312,
         "required": True,
-        "timeout": 10800,  # 3h
+        "timeout": 14400,  # 4h（baostock 慢时 3h 不够用）
     },
     # ── 2. 策略选股 + LLM（必需） ──
     {
