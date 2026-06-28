@@ -642,10 +642,10 @@ class DataSync:
         stock_count: int = 0
         symbols_list: list[str] = list(symbol_starts.keys())
         # ── 数据源状态机 ──
-        # baostock 提供全字段（含 peTTM/pbMRQ 等估值），Tencent 为降级替代
-        data_source: str = "baostock"            # "baostock" | "tencent"
-        tencent_count_since_switch: int = 0      # Tencent 模式下累计处理数
-        TENCENT_BATCH_SIZE: int = 200            # 每 200 只尝试恢复 baostock
+        # Tencent 提供 OHLCV+成交量（主力），baostock 提供估值字段（后备）
+        data_source: str = "tencent"             # "tencent" | "baostock"
+        baostock_count_since_switch: int = 0     # baostock 模式下累计处理数
+        BAOSTOCK_BATCH_SIZE: int = 200           # 每 200 只尝试恢复 Tencent
         requests_since_login: int = 0
         max_requests_per_conn: int = 1400
         batch_start_time: float = time.time()
@@ -662,12 +662,12 @@ class DataSync:
             batch_syms = symbols_list[batch_start_count:current_idx]
             sym_range = f"{batch_syms[0]}~{batch_syms[-1]}" if len(batch_syms) >= 2 else (batch_syms[0] if batch_syms else "?")
             # 数据来源标识
-            if data_source == "baostock":
-                source_tag = "baostock"
+            if data_source == "tencent":
+                source_tag = "Tencent"
                 source_detail = ""
             else:
-                source_tag = "Tencent"
-                source_detail = f" Tencent累计{tencent_count_since_switch}只"
+                source_tag = "baostock"
+                source_detail = f" baostock累计{baostock_count_since_switch}只"
             logger.info(
                 f"sync_daily 进度: [{current_idx}/{len(symbols_list)}] "
                 f"成功{stock_count}只 [{sym_range}] "
@@ -706,66 +706,50 @@ class DataSync:
 
                 data = None
 
-                # ===== 阶段 A：尝试 baostock（全字段，含估值/涨跌幅）=====
-                if data_source == "baostock":
+                # ===== 阶段 A：Tencent 主力拉取（OHLCV + 成交量 + 成交额）=====
+                #   pctChg 从 close 计算，主力数据源稳定高效
+                if data_source == "tencent":
                     try:
-                        bs_rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
-                            start_date=start,
-                            end_date=today_str,
-                            frequency="d",
-                            adjustflag="2",
-                        )
-                        requests_since_login += 1
-                        if bs_rs.error_code == "0":
-                            bs_data = self._bs_get_data(bs_rs)
-                            if bs_data is not None and not bs_data.empty:
-                                bs_data["symbol"] = sym
-                                bs_data.rename(columns={"turn": "turnover"}, inplace=True)
-                                data = bs_data
+                        tc_code = TencentSource.to_baostock_code(bs_code)
+                        tc = TencentSource()
+                        tc_df = tc.get_daily(tc_code, 5)
+                        if tc_df is not None and not tc_df.empty:
+                            latest = tc_df.iloc[-1:].copy()
+                            if not latest.empty:
+                                latest["symbol"] = sym
+                                rt = tc.get_realtime(tc_code)
+                                latest["amount"] = rt["amount"] if rt else 0.0
+                                latest["pctChg"] = 0.0
+                                if len(tc_df) >= 2:
+                                    prev_close = tc_df.iloc[-2]["close"]
+                                    if prev_close and prev_close > 0:
+                                        latest["pctChg"] = round(
+                                            (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
+                                        )
+                                latest["turnover"] = 0.0
+                                latest["peTTM"] = None
+                                latest["pbMRQ"] = None
+                                latest["psTTM"] = None
+                                latest["pcfNcfTTM"] = None
+                                data = latest
                         if data is None:
-                            # baostock 返回异常 → 降级至 Tencent
-                            data_source = "tencent"
-                            tencent_count_since_switch = 0
-                            logger.info(f"sync_daily: baostock 不可用（{sym}），降级至 Tencent")
-                    except Exception as bs_e:
-                        logger.debug(f"sync_daily {sym}: baostock exception {bs_e}")
-                        data_source = "tencent"
-                        tencent_count_since_switch = 0
-                        logger.info(f"sync_daily: baostock 异常（{sym}），降级至 Tencent")
+                            data_source = "baostock"
+                            baostock_count_since_switch = 0
+                            logger.info(f"sync_daily: Tencent 不可用（{sym}），切换至 baostock")
+                    except Exception as tc_e:
+                        logger.debug(f"sync_daily {sym}: Tencent exception {tc_e}")
+                        data_source = "baostock"
+                        baostock_count_since_switch = 0
+                        logger.info(f"sync_daily: Tencent 异常（{sym}），切换至 baostock")
 
-                # ===== 阶段 B：baostock 不可用，Tencent 降级拉取 =====
-                #   Tencent 不含估值字段，同步完成后由 _fill_valuation_gaps 回填
+                # ===== 阶段 B：Tencent 不可用，baostock 后备拉取 =====
+                #   baostock 含估值字段，但稳定性不如 Tencent
                 if data is None:
-                    tencent_count_since_switch += 1
+                    baostock_count_since_switch += 1
 
-                    # 每拉取 TENCENT_BATCH_SIZE 只后尝试一次恢复 baostock
-                    if tencent_count_since_switch >= TENCENT_BATCH_SIZE:
-                        tencent_count_since_switch = 0
-                        try:
-                            bs_retry = bs.query_history_k_data_plus(
-                                bs_code,
-                                "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
-                                start_date=start,
-                                end_date=today_str,
-                                frequency="d",
-                                adjustflag="2",
-                            )
-                            requests_since_login += 1
-                            if bs_retry.error_code == "0":
-                                bs_data = self._bs_get_data(bs_retry)
-                                if bs_data is not None and not bs_data.empty:
-                                    bs_data["symbol"] = sym
-                                    bs_data.rename(columns={"turn": "turnover"}, inplace=True)
-                                    data = bs_data
-                                    data_source = "baostock"
-                                    logger.info("sync_daily: baostock 恢复，切回全字段拉取")
-                        except Exception as bs_e:
-                            logger.debug(f"sync_daily {sym}: baostock 恢复尝试失败: {bs_e}")
-
-                    # Tencent 降级（仅当日最新数据）
-                    if data is None:
+                    # 每拉取 BAOSTOCK_BATCH_SIZE 只后尝试恢复 Tencent
+                    if baostock_count_since_switch >= BAOSTOCK_BATCH_SIZE:
+                        baostock_count_since_switch = 0
                         try:
                             tc_code = TencentSource.to_baostock_code(bs_code)
                             tc = TencentSource()
@@ -789,9 +773,32 @@ class DataSync:
                                     latest["psTTM"] = None
                                     latest["pcfNcfTTM"] = None
                                     data = latest
-                                    logger.debug(f"sync_daily {sym}: Tencent 替代成功")
+                                    data_source = "tencent"
+                                    logger.info("sync_daily: Tencent 恢复，切回主力拉取")
                         except Exception as tc_e:
-                            logger.debug(f"sync_daily {sym}: Tencent also failed {tc_e}")
+                            logger.debug(f"sync_daily {sym}: Tencent 恢复尝试失败: {tc_e}")
+
+                    # baostock 后备
+                    if data is None:
+                        try:
+                            bs_rs = bs.query_history_k_data_plus(
+                                bs_code,
+                                "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                                start_date=start,
+                                end_date=today_str,
+                                frequency="d",
+                                adjustflag="2",
+                            )
+                            requests_since_login += 1
+                            if bs_rs.error_code == "0":
+                                bs_data = self._bs_get_data(bs_rs)
+                                if bs_data is not None and not bs_data.empty:
+                                    bs_data["symbol"] = sym
+                                    bs_data.rename(columns={"turn": "turnover"}, inplace=True)
+                                    data = bs_data
+                                    logger.debug(f"sync_daily {sym}: baostock 后备替代成功")
+                        except Exception as bs_e:
+                            logger.debug(f"sync_daily {sym}: baostock also failed {bs_e}")
 
                 if data is None:
                     logger.debug(f"sync_daily {sym}: 双数据源均失败，跳过")
@@ -1601,6 +1608,86 @@ class DataSync:
             logger.error(f"sync_index_daily 异常: {e}\n{traceback.format_exc()}")
             return {"status": "error", "index_count": index_count, "error": str(e)}
 
+    # ── OHLCV 历史缺失补填 ──
+
+    def _fill_ohlcv_gaps(self, days: int = 5) -> int:
+        """用 Tencent 补填近 N 个交易日的 OHLCV 数据缺口。
+
+        INSERT OR IGNORE 不覆盖已有 baostock 数据（含估值字段），
+        确保技术指标计算所需的连续 K 线。
+
+        Args:
+            days: 检查最近多少个交易日（默认 5）。
+
+        Returns:
+            补填的记录总数。
+        """
+        report: dict = self.check_missing(days)
+        if report.get("status") == "error":
+            return 0
+
+        missing: dict[str, list[str]] = report.get("missing_by_symbol", {})
+        if not missing:
+            logger.info("_fill_ohlcv_gaps: 数据完整，无需补填")
+            return 0
+
+        # 按缺失数量降序排列，最多处理 200 只（否则耗时过长）
+        ranked = sorted(missing.items(), key=lambda kv: len(kv[1]), reverse=True)[:200]
+        logger.info(
+            f"_fill_ohlcv_gaps: {len(missing)} 只股票有缺失，本次补填前 {len(ranked)} 只"
+        )
+
+        import sqlite3
+        total_filled = 0
+        for sym, missing_dates in ranked:
+            if not missing_dates:
+                continue
+            try:
+                bs_code = self.engine._to_baostock_code(sym)
+                tc_code = TencentSource.to_baostock_code(bs_code)
+                tc = TencentSource()
+                tc_df = tc.get_daily(tc_code, days + 2)  # 多取 2 天用于计算 pctChg
+                if tc_df is None or tc_df.empty:
+                    continue
+                tc_df = tc_df.copy()
+                tc_df["symbol"] = sym
+                tc_df["amount"] = 0.0
+                # 计算 pctChg
+                if "close" in tc_df.columns and len(tc_df) >= 2:
+                    tc_df["pctChg"] = tc_df["close"].pct_change() * 100
+                    tc_df["pctChg"] = tc_df["pctChg"].fillna(0.0).round(2)
+                else:
+                    tc_df["pctChg"] = 0.0
+                tc_df["turnover"] = 0.0
+                tc_df["peTTM"] = None
+                tc_df["pbMRQ"] = None
+                tc_df["psTTM"] = None
+                tc_df["pcfNcfTTM"] = None
+
+                # 用 INSERT OR IGNORE 写缺失日期，不覆盖已有 baostock 数据
+                cols = ["symbol", "date", "open", "high", "low", "close",
+                        "volume", "amount", "pctChg", "turnover",
+                        "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"]
+                records = tc_df[cols].to_dict("records")
+                with sqlite3.connect(self.db_path) as conn:
+                    for rec in records:
+                        if rec["date"] in missing_dates:
+                            conn.execute(
+                                """INSERT OR IGNORE INTO stock_daily
+                                   (symbol, date, open, high, low, close, volume, amount,
+                                    pctChg, turnover, peTTM, pbMRQ, psTTM, pcfNcfTTM)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                tuple(rec[c] for c in cols)
+                            )
+                            total_filled += 1
+                    conn.commit()
+            except Exception as e:
+                logger.debug(f"_fill_ohlcv_gaps {sym}: {e}")
+                continue
+
+        logger.info(f"_fill_ohlcv_gaps: 完成，补填 {total_filled} 条记录")
+        return total_filled
+
     # ── 退市数据归档 ──
 
     def _archive_delisted_stocks(self) -> int:
@@ -1674,18 +1761,19 @@ class DataSync:
     # ── 完整同步管线 ──
 
     def run_full(self) -> dict:
-        """完整同步管线：stock_list 同步 + 增量日线同步 + 缺失补填。
+        """完整同步管线。
 
         管线阶段：
-        Phase 1: sync_stock_list() — 同步股票列表
-        Phase 2: sync_daily(force=False) — 增量日线同步（含交易日/时间门控）
-        Phase 3: repair_missing(days=5) — 修复最近 5 天的缺失数据
-        Phase 4: _fill_valuation_gaps(days=5) — 回填估值字段(None→实际值)
-        Phase 5: sync_index_daily() — 同步 6 大指数日线
+        Phase 1:  sync_stock_list() — 同步股票列表，检测上市/退市
+        Phase 1b: _archive_delisted_stocks() — 退市数据归档
+        Phase 2:  sync_daily(force=False) — 增量日线同步（Tencent 主力，baostock 后备）
+        Phase 2b: _fill_ohlcv_gaps(days=5) — OHLCV 历史缺失补填（Tencent）
+        Phase 3:  _fill_valuation_gaps(days=5) — baostock 估值字段补充（可跳过）
+        Phase 4:  sync_index_daily() — 6 大指数日线同步
 
-        任一阶段返回 status="error" 则终止后续阶段。
-        Phase 2 返回 status="skipped"（非交易日/时间未到）不终止，继续 Phase 3。
-        Phase 4 error 不终止管线（指数同步失败不影响股票选股）。
+        策略运行依赖的数据条件由 Phase 2+2b 满足（OHLCV+成交量+成交额+pctChg），
+        Phase 2b 之后即可运行策略选股，Phase 3 为可选补充（暂未用到估值字段）。
+        已运行超过 2h 则跳过 Phase 3，确保管线不阻塞。
 
         Returns:
             dict:
@@ -1747,24 +1835,25 @@ class DataSync:
                 "error": "Phase 2 sync_daily 失败",
             }
 
-        # Phase 3: 缺失补填（已运行超过 2h 则跳过，避免阻塞管线）
-        elapsed_before_repair = time.time() - t0
-        if elapsed_before_repair > 7200:  # 2h
+        # Phase 2b: OHLCV 历史缺失补填（Tencent，确保技术指标所需 K 线完整）
+        # 只检查最近 5 个交易日，用 Tencent 的 INSERT OR IGNORE 不覆盖已有 baostock 数据
+        logger.info("run_full Phase 2b: OHLCV 缺失补填（Tencent）")
+        self._fill_ohlcv_gaps(days=5)
+
+        # Phase 3: baostock 估值字段补充（peTTM/pbMRQ/psTTM/pcfNcfTTM）
+        # 策略暂未用到估值字段，baostock 能拉就拉，不能拉跳过
+        elapsed_before_baostock_fill = time.time() - t0
+        if elapsed_before_baostock_fill > 7200:  # 已运行超 2h 则跳过
             logger.warning(
-                f"run_full: 已运行 {elapsed_before_repair:.0f}s，跳过 Phase 3 repair_missing"
-                f"（Phase 2 已完成，数据已入库，不影响选股）"
+                f"run_full: 已运行 {elapsed_before_baostock_fill:.0f}s，跳过 Phase 3 baostock 补充"
             )
-            r3 = {"status": "skipped", "checked": 0, "affected_stocks": 0, "total_filled": 0}
+            r3 = {"status": "skipped", "filled": 0}
         else:
-            logger.info("run_full Phase 3: 缺失补填")
-            r3 = self.repair_missing(days=5)
-        phases["repair"] = r3
+            logger.info("run_full Phase 3: baostock 估值字段补充")
+            r3 = self._fill_valuation_gaps(days=5)
+        phases["valuation_fill"] = r3
 
-        # Phase 4: 估值字段回填（仅当 baostock 可用时）
-        logger.info("run_full Phase 4: 估值字段回填")
-        r4v: dict = self._fill_valuation_gaps(days=5)
-
-        # Phase 5: 指数日线同步
+        # Phase 4: 指数日线同步
         logger.info("run_full Phase 5: 指数日线同步")
         r4: dict = self.sync_index_daily()
         phases["index_sync"] = r4
@@ -1773,10 +1862,10 @@ class DataSync:
         overall_status: str = "ok"
         error_msg: str = ""
         if r3.get("status") == "error":
-            logger.warning(f"Phase 3 repair_missing 异常（不影响已有数据）: {r3.get('error')}")
+            logger.warning(f"Phase 3 估值补充异常（不影响已有数据）: {r3.get('error')}")
         if r4.get("status") == "error":
             # 指数同步失败不视为整体失败
-            logger.warning(f"run_full: 指数同步失败（不影响选股）: {r4.get('error')}")
+            logger.warning(f"Phase 4 指数同步失败（不影响选股）: {r4.get('error')}")
 
         duration: float = time.time() - t0
         self._log_sync(
