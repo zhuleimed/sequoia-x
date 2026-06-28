@@ -28,28 +28,28 @@
 ```
 Phase 1:  sync_stock_list()         → 上市/退市检测（type="1" status="1" 过滤）
 Phase 1b: _archive_delisted_stocks() → 退市数据归档至 stock_daily_archive
-Phase 2:  sync_daily()              → 增量日线同步（baostock优先→TencentSource回退）
-Phase 3:  repair_missing(days=5)    → 缺失补填（双源回退 + 2轮重试）
-Phase 4:  _fill_valuation_gaps()    → 估值字段回填（baostock健康检查，失败跳过）
-Phase 5:  sync_index_daily()        → 6大指数日线（上证/深证/沪深300/上证50/中证500/深证综指）
+Phase 2:  sync_daily()              → 增量日线同步（Tencent主力→baostock后备）
+Phase 2b: _fill_ohlcv_gaps()         → OHLCV历史缺失补填（Tencent）
+Phase 3:  _fill_valuation_gaps()     → 估值字段补充（baostock，超2h跳过）
+Phase 4:  sync_index_daily()        → 6大指数日线
 ```
 
 ### 双轨数据源
 
 | 数据源 | 状态 | 字段 | 稳定性 |
 |:------|:----|:-----|:-------|
-| **Baostock** | 主数据源 | 全字段（含peTTM/pbMRQ等） | 有时断连 |
-| **TencentSource** | 备用 | OHLCV（估值字段=None） | **稳定** 0.34s/只 |
+| **TencentSource** | **主力** | OHLCV+成交量+成交额+pctChg(计算) | **稳定** 0.34s/只 |
+| **Baostock** | 后备 | 全字段（含peTTM/pbMRQ等） | 有时断连 |
 
-切换逻辑：baostock → 失败自动切 Tencent → 每 200 只尝试恢复 baostock。3 变量状态机，简洁可靠。
+切换逻辑：Tencent(主力) → 失败切 baostock(后备) → 每 200 只尝试恢复 Tencent。pctChg 由 Tencent 拉取后计算。
 
 ### 核心特性
 
 | 特性 | 说明 |
 |:------|:------|
-| 双轨抗故障 | baostock 故障时自动切换 Tencent API |
+| 双轨抗故障 | Tencent 主力拉取，baostock 后备保障 |
 | 停牌数据保全 | volume=0，价格沿用前值，不允许数据空洞 |
-| 主动重连 | 每 1400 次请求主动重建连接，避免限流 |
+| 主动重连 | 每 1400 次请求主动重建连接(baostock)，避免限流 |
 | 退市数据归档 | 退市股行情移至 stock_daily_archive，主表仅含活跃股 |
 | 指数同步 | 6 大指数日线独立存储于 index_daily 表 |
 | SQLite 优化 | WAL 模式 + synchronous=NORMAL |
@@ -62,7 +62,7 @@ Phase 5:  sync_index_daily()        → 6大指数日线（上证/深证/沪深3
 === 全自动管线（cron 唯一入口 18:10）===
   │
   ├─ Step 1: 数据同步（main.py --sync-only）
-  │    5阶段管线(Phase 1~5) → 同步完成立即下一步
+  │    6阶段管线(Phase 1~4) → 同步完成立即下一步
   │
   ├─ Step 2: 策略选股+LLM（main.py）
   │    数据检查→7策略选股→LLM→推送

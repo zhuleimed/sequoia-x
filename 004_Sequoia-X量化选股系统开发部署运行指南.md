@@ -15,7 +15,7 @@
 | 服务器配置 | Ubuntu LTS / 36核CPU / 192GB内存 / 无GPU |
 | Python 环境 | `zhulei_py312`（Python 3.12.13） |
 | 数据库 | SQLite → `data/sequoia_v2.db`（约600MB） |
-| 数据源 | baostock(主) + TencentSource(备) 双轨 |
+| 数据源 | TencentSource(主力) + baostock(后备) 双轨 |
 | 通知通道 | WxPusher 微信推送 |
 | LLM 分析 | DeepSeek API（deepseek-v4-flash） |
 
@@ -121,9 +121,9 @@ baostock API + TencentSource(腾讯/新浪)
     ▼
 DataSync（数据同步层，5阶段管线）
     ├─ sync_stock_list()    — 股票列表同步(上市/退市检测)
-    ├─ sync_daily()         — 增量日线同步(双轨数据源)
-    ├─ repair_missing()     — 缺失补填(含Tencent回退)
-    ├─ _fill_valuation_gaps() — 估值字段回填
+    ├─ sync_daily()         — 增量日线同步(Tencent主力→baostock后备)
+    ├─ _fill_ohlcv_gaps()    — OHLCV历史缺失补填(Tencent)
+    ├─ _fill_valuation_gaps() — 估值字段补充(baostock)
     └─ sync_index_daily()   — 6大指数日线同步
     │
     ▼
@@ -297,6 +297,7 @@ python -u fill_extra_fields.py     # 补全扩展字段(一次性)
 | **2026-06-20** | **v2.4** | **Bug 修复(11项)+全面测试覆盖**：baostock_available 复位修复、会话管理统一、NameError、Tencent 代码格式、pctChg 缺失、PRAGMA WAL/NORMAL、check_missing 区间修正、新股自动补充等。详见[数据同步框架指南](./数据同步框架需求与运行指南.md)版本历史 |
 | **2026-06-22** | **v2.5** | **全自动管线**：新增 `pipeline/pipeline.py` 统一编排 sync→strategy→018→未来项目；cron 单入口 18:10；status.json 实时进度。日志优化：逐只写入降为 DEBUG，每百只带代码范围 + 数据来源标识 |
 | **2026-06-24** | **v2.6** | **退市数据归档 + 数据源切换简化 + 018 指标策略修复**：① Phase 1b 退市股行情迁入 stock_daily_archive；② 数据源切换 6→3 变量状态机；③ 018 DynamicIndicator 目标股持久化、选股池扩大至 HS300+ZZ500、TOP_N 10→20 |
+| **2026-06-28** | **v2.7** | **数据源架构重整：Tencent主力+baostock后备**：① Phase 2 数据源优先级反转；② Phase 2b 新增 _fill_ohlcv_gaps(); ③ Phase 3 改为纯baostock估值补充，超2h跳过，与策略解耦；④ pipeline sync超时 3h→4h |
 
 ---
 
