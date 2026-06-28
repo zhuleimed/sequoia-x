@@ -1747,27 +1747,34 @@ class DataSync:
                 "error": "Phase 2 sync_daily 失败",
             }
 
-        # Phase 3: 缺失补填（Phase 2 skipped 也继续）
-        logger.info("run_full Phase 3: 缺失补填")
-        r3: dict = self.repair_missing(days=5)
+        # Phase 3: 缺失补填（已运行超过 2h 则跳过，避免阻塞管线）
+        elapsed_before_repair = time.time() - t0
+        if elapsed_before_repair > 7200:  # 2h
+            logger.warning(
+                f"run_full: 已运行 {elapsed_before_repair:.0f}s，跳过 Phase 3 repair_missing"
+                f"（Phase 2 已完成，数据已入库，不影响选股）"
+            )
+            r3 = {"status": "skipped", "checked": 0, "affected_stocks": 0, "total_filled": 0}
+        else:
+            logger.info("run_full Phase 3: 缺失补填")
+            r3 = self.repair_missing(days=5)
         phases["repair"] = r3
 
         # Phase 4: 估值字段回填（仅当 baostock 可用时）
         logger.info("run_full Phase 4: 估值字段回填")
         r4v: dict = self._fill_valuation_gaps(days=5)
 
-        # Phase 5: 指数日线同步（error 不终止管线）
+        # Phase 5: 指数日线同步
         logger.info("run_full Phase 5: 指数日线同步")
         r4: dict = self.sync_index_daily()
         phases["index_sync"] = r4
 
-        # 汇总结果
+        # 汇总结果（Phase 2 已完成 → 数据已入库 → 整体为 ok）
         overall_status: str = "ok"
         error_msg: str = ""
         if r3.get("status") == "error":
-            overall_status = "error"
-            error_msg = "Phase 3 repair_missing 失败"
-        elif r4.get("status") == "error":
+            logger.warning(f"Phase 3 repair_missing 异常（不影响已有数据）: {r3.get('error')}")
+        if r4.get("status") == "error":
             # 指数同步失败不视为整体失败
             logger.warning(f"run_full: 指数同步失败（不影响选股）: {r4.get('error')}")
 
