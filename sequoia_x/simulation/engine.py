@@ -280,6 +280,15 @@ class SimEngine:
             bought.append(record)
             logger.info(f"sim: 买入 {sym} {max_shares}股 @ {buy_price:.4f}（总成本{total_cost:.2f}）")
 
+        # ── 取消剩余信号（仓位不够/今日无法执行的，不保留到下一日） ──
+        # 多余的信号不保留，T+1 晚 LLM 会重新推荐，确保推荐不过时
+        remaining = signals[slots_available:]
+        for s in remaining:
+            mark_signal_cancelled(self.db_path, s["id"], "仓位不足，取消待下次推荐")
+        if remaining:
+            logger.info(f"sim: 取消 {len(remaining)} 条未执行信号（仓位不足: "
+                        f"{' '.join(s['symbol'] for s in remaining)}）")
+
         return bought
 
     # ════════════════════════════════════════════════════════
