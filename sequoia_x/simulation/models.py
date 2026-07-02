@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS sim_positions (
     today_opened    INTEGER DEFAULT 0,      -- 今日开仓（T+1 保护）
     signal_id       INTEGER,                -- 关联的买入信号 id
     pending_sell_reason TEXT,               -- 非空=待卖出（T+1待执行订单）
+    llm_override_count  INTEGER DEFAULT 0,  -- LLM覆盖卖出次数（≥3强制卖出）
     UNIQUE(symbol, buy_date)
 );
 """
@@ -119,6 +120,7 @@ def init_sim_tables(db_path: str) -> None:
         # 迁移：为已有数据库补充新列
         for col_sql in [
             "ALTER TABLE sim_positions ADD COLUMN pending_sell_reason TEXT",
+            "ALTER TABLE sim_positions ADD COLUMN llm_override_count INTEGER DEFAULT 0",
         ]:
             try:
                 conn.execute(col_sql)
@@ -256,8 +258,8 @@ def insert_position(db_path: str, symbol: str, strategy_from: str,
             "INSERT INTO sim_positions "
             "(symbol, strategy_from, buy_date, buy_price, shares, total_cost, "
             " highest_price, highest_value, current_price, current_value, "
-            " pnl, pnl_pct, hold_days, today_opened, signal_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " pnl, pnl_pct, hold_days, today_opened, signal_id, llm_override_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (symbol, strategy_from, buy_date, buy_price, shares, total_cost,
              buy_price, buy_price * shares, buy_price, buy_price * shares,
              0.0, 0.0, 0, 1, signal_id),
@@ -344,6 +346,32 @@ def clear_pending_sell(db_path: str, pos_id: int) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE sim_positions SET pending_sell_reason=NULL WHERE id=?",
+            (pos_id,),
+        )
+        conn.commit()
+
+
+def increment_llm_override(db_path: str, pos_id: int) -> int:
+    """LLM 覆盖卖出次数 +1，返回更新后的次数。"""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sim_positions SET llm_override_count = llm_override_count + 1 "
+            "WHERE id=?",
+            (pos_id,),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT llm_override_count FROM sim_positions WHERE id=?",
+            (pos_id,),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def reset_llm_override(db_path: str, pos_id: int) -> None:
+    """重置 LLM 覆盖计数器（卖出正常执行时调用）。"""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sim_positions SET llm_override_count=0 WHERE id=?",
             (pos_id,),
         )
         conn.commit()

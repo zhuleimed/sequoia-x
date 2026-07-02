@@ -59,6 +59,8 @@ from sequoia_x.simulation.models import (
     mark_position_for_sell,
     clear_pending_sell,
     get_today_recommended_symbols,
+    increment_llm_override,
+    reset_llm_override,
     insert_closed_trade,
     upsert_account_daily,
     get_account_summary,
@@ -433,14 +435,26 @@ class SimEngine:
 
             if result.should_exit:
                 # LLM 同日推荐覆盖：若该股也在今日 LLM 推荐中，则继续持有
+                # 但连续覆盖 ≥ 3 次后强制卖出，不再覆盖
                 if sym in today_llm_picks:
-                    logger.info(
-                        f"sim 评: {sym} 卖出触发但 LLM 同日推荐，"
-                        f"覆盖卖出信号，继续持有"
-                    )
+                    override_count = increment_llm_override(self.db_path, pos_id)
+                    MAX_OVERRIDE = 3
+                    if override_count >= MAX_OVERRIDE:
+                        mark_position_for_sell(self.db_path, pos_id,
+                                               f"LLM覆盖{MAX_OVERRIDE}次后强制卖出({result.reason})")
+                        marked_count += 1
+                        logger.info(
+                            f"sim 评: {sym} LLM已连续覆盖{override_count}次，"
+                            f"强制执行卖出"
+                        )
+                    else:
+                        logger.info(
+                            f"sim 评: {sym} 卖出触发但 LLM 同日推荐"
+                            f"（第{override_count}次覆盖），继续持有"
+                        )
                     continue
 
-                # 标记待卖出（明日以开盘价执行）
+                # 未覆盖：标记待卖出（明日以开盘价执行）
                 mark_position_for_sell(self.db_path, pos_id, result.reason)
                 marked_count += 1
                 logger.info(
