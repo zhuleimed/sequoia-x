@@ -48,8 +48,9 @@ CREATE TABLE IF NOT EXISTS sim_positions (
     pnl             REAL,
     pnl_pct         REAL,
     hold_days       INTEGER DEFAULT 0,
-    today_opened    INTEGER DEFAULT 0,
-    signal_id       INTEGER,
+    today_opened    INTEGER DEFAULT 0,      -- 今日开仓（T+1 保护）
+    signal_id       INTEGER,                -- 关联的买入信号 id
+    pending_sell_reason TEXT,               -- 非空=待卖出（T+1待执行订单）
     UNIQUE(symbol, buy_date)
 );
 """
@@ -115,6 +116,14 @@ def init_sim_tables(db_path: str) -> None:
     with sqlite3.connect(db_path) as conn:
         for sql in [SQL_BUY_SIGNALS, SQL_POSITIONS, SQL_CLOSED_TRADES, SQL_ACCOUNT_DAILY]:
             conn.execute(sql)
+        # 迁移：为已有数据库补充新列
+        for col_sql in [
+            "ALTER TABLE sim_positions ADD COLUMN pending_sell_reason TEXT",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass
         # 单独执行索引
         for stmt in SQL_INDEXES.strip().split("\n"):
             s = stmt.strip()
@@ -288,6 +297,39 @@ def remove_position(db_path: str, pos_id: int) -> Optional[dict]:
         conn.execute("DELETE FROM sim_positions WHERE id=?", (pos_id,))
         conn.commit()
     return pos
+
+
+# ── 待卖出订单（T+1 待执行卖出） ──
+
+
+def mark_position_for_sell(db_path: str, pos_id: int, reason: str) -> None:
+    """标记持仓为待卖出（创建 T+1 待执行卖出订单）。"""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sim_positions SET pending_sell_reason=? WHERE id=?",
+            (reason, pos_id),
+        )
+        conn.commit()
+
+
+def get_positions_pending_sell(db_path: str) -> list[dict]:
+    """获取所有标记为待卖出的持仓。"""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM sim_positions WHERE pending_sell_reason IS NOT NULL"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_pending_sell(db_path: str, pos_id: int) -> None:
+    """清除待卖出标记（卖出取消时用）。"""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sim_positions SET pending_sell_reason=NULL WHERE id=?",
+            (pos_id,),
+        )
+        conn.commit()
 
 
 # ════════════════════════════════════════════════════════════

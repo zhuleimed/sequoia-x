@@ -55,6 +55,9 @@ from sequoia_x.simulation.models import (
     get_all_positions,
     update_position_valuation,
     remove_position,
+    get_positions_pending_sell,
+    mark_position_for_sell,
+    clear_pending_sell,
     insert_closed_trade,
     upsert_account_daily,
     get_account_summary,
@@ -96,8 +99,16 @@ class SimEngine:
     def run_daily(self) -> dict:
         """执行一个交易日的完整模拟盘流程。
 
+        T+1 模型（同 019 ETF 模拟盘）：
+          Step 3: 执行待执行订单（用今日 OPEN）
+            ├─ 先卖出（pending_sell → 释放仓位）
+            └─ 再买入（pending 信号 → 递补）
+          Step 4: 更新估值 + 运行卖出规则（用今日 CLOSE）
+            └─ 触发则标记 pending_sell（明日 OPEN 执行）
+          Step 5: 写入账户日结
+
         Returns:
-            {"status": "ok"|"skipped"|"error", "actions": [...], "detail": ...}
+            {"status": "ok"|"skipped"|"error", "actions": [...], ...}
         """
         today_str = date.today().isoformat()
         results: dict = {
@@ -106,6 +117,7 @@ class SimEngine:
             "actions": [],
             "bought": [],
             "sold": [],
+            "marked_sell": 0,
             "positions_updated": 0,
         }
 
@@ -125,21 +137,24 @@ class SimEngine:
             results["detail"] = f"latest_data={latest_date}"
             return results
 
-        # ── 3. 先卖出：更新持仓估值 + 运行卖出规则（用今日收盘价） ──
-        # 卖出释放的仓位，供下一步买入递补
-        closed_trades = self._update_and_evaluate(today_str)
-        results["sold"] = closed_trades
-        if closed_trades:
-            results["actions"].append(f"卖出 {len(closed_trades)} 只")
-
-        # ── 4. 再买入：执行 T-1 日 LLM 推荐的待执行信号（用今日开盘价） ──
-        # 已卖出的仓位由 LLM 最新推荐递补
-        bought = self._execute_pending_buys(today_str)
+        # ── 3. 执行待执行订单（T+1 模型，均用今日 OPEN 价） ──
+        #    先卖出（释放仓位）→ 再买入（递补）
+        sold, bought = self._execute_pending_orders(today_str)
+        results["sold"] = sold
         results["bought"] = bought
+        if sold:
+            results["actions"].append(f"卖出 {len(sold)} 只")
         if bought:
             results["actions"].append(f"买入 {len(bought)} 只")
 
-        # ── 5. 写入账户总览 ──
+        # ── 4. 更新估值 + 运行卖出规则（用今日 CLOSE 评估，标记待卖出） ──
+        #    触发条件 → 写入 pending_sell_reason，明日 OPEN 再执行卖出
+        marked = self._update_and_evaluate(today_str)
+        results["marked_sell"] = marked
+        if marked > 0:
+            results["actions"].append(f"标记待卖出 {marked} 只")
+
+        # ── 5. 写入账户日结 ──
         self._write_account_daily(today_str)
         results["positions_updated"] = len(get_all_positions(self.db_path))
 
@@ -149,38 +164,110 @@ class SimEngine:
         logger.info(f"═══ 模拟盘更新完成 [{today_str}] ═══")
         if bought:
             logger.info(f"  买入: {' '.join(b['symbol'] for b in bought)}")
-        if closed_trades:
-            sold_str = " ".join(f'{c["symbol"]}({c["pnl_pct"]:+.1%})' for c in closed_trades)
+        if sold:
+            sold_str = " ".join(f'{c["symbol"]}({c["pnl_pct"]:+.1%})' for c in sold)
             logger.info(f"  卖出: {sold_str}")
+        if marked:
+            logger.info(f"  标记待卖出: {marked} 只")
         logger.info(f"  当前持仓: {results['positions_updated']} 只")
 
         return results
 
     # ════════════════════════════════════════════════════════
-    #  买入执行（T+1 模型）
+    #  待执行订单（T+1 模型：先卖后买，均用开盘价）
     # ════════════════════════════════════════════════════════
 
-    def _execute_pending_buys(self, today_str: str) -> list[dict]:
-        """执行所有待买入信号。
+    def _execute_pending_orders(self, today_str: str) -> tuple[list[dict], list[dict]]:
+        """执行所有待执行订单：先卖出（释放仓位），再买入（递补）。
 
-        检查清单：
-          - 涨停/跌停 → 取消信号（不顺延）
-          - 停牌 → 取消信号（不顺延）
-          - 仓位已达上限 → 取消信号
-          - 资金不足 → 取消信号
+        均用今日 OPEN 价格执行。卖出和买入的决策依据都是 T-1 日 CLOSE 数据。
+
+        Returns:
+            (sold_list, bought_list)
+        """
+        sold = self._execute_pending_sells(today_str)
+        bought = self._execute_pending_buys(today_str)
+        return sold, bought
+
+    def _execute_pending_sells(self, today_str: str) -> list[dict]:
+        """执行所有待卖出订单。
+
+        读取 pending_sell_reason 标记的持仓，用今日 OPEN 价卖出。
+        检查跌停/停牌 → 失败则取消标记（不顺延，今晚重新评估）。
+
+        Returns:
+            [{"symbol": "600519", "pnl": 1234.56, "pnl_pct": 0.0414, ...}, ...]
+        """
+        pending = get_positions_pending_sell(self.db_path)
+        if not pending:
+            return []
+
+        sold: list[dict] = []
+
+        for pos in pending:
+            pos_id = pos["id"]
+            sym = pos["symbol"]
+
+            # 获取今日行情
+            today_data = self._get_today_data(sym, today_str)
+            if today_data is None:
+                clear_pending_sell(self.db_path, pos_id)
+                logger.warning(f"sim 卖 {sym}: 无今日行情，取消待卖出")
+                continue
+
+            open_price = today_data["open"]
+            prev_close = today_data.get("prev_close", open_price)
+            volume = today_data.get("volume", 0)
+
+            # 跌停检查（跌停时卖不出）
+            if self._is_limit_down(open_price, prev_close):
+                clear_pending_sell(self.db_path, pos_id)
+                logger.info(f"sim 卖 {sym}: 开盘跌停，取消待卖出（今晚重新评估）")
+                continue
+
+            # 停牌检查
+            if volume == 0:
+                clear_pending_sell(self.db_path, pos_id)
+                logger.info(f"sim 卖 {sym}: 停牌，取消待卖出（今晚重新评估）")
+                continue
+
+            # 执行卖出
+            exit_reason = pos.get("pending_sell_reason", "规则触发")
+            trade = self._execute_sell(
+                pos_id=pos_id,
+                symbol=sym,
+                shares=pos["shares"],
+                buy_price=pos["buy_price"],
+                buy_date=pos["buy_date"],
+                sell_price=open_price,        # ← 关键：用开盘价卖出
+                hold_days=pos["hold_days"],
+                total_cost=pos["total_cost"],
+                strategy_from=pos.get("strategy_from", ""),
+                exit_reason=exit_reason,
+            )
+            if trade:
+                sold.append(trade)
+                push_trade_report(self.settings, trade)
+
+        return sold
+
+    def _execute_pending_buys(self, today_str: str) -> list[dict]:
+        """执行待买入信号（T-1 日 LLM 推荐）。
+
+        用今日 OPEN 价买入。检查涨停/停牌/仓位上限/资金。
+        超出仓位的信号取消（不留存）。
 
         Returns:
             [{"symbol": "600519", "shares": 300, "price": 150.00, ...}, ...]
         """
         signals = get_pending_signals(self.db_path)
         if not signals:
-            logger.info("sim: 无待执行买入信号")
             return []
 
-        # 检查当前持仓数量
+        # 检查当前持仓数量（卖出已执行完，此时仓位已释放）
         current_positions = get_all_positions(self.db_path)
         if len(current_positions) >= MAX_POSITIONS:
-            logger.info(f"sim: 持仓已达上限({MAX_POSITIONS}只)，取消所有买入信号")
+            logger.info(f"sim 买: 持仓已达上限({MAX_POSITIONS}只)，取消所有买入信号")
             for s in signals:
                 mark_signal_cancelled(self.db_path, s["id"], "持仓已达上限")
             return []
@@ -192,50 +279,47 @@ class SimEngine:
 
         for signal in signals[:slots_available]:
             sym = signal["symbol"]
-            bs_code = DataEngine._to_baostock_code(sym)
 
-            # ── 获取今日行情 ──
             today_data = self._get_today_data(sym, today_str)
             if today_data is None:
                 mark_signal_cancelled(self.db_path, signal["id"],
                                       f"{sym} 无今日行情数据")
-                logger.warning(f"sim: {sym} 无今日行情，信号取消")
+                logger.warning(f"sim 买 {sym}: 无今日行情，信号取消")
                 continue
 
             open_price = today_data["open"]
             prev_close = today_data.get("prev_close", open_price)
             volume = today_data.get("volume", 0)
 
-            # ── 涨停检查 ──
+            # 涨停检查
             if self._is_limit_up(open_price, prev_close):
                 mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 开盘涨停（前收{prev_close:.2f}→开{open_price:.2f}）")
-                logger.info(f"sim: {sym} 涨停，信号取消")
+                                      f"{sym} 开盘涨停")
+                logger.info(f"sim 买 {sym}: 涨停，信号取消")
                 continue
 
-            # ── 跌停检查（A 股跌停时买入可以，但不常见；跌停后难买入，顺带检查） ──
+            # 跌停检查
             if self._is_limit_down(open_price, prev_close):
                 mark_signal_cancelled(self.db_path, signal["id"],
                                       f"{sym} 开盘跌停")
-                logger.info(f"sim: {sym} 跌停，信号取消")
+                logger.info(f"sim 买 {sym}: 跌停，信号取消")
                 continue
 
-            # ── 停牌检查 ──
+            # 停牌检查
             if volume == 0:
                 mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 停牌（当日零成交）")
-                logger.info(f"sim: {sym} 停牌，信号取消")
+                                      f"{sym} 停牌")
+                logger.info(f"sim 买 {sym}: 停牌，信号取消")
                 continue
 
-            # ── 执行买入 ──
+            # 执行买入
             budget = min(PER_STOCK_BUDGET, cash_balance)
-            buy_price = open_price * (1 + SLIPPAGE)  # 含滑点
+            buy_price = open_price * (1 + SLIPPAGE)
             max_shares = int(budget // buy_price // 100) * 100
 
             if max_shares <= 0:
                 mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"资金不足（预算{budget:.0f}，不够1手={buy_price*100:.0f})")
-                logger.warning(f"sim: {sym} 资金不足，信号取消")
+                                      f"资金不足（预算{budget:.0f}，不够1手）")
                 continue
 
             cost = max_shares * buy_price
@@ -243,17 +327,14 @@ class SimEngine:
             total_cost = cost + commission
 
             if total_cost > cash_balance:
-                # 重新计算：用可用资金
                 max_shares = int(cash_balance // buy_price // 100) * 100
                 if max_shares <= 0:
-                    mark_signal_cancelled(self.db_path, signal["id"],
-                                          f"现金余额不足")
+                    mark_signal_cancelled(self.db_path, signal["id"], "现金余额不足")
                     continue
                 cost = max_shares * buy_price
                 commission = max(cost * COMMISSION_RATE, 0.0)
                 total_cost = cost + commission
 
-            # 写入持仓
             insert_position(
                 self.db_path,
                 symbol=sym,
@@ -265,74 +346,61 @@ class SimEngine:
                 signal_id=signal["id"],
             )
 
-            # 标记信号已执行
             mark_signal_executed(self.db_path, signal["id"],
                                  round(buy_price, 4), max_shares)
-
-            # 扣减现金余额
             cash_balance -= total_cost
 
-            record = {
+            bought.append({
                 "symbol": sym,
                 "shares": max_shares,
                 "price": round(buy_price, 4),
                 "cost": round(total_cost, 2),
-                "signal_id": signal["id"],
-            }
-            bought.append(record)
-            logger.info(f"sim: 买入 {sym} {max_shares}股 @ {buy_price:.4f}（总成本{total_cost:.2f}）")
+            })
+            logger.info(f"sim 买: {sym} {max_shares}股 @ {buy_price:.4f}")
 
-        # ── 取消剩余信号（仓位不够/今日无法执行的，不保留到下一日） ──
-        # 多余的信号不保留，T+1 晚 LLM 会重新推荐，确保推荐不过时
+        # 取消多余信号（仓位不够，不留存）
         remaining = signals[slots_available:]
         for s in remaining:
             mark_signal_cancelled(self.db_path, s["id"], "仓位不足，取消待下次推荐")
         if remaining:
-            logger.info(f"sim: 取消 {len(remaining)} 条未执行信号（仓位不足: "
-                        f"{' '.join(s['symbol'] for s in remaining)}）")
+            logger.info(f"sim 买: 取消 {len(remaining)} 条未执行信号")
 
         return bought
 
     # ════════════════════════════════════════════════════════
-    #  估值更新 + 卖出判定
+    #  估值更新 + 卖出判定（T+1 模型：只标记，不平仓）
     # ════════════════════════════════════════════════════════
 
-    def _update_and_evaluate(self, today_str: str) -> list[dict]:
-        """更新所有持仓的当日估值，并对每只运行卖出规则。
+    def _update_and_evaluate(self, today_str: str) -> int:
+        """更新所有持仓估值，运行卖出规则，触发则标记待卖出（明日 OPEN 执行）。
 
-        流程：
-          1. 加载所有持仓
-          2. 对每只持仓：获取当日收盘价 → 更新估值
-          3. 运行卖出规则 → 触发则卖出
-          4. 卖出后生成交易报告并推送
+        注意：这里只写入 pending_sell_reason，不实际平仓。
+        实际卖出在次日 _execute_pending_sells() 中以开盘价执行。
 
         Returns:
-            [{"symbol": "600519", "pnl": 1234.56, "pnl_pct": 0.0414, ...}, ...]
+            标记为待卖出的持仓数量。
         """
         positions = get_all_positions(self.db_path)
         if not positions:
-            logger.info("sim: 无持仓，跳过估值更新")
-            return []
+            return 0
 
-        # 预加载指数数据（所有持仓共用同一个指数用于相对强弱）
         index_df = self._get_index_df(today_str)
-
-        closed_trades: list[dict] = []
+        marked_count = 0
 
         for pos in positions:
+            # 已标记待卖出的跳过（等待明日执行）
+            if pos.get("pending_sell_reason"):
+                continue
+
             sym = pos["symbol"]
             pos_id = pos["id"]
 
-            # ── 获取股票行情 ──
             df = self.engine.get_ohlcv(sym)
             if df.empty:
-                logger.warning(f"sim: {sym} 无行情数据，跳过估值")
                 continue
 
-            # 找今日行情的索引
             today_mask = df["date"] == today_str
             if not today_mask.any():
-                logger.debug(f"sim: {sym} 今日({today_str})无数据，跳过估值")
                 continue
 
             today_row = df[today_mask].iloc[-1]
@@ -344,12 +412,12 @@ class SimEngine:
                 pos["shares"], pos["total_cost"],
             )
 
-            # 重新读取持仓（获取更新后的 highest_price 和 hold_days）
+            # 重新读取持仓
             updated_pos = self._get_position(pos_id)
             if updated_pos is None:
                 continue
 
-            # ── 运行卖出规则 ──
+            # 运行卖出规则
             result = evaluate_exit(
                 entry_price=updated_pos["buy_price"],
                 current_price=close_price,
@@ -361,26 +429,15 @@ class SimEngine:
             )
 
             if result.should_exit:
-                # ── 执行卖出 ──
-                close_trade = self._execute_sell(
-                    pos_id=pos_id,
-                    symbol=sym,
-                    shares=updated_pos["shares"],
-                    buy_price=updated_pos["buy_price"],
-                    buy_date=updated_pos["buy_date"],
-                    sell_price=close_price,
-                    hold_days=updated_pos["hold_days"],
-                    total_cost=updated_pos["total_cost"],
-                    strategy_from=updated_pos.get("strategy_from", ""),
-                    exit_reason=result.reason,
+                # 标记待卖出（明日以开盘价执行）
+                mark_position_for_sell(self.db_path, pos_id, result.reason)
+                marked_count += 1
+                logger.info(
+                    f"sim 评: {sym} 触发卖出（{result.reason}），"
+                    f"明日 OPEN 执行"
                 )
-                if close_trade:
-                    closed_trades.append(close_trade)
 
-                    # 推送单股交易报告
-                    push_trade_report(self.settings, close_trade)
-
-        return closed_trades
+        return marked_count
 
     # ════════════════════════════════════════════════════════
     #  卖出执行
