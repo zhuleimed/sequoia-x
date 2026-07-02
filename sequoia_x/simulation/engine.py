@@ -125,17 +125,19 @@ class SimEngine:
             results["detail"] = f"latest_data={latest_date}"
             return results
 
-        # ── 3. 执行待买入信号（T+1: 用今日开盘价） ──
-        bought = self._execute_pending_buys(today_str)
-        results["bought"] = bought
-        if bought:
-            results["actions"].append(f"买入 {len(bought)} 只")
-
-        # ── 4. 更新所有持仓估值（用今日收盘价） + 运行卖出规则 ──
+        # ── 3. 先卖出：更新持仓估值 + 运行卖出规则（用今日收盘价） ──
+        # 卖出释放的仓位，供下一步买入递补
         closed_trades = self._update_and_evaluate(today_str)
         results["sold"] = closed_trades
         if closed_trades:
             results["actions"].append(f"卖出 {len(closed_trades)} 只")
+
+        # ── 4. 再买入：执行 T-1 日 LLM 推荐的待执行信号（用今日开盘价） ──
+        # 已卖出的仓位由 LLM 最新推荐递补
+        bought = self._execute_pending_buys(today_str)
+        results["bought"] = bought
+        if bought:
+            results["actions"].append(f"买入 {len(bought)} 只")
 
         # ── 5. 写入账户总览 ──
         self._write_account_daily(today_str)
