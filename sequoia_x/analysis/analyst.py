@@ -263,12 +263,16 @@ class MarketAnalyst:
         self.model = model
         self.base_url = base_url
 
-    def analyze(self, strategies_results: dict[str, list[str]]) -> str:
+    def analyze(self, strategies_results: dict[str, list[str]]) -> tuple[str, list[str]]:
         """执行完整的多维分析。
 
         1. 收集大盘指数 + 市场情绪数据
         2. 对每只候选股采集实时行情 + 财务数据（知兔 API 优先）
         3. 将全部实时数据作为 prompt 上下文 → LLM 分析
+        4. 解析 LLM 推荐股票（从 RECOMMEND 行）
+
+        Returns:
+            (report_text, recommended_symbols) — 报告文本和推荐股票代码列表。
         """
         logger.info("MarketAnalyst: 开始实时数据采集（知兔 API + 大盘情绪 + SQLite）...")
         t0 = time.time()
@@ -316,8 +320,25 @@ class MarketAnalyst:
         logger.info(f"MarketAnalyst: 调用 DeepSeek API ({self.model})...")
         report = self._call_llm(prompt)
 
-        logger.info(f"MarketAnalyst: 分析完成, 总耗时 {time.time()-t0:.0f}秒")
-        return report
+        # 5. 解析推荐股票（从 RECOMMEND 行）
+        recommended: list[str] = []
+        for line in reversed(report.strip().split("\n")):
+            ls = line.strip()
+            if ls.upper().startswith("RECOMMEND:"):
+                import re
+                codes = re.findall(r"\d{6}", ls[len("RECOMMEND:"):])
+                recommended = codes[:2]
+                break
+        # 回退：按多策略频率取前 2 只
+        if not recommended:
+            from collections import Counter
+            freq: Counter = Counter()
+            for syms in strategies_results.values():
+                freq.update(syms)
+            recommended = [sym for sym, _ in freq.most_common(2)]
+
+        logger.info(f"MarketAnalyst: 分析完成, 推荐 {recommended}, 总耗时 {time.time()-t0:.0f}秒")
+        return report, recommended
 
     # ═══════════════════════════════════════════
     # 采集层 — 全实时数据，无需 LLM 自身知识
@@ -1042,6 +1063,9 @@ class MarketAnalyst:
 - 最优关注: [1-2只，给出明确理由]
 - 操作建议: [明确的买卖建议]
 - 风险提醒: [整体风险提示]
+
+[最后一行，仅用于程序自动读取，不要改动格式]
+RECOMMEND: 600519,000858
 
 请开始分析："""
         return prompt

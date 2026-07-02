@@ -65,12 +65,11 @@ Phase 4:  sync_index_daily()        → 6大指数日线
   │    6阶段管线(Phase 1~4) → 同步完成立即下一步
   │
   ├─ Step 2: 策略选股+LLM（main.py）
-  │    数据检查→7策略选股→LLM→推送
+  │    数据检查→8策略选股→LLM→推送，同时保存LLM推荐到模拟盘买入信号
   │
-  ├─ Step 3: 018 LSTM 策略（可选）
-  ├─ Step 4: 018 指标策略（可选）
-  └─ Step 5+: 未来项目（在 pipeline.py 加一行配置）
-       │
+  ├─ Step 3: 模拟盘更新（main.py --sim-update）
+  │    T+1开盘买入→每日估值→多因子评分卖出→单股报告+组合日报推送
+  │
   └─ 推送全管线汇总到微信
 ```
 
@@ -134,10 +133,27 @@ python main.py
 
 ---
 
+## 📈 模拟盘交易模块
+
+LLM 推荐股票自动进入 T+1 模拟盘交易，全程自动化。
+
+| 特性 | 说明 |
+|:------|:------|
+| 初始资金 | 100 万，单只分配 5 万，最多 20 只 |
+| 买入价 | T+1 日开盘价（检查涨停/停牌/仓位上限） |
+| 卖出触发 | 多因子评分 ≥ 60（硬止损/移动止盈/时间/均线死叉/夏普/相对弱势） |
+| 交易成本 | 佣金万2.5 + 印花税千1 + 滑点万1 |
+| 报告推送 | 单股平仓报告 + 组合日报（微信） |
+| 新策略接入 | `submit_buy_signals()` 一行代码即可 |
+
+详细说明见：[模拟盘交易模块使用说明.md](./模拟盘交易模块使用说明.md)
+
+---
+
 ## ⏰ Cron 定时任务
 
 ```cron
-# ===== Sequoia-X 全自动管线（唯一入口，顺序执行 sync→strategy→018）=====
+# ===== Sequoia-X 全自动管线（唯一入口，顺序执行 sync→strategy→simulation）=====
 10 18 * * 1-5 cd /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x && /home/zhulei/anaconda3/envs/zhulei_py312/bin/python pipeline/pipeline.py >> logs/pipeline_$(date +\%Y\%m\%d).log 2>&1
 ```
 
@@ -146,7 +162,7 @@ python main.py
 
 | 时间 | 任务 | 说明 |
 |:----:|:------|:------|
-| 18:10 | 全自动管线启动 | 同步→选股→018 链式执行，上一步完成即下一步 |
+| 18:10 | 全自动管线启动 | 同步→选股→模拟盘 链式执行，上一步完成即下一步 |
 
 状态文件：`/public/home/hpc/zhulei/superman/quant/code/pipeline_status.json`（code 根目录）
 
@@ -160,6 +176,7 @@ python main.py
 
 - [数据同步框架需求与运行指南.md](./%E6%95%B0%E6%8D%AE%E5%90%8C%E6%AD%A5%E6%A1%86%E6%9E%B6%E9%9C%80%E6%B1%82%E4%B8%8E%E8%BF%90%E8%A1%8C%E6%8C%87%E5%8D%97.md) — 同步模块详细文档
 - [004_Sequoia-X量化选股系统开发部署运行指南.md](./004_Sequoia-X%E9%87%8F%E5%8C%96%E9%80%89%E8%82%A1%E7%B3%BB%E7%BB%9F%E5%BC%80%E5%8F%91%E9%83%A8%E7%BD%B2%E8%BF%90%E8%A1%8C%E6%8C%87%E5%8D%97.md) — 系统部署运维指南
+- [模拟盘交易模块使用说明.md](./%E6%A8%A1%E6%8B%9F%E7%9B%98%E4%BA%A4%E6%98%93%E6%A8%A1%E5%9D%97%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md) — 模拟盘模块详细文档
 
 ---
 

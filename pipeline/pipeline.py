@@ -70,29 +70,39 @@ STEPS: list[dict] = [
         "cmd": ["main.py"],
         "cwd": str(PROJECT_DIR),
         "python": PY312,
-        "required": False,   # 可选：失败不阻断管线，继续 018
+        "required": False,   # 可选：失败不阻断管线
         "timeout": 1800,  # 30min
     },
-    # ── 3. 018 LSTM 策略（可选） ──
+    # ── 3. 模拟盘更新（策略选股后执行，T+1 模式） ──
     {
-        "id": "p018_lstm",
-        "name": "018 LSTM 策略",
-        "cmd": ["run_daily.py", "--strategy", "lstm"],
-        "cwd": P018_DIR,
-        "python": PY39,
+        "id": "simulation",
+        "name": "模拟盘更新",
+        "cmd": ["main.py", "--sim-update"],
+        "cwd": str(PROJECT_DIR),
+        "python": PY312,
         "required": False,
-        "timeout": 1800,  # 30min
+        "timeout": 600,  # 10min（主要是数据库操作）
     },
-    # ── 4. 018 指标策略（可选） ──
-    {
-        "id": "p018_indicator",
-        "name": "018 指标策略",
-        "cmd": ["run_daily.py", "--strategy", "indicator"],
-        "cwd": P018_DIR,
-        "python": PY39,
-        "required": False,
-        "timeout": 1800,  # 30min
-    },
+    # ── 4. 018 LSTM 策略（可选，已暂停） ──
+    # {
+    #     "id": "p018_lstm",
+    #     "name": "018 LSTM 策略",
+    #     "cmd": ["run_daily.py", "--strategy", "lstm"],
+    #     "cwd": P018_DIR,
+    #     "python": PY39,
+    #     "required": False,
+    #     "timeout": 1800,  # 30min
+    # },
+    # ── 4. 018 指标策略（可选，已暂停） ──
+    # {
+    #     "id": "p018_indicator",
+    #     "name": "018 指标策略",
+    #     "cmd": ["run_daily.py", "--strategy", "indicator"],
+    #     "cwd": P018_DIR,
+    #     "python": PY39,
+    #     "required": False,
+    #     "timeout": 1800,  # 30min
+    # },
     # ── 未来项目加入示例 ──
     # {
     #     "id": "p019",

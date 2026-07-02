@@ -63,6 +63,17 @@ def main() -> None:
         action="store_true",
         help="与 --repair 配合使用：修复全部缺失股票（默认仅修复前50只）",
     )
+    parser.add_argument(
+        "--sim-update",
+        action="store_true",
+        help="模拟盘更新模式：执行买入信号/持仓估值/卖出判定",
+    )
+    parser.add_argument(
+        "--sim-report",
+        type=str,
+        default="",
+        help="模拟盘交易报告模式：指定股票代码生成交易历史报告",
+    )
     args = parser.parse_args()
 
     try:
@@ -121,6 +132,50 @@ def main() -> None:
                 }, repair_elapsed)
             _elapsed_total = time.monotonic() - _main_start
             logger.info(f"Sequoia-X V2 修复模式运行完成（总耗时 {_elapsed_total:.0f} 秒）")
+            return
+
+        if args.sim_update:
+            # ═══════════════════════════════════════════════
+            #  模拟盘更新模式（管线 Step 2.5）
+            # ═══════════════════════════════════════════════
+            logger.info("=== 模拟盘更新模式 ===")
+            try:
+                from sequoia_x.simulation.engine import SimEngine
+                sim = SimEngine(settings)
+                result = sim.run_daily()
+                status = result.get("status", "error")
+                actions = result.get("actions", [])
+                logger.info(
+                    f"模拟盘更新完成: status={status}, "
+                    f"actions={' / '.join(actions) if actions else '无操作'}"
+                )
+            except Exception as e:
+                logger.exception(f"模拟盘更新异常: {e}")
+            return
+
+        if args.sim_report:
+            # ═══════════════════════════════════════════════
+            #  模拟盘交易报告模式
+            # ═══════════════════════════════════════════════
+            logger.info(f"=== 模拟盘交易报告 [{args.sim_report}] ===")
+            try:
+                from sequoia_x.simulation.reporter import build_trade_report_text
+                import sqlite3
+                conn = sqlite3.connect(settings.db_path)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM sim_closed_trades WHERE symbol=? ORDER BY sell_date DESC",
+                    (args.sim_report,),
+                ).fetchall()
+                conn.close()
+                if rows:
+                    for row in rows:
+                        report = build_trade_report_text(dict(row))
+                        logger.info(f"\n{report}")
+                else:
+                    logger.info(f"无 {args.sim_report} 的已完成交易记录")
+            except Exception as e:
+                logger.warning(f"生成交易报告异常: {e}")
             return
 
         if args.sync_only:
@@ -272,10 +327,23 @@ def main() -> None:
                     api_key=settings.deepseek_api_key,
                     model=settings.deepseek_model,
                 )
-                report = analyst.analyze(strategies_results)
+                report, recommended = analyst.analyze(strategies_results)
 
                 _push_ai_report(settings, report)
                 logger.info("LLM 综合研判报告已推送")
+
+                # 保存 LLM 推荐到模拟盘买入信号（供次日的 --sim-update 使用）
+                if recommended:
+                    try:
+                        from sequoia_x.simulation.signals import save_llm_recommendations
+                        save_llm_recommendations(
+                            settings.db_path,
+                            strategies_results,
+                            llm_report=report,
+                            top_n=2,
+                        )
+                    except Exception as sim_e:
+                        logger.warning(f"保存模拟盘信号失败: {sim_e}")
             except Exception as e:
                 logger.warning(f"LLM 分析异常: {e}")
                 _push_fallback_results(notifier, strategies_results)
