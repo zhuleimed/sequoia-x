@@ -165,7 +165,9 @@ def save_llm_recommendations(
     recommended: list[str] = []
     if llm_report:
         recommended = parse_llm_report(llm_report)
-    if not recommended:
+        # LLM 已运行但未推荐任何股票（0 支），尊重 LLM 判断，不回退
+    if not recommended and not llm_report:
+        # LLM 未运行（如未配置 API Key），用多策略频率作为后备
         recommended = get_top_by_strategy_frequency(strategies_results, top_n)
 
     # 构建信号列表
