@@ -249,6 +249,8 @@ def main() -> None:
                     "last_sync_status": result["status"],
                     "error": result.get("error", ""),
                 }, mode="sync")
+                logger.error("数据同步失败，管线应终止")
+                sys.exit(1)  # 通知调用方（pipeline）同步失败
 
             _elapsed_total = time.monotonic() - _main_start
             logger.info(f"Sequoia-X V2 同步模式运行完成（总耗时 {_elapsed_total:.0f} 秒）")
