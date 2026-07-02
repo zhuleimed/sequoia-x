@@ -320,10 +320,32 @@ def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
         lines.append("")
 
     total_trades = len(trades)
-    lines.append(f"  ▶ 本月已平仓交易（共 {total_trades} 笔）")
+    lines.append(f"  ▶ 本月平仓交易（共 {total_trades} 笔）")
     lines.append("")
 
     if trades:
+        # ── 按策略分组统计 ──
+        from collections import defaultdict
+        strategy_trades: dict[str, list] = defaultdict(list)
+        for t in trades:
+            sf = t["strategy_from"] or "未知策略"
+            strategy_trades[sf].append(t)
+
+        lines.append("  ── 各策略表现 ──")
+        for sname in sorted(strategy_trades.keys()):
+            st = strategy_trades[sname]
+            pnl_arr_s = np.array([x["pnl"] for x in st])
+            pnl_pct_s = np.array([x["pnl_pct"] for x in st])
+            win_s = pnl_pct_s > 0
+            wr_s = win_s.mean()
+            lines.append(
+                f"    {sname}: {len(st)}笔 "
+                f"胜率{wr_s:.0%}({int(win_s.sum())}/{len(st)}) "
+                f"合计{pnl_arr_s.sum():+,.0f}"
+            )
+        lines.append("")
+
+        # ── 逐笔交易清单 ──
         pnl_pcts_list = []
         for t in trades:
             sym = t["symbol"]
@@ -331,10 +353,10 @@ def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
             pnl_pct = t["pnl_pct"]
             sharpe = t["sharpe_ratio"]
             hold = t["hold_days"]
-            reason = (t["exit_reason"] or "")[:20]
             tag = "✅" if pnl_pct >= 0 else "❌"
             sharpe_str = f" 夏普{sharpe:.2f}" if sharpe else ""
-            lines.append(f"    {tag} {name}({sym}) {pnl_pct:+.2%}{sharpe_str} {hold}日 [{reason}]")
+            sf = (t["strategy_from"] or "")[:8]
+            lines.append(f"    {tag} {name}({sym}) {pnl_pct:+.2%}{sharpe_str} {hold}日 [{sf}]")
             pnl_pcts_list.append(pnl_pct)
 
         pnl_arr = np.array(pnl_pcts_list)
