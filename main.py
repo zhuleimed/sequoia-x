@@ -74,6 +74,12 @@ def main() -> None:
         default="",
         help="模拟盘交易报告模式：指定股票代码生成交易历史报告",
     )
+    parser.add_argument(
+        "--sim-monthly-report",
+        type=str,
+        default="",
+        help="模拟盘月度报告：格式 YYYY-MM，如 2026-07",
+    )
     args = parser.parse_args()
 
     try:
@@ -176,6 +182,29 @@ def main() -> None:
                     logger.info(f"无 {args.sim_report} 的已完成交易记录")
             except Exception as e:
                 logger.warning(f"生成交易报告异常: {e}")
+            return
+
+        if args.sim_monthly_report:
+            logger.info(f"=== 模拟盘月度报告 [{args.sim_monthly_report}] ===")
+            try:
+                parts = args.sim_monthly_report.split("-")
+                if len(parts) != 2:
+                    logger.error("格式错误，应为 YYYY-MM，如 2026-07")
+                else:
+                    year, month = int(parts[0]), int(parts[1])
+                    from sequoia_x.simulation.reporter import build_monthly_report_text
+                    text = build_monthly_report_text(year, month, settings.db_path)
+                    logger.info(f"\n{text}")
+                    from wxpusher import WxPusher
+                    WxPusher.send_message(
+                        content=text,
+                        token=settings.wxpusher_token,
+                        topic_ids=settings.wxpusher_topic_ids,
+                        content_type=1,
+                    )
+                    logger.info("月度报告已推送")
+            except Exception as e:
+                logger.warning(f"生成月度报告异常: {e}")
             return
 
         if args.sync_only:

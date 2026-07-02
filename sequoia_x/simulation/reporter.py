@@ -250,6 +250,134 @@ def push_daily_summary(settings: Settings, text: str) -> None:
 
 
 # ════════════════════════════════════════════════════════════
+#  月度汇总报告
+# ════════════════════════════════════════════════════════════
+
+
+def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
+    """生成月度模拟盘汇总报告。
+
+    数据来源：
+      - sim_closed_trades：本月已平仓交易（含盈亏/夏普/回撤）
+      - sim_account_daily：本月账户日结（月初/月末资产）
+
+    Args:
+        year: 年份，如 2026。
+        month: 月份，如 7。
+        db_path: 数据库路径。
+
+    Returns:
+        格式化的月报文本。
+    """
+    import sqlite3
+    import numpy as np
+
+    start_str = f"{year}-{month:02d}-01"
+    if month == 12:
+        end_str = f"{year+1}-01-01"
+    else:
+        end_str = f"{year}-{month+1:02d}-01"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    trades = conn.execute(
+        "SELECT * FROM sim_closed_trades "
+        "WHERE sell_date >= ? AND sell_date < ? "
+        "ORDER BY sell_date ASC",
+        (start_str, end_str),
+    ).fetchall()
+
+    first_day = conn.execute(
+        "SELECT * FROM sim_account_daily WHERE date >= ? ORDER BY date ASC LIMIT 1",
+        (start_str,),
+    ).fetchone()
+
+    last_day = conn.execute(
+        "SELECT * FROM sim_account_daily WHERE date < ? ORDER BY date DESC LIMIT 1",
+        (end_str,),
+    ).fetchone()
+
+    conn.close()
+
+    month_str = f"{year}年{month}月"
+    lines = ["═" * 40, f"   Sequoia-X 模拟盘月报", f"   {month_str}", "═" * 40, ""]
+
+    if first_day and last_day:
+        begin_val = first_day["total_value"]
+        end_val = last_day["total_value"]
+        monthly_return = (end_val / begin_val - 1) if begin_val > 0 else 0.0
+        lines.append("  ▶ 月度概况")
+        lines.append(f"    月初总资产: {begin_val:>10,.2f}")
+        lines.append(f"    月末总资产: {end_val:>10,.2f}")
+        lines.append(f"    本月收益率: {monthly_return:>+8.2%}")
+        lines.append(f"    月末持仓: {last_day['position_count']} 只")
+        lines.append(f"    月末现金: {last_day['cash']:>10,.2f}")
+        lines.append("")
+    else:
+        lines.append("  ▶ 月度概况")
+        lines.append("    本月无模拟盘交易数据")
+        lines.append("")
+
+    total_trades = len(trades)
+    lines.append(f"  ▶ 本月已平仓交易（共 {total_trades} 笔）")
+    lines.append("")
+
+    if trades:
+        pnl_pcts_list = []
+        for t in trades:
+            sym = t["symbol"]
+            name = _get_name(sym)
+            pnl_pct = t["pnl_pct"]
+            sharpe = t["sharpe_ratio"]
+            hold = t["hold_days"]
+            reason = (t["exit_reason"] or "")[:20]
+            tag = "✅" if pnl_pct >= 0 else "❌"
+            sharpe_str = f" 夏普{sharpe:.2f}" if sharpe else ""
+            lines.append(f"    {tag} {name}({sym}) {pnl_pct:+.2%}{sharpe_str} {hold}日 [{reason}]")
+            pnl_pcts_list.append(pnl_pct)
+
+        pnl_arr = np.array(pnl_pcts_list)
+        win = pnl_arr > 0
+        win_rate = win.mean()
+        avg_win = pnl_arr[win].mean() if win.any() else 0.0
+        avg_loss = pnl_arr[~win].mean() if (~win).any() else 0.0
+        total_pnl = sum(t["pnl"] for t in trades)
+
+        lines.append("")
+        lines.append("  ▶ 绩效汇总")
+        lines.append(f"    胜率: {win_rate:.0%}（{int(win.sum())}/{total_trades}）")
+        lines.append(f"    平均盈利: {avg_win:+.2%}")
+        lines.append(f"    平均亏损: {avg_loss:+.2%}")
+        if abs(avg_loss) > 1e-10:
+            lines.append(f"    盈亏比: {abs(avg_win/avg_loss):.2f}")
+        lines.append(f"    平仓合计: {total_pnl:+,.2f}")
+
+        # 月内最大回撤
+        acct_conn = sqlite3.connect(db_path)
+        rows = acct_conn.execute(
+            "SELECT total_value FROM sim_account_daily "
+            "WHERE date >= ? AND date < ? ORDER BY date",
+            (start_str, end_str),
+        ).fetchall()
+        acct_conn.close()
+        if len(rows) >= 5:
+            vals = np.array([r[0] for r in rows])
+            cum = vals / vals[0]
+            run_max = np.maximum.accumulate(cum)
+            dd = (cum - run_max) / run_max
+            lines.append(f"    最大回撤: {dd.min():.2%}")
+            daily_ret = np.diff(vals) / vals[:-1]
+            if len(daily_ret) > 1 and daily_ret.std() > 1e-10:
+                ms = ((daily_ret.mean() - 0.03/252) / daily_ret.std()) * np.sqrt(252)
+                lines.append(f"    夏普率: {ms:.2f}")
+
+    lines.append("")
+    lines.append("═" * 40)
+    return "\n".join(lines)
+
+
+# ════════════════════════════════════════════════════════════
 #  辅助
 # ════════════════════════════════════════════════════════════
 
