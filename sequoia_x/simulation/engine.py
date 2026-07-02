@@ -58,6 +58,7 @@ from sequoia_x.simulation.models import (
     get_positions_pending_sell,
     mark_position_for_sell,
     clear_pending_sell,
+    get_today_recommended_symbols,
     insert_closed_trade,
     upsert_account_daily,
     get_account_summary,
@@ -385,6 +386,8 @@ class SimEngine:
             return 0
 
         index_df = self._get_index_df(today_str)
+        # 获取今日 LLM 推荐的股票（用于卖出覆盖：推荐股不卖出）
+        today_llm_picks = get_today_recommended_symbols(self.db_path, today_str)
         marked_count = 0
 
         for pos in positions:
@@ -429,6 +432,14 @@ class SimEngine:
             )
 
             if result.should_exit:
+                # LLM 同日推荐覆盖：若该股也在今日 LLM 推荐中，则继续持有
+                if sym in today_llm_picks:
+                    logger.info(
+                        f"sim 评: {sym} 卖出触发但 LLM 同日推荐，"
+                        f"覆盖卖出信号，继续持有"
+                    )
+                    continue
+
                 # 标记待卖出（明日以开盘价执行）
                 mark_position_for_sell(self.db_path, pos_id, result.reason)
                 marked_count += 1

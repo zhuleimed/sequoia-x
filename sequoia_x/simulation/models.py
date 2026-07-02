@@ -181,11 +181,11 @@ def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
 
 
 def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list[dict]:
-    """获取待执行的买入信号，按 LLM 评分降序排列（高分优先）。
-    NULL 评分排在最后。
+    """获取待执行的买入信号（仅限 target_date 之前写入的），按 LLM 评分降序排列。
+    今天写入的信号不会在今天执行，符合 T+1 模型。
 
     Args:
-        target_date: 要执行的日期（默认为今天），信号 buy_date <= target_date。
+        target_date: 要执行的日期（默认为今天），信号 buy_date < target_date。
 
     Returns:
         [{"id": 1, "symbol": "600519", "strategy_from": "...", "llm_score": 4.5}, ...]
@@ -196,7 +196,7 @@ def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, symbol, strategy_from, llm_score, buy_date FROM sim_buy_signals "
-            "WHERE status = 'pending' AND buy_date <= ? "
+            "WHERE status = 'pending' AND buy_date < ? "
             "ORDER BY llm_score IS NOT NULL DESC, llm_score DESC, buy_date ASC, id ASC",
             (target_date,),
         ).fetchall()
@@ -223,6 +223,23 @@ def mark_signal_cancelled(db_path: str, signal_id: int, reason: str) -> None:
             (reason, signal_id),
         )
         conn.commit()
+
+
+def get_today_recommended_symbols(db_path: str, today_str: str) -> set[str]:
+    """获取今日 LLM 推荐的股票代码集合（pending 状态的今日信号）。
+
+    用于卖出规则覆盖：若某股触发卖出但同日 LLM 也推荐，则跳过卖出。
+
+    Returns:
+        {"600519", "000858", ...}
+    """
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM sim_buy_signals "
+            "WHERE buy_date = ? AND status = 'pending'",
+            (today_str,),
+        ).fetchall()
+    return {r[0] for r in rows}
 
 
 # ════════════════════════════════════════════════════════════
