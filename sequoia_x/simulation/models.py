@@ -172,7 +172,8 @@ def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
 
 
 def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list[dict]:
-    """获取待执行的买入信号。
+    """获取待执行的买入信号，按 LLM 评分降序排列（高分优先）。
+    NULL 评分排在最后。
 
     Args:
         target_date: 要执行的日期（默认为今天），信号 buy_date <= target_date。
@@ -187,7 +188,7 @@ def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list
         rows = conn.execute(
             "SELECT id, symbol, strategy_from, llm_score, buy_date FROM sim_buy_signals "
             "WHERE status = 'pending' AND buy_date <= ? "
-            "ORDER BY buy_date ASC, id ASC",
+            "ORDER BY llm_score IS NOT NULL DESC, llm_score DESC, buy_date ASC, id ASC",
             (target_date,),
         ).fetchall()
     return [dict(r) for r in rows]
