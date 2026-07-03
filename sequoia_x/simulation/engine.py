@@ -49,8 +49,6 @@ from sequoia_x.simulation.config import (
 from sequoia_x.simulation.models import (
     init_sim_tables,
     get_pending_signals,
-    mark_signal_executed,
-    mark_signal_cancelled,
     insert_position,
     get_all_positions,
     update_position_valuation,
@@ -66,6 +64,10 @@ from sequoia_x.simulation.models import (
     get_account_summary,
     get_recent_account_days,
     get_cash_balance,
+)
+from sequoia_x.simulation.signals import (
+    mark_signal_executed,
+    mark_signal_cancelled,
 )
 from sequoia_x.simulation.rules import evaluate_exit
 from sequoia_x.simulation.reporter import (
