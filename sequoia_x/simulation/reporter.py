@@ -58,10 +58,10 @@ def build_trade_report_text(trade: dict) -> str:
         pnl_tag = "➖ 持平"
 
     lines = [
-        "═" * 40,
+        "─" * 24,
         f"   Sequoia-X 交易报告",
         f"   {name_display}",
-        "═" * 40,
+        "─" * 24,
         "",
         f"  【基本信息】",
         f"  策略来源: {strategy}",
@@ -90,7 +90,7 @@ def build_trade_report_text(trade: dict) -> str:
         f"  【退出原因】",
         f"  {exit_reason}",
         "",
-        "═" * 40,
+        "─" * 24,
     ]
 
     return "\n".join(lines)
@@ -123,10 +123,9 @@ def build_daily_summary_text(
     display_date = date.fromisoformat(today_str).strftime("%m-%d") if today_str else "??"
 
     lines = [
-        "═" * 40,
-        f"   Sequoia-X 模拟盘日报",
-        f"   {display_date}",
-        "═" * 40,
+        "─" * 24,
+        f"  Sequoia-X 模拟盘日报  {display_date}",
+        "─" * 24,
         "",
     ]
 
@@ -201,7 +200,7 @@ def build_daily_summary_text(
             lines.append(f"    ... 还有 {len(positions) - 10} 只")
 
     lines.append("")
-    lines.append("═" * 40)
+    lines.append("─" * 24)
 
     return "\n".join(lines)
 
@@ -301,7 +300,7 @@ def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
     conn.close()
 
     month_str = f"{year}年{month}月"
-    lines = ["═" * 40, f"   Sequoia-X 模拟盘月报", f"   {month_str}", "═" * 40, ""]
+    lines = ["─" * 24, f"   Sequoia-X 模拟盘月报", f"   {month_str}", "─" * 24, ""]
 
     if first_day and last_day:
         begin_val = first_day["total_value"]
@@ -395,7 +394,7 @@ def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
                 lines.append(f"    夏普率: {ms:.2f}")
 
     lines.append("")
-    lines.append("═" * 40)
+    lines.append("─" * 24)
     return "\n".join(lines)
 
 
