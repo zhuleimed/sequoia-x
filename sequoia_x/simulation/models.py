@@ -262,7 +262,7 @@ def insert_position(db_path: str, symbol: str, strategy_from: str,
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (symbol, strategy_from, buy_date, buy_price, shares, total_cost,
              buy_price, buy_price * shares, buy_price, buy_price * shares,
-             0.0, 0.0, 0, 1, signal_id),
+             0.0, 0.0, 1, 1, signal_id),
         )
         conn.commit()
         return cur.lastrowid
