@@ -297,7 +297,7 @@ def update_position_valuation(db_path: str, pos_id: int, current_price: float,
         conn.execute(
             "UPDATE sim_positions SET current_price=?, current_value=?, "
             "pnl=?, pnl_pct=?, highest_price=?, highest_value=?, "
-            "hold_days=?, today_opened=0 WHERE id=?",
+            "hold_days=? WHERE id=?",
             (current_price, current_value, pnl, pnl_pct,
              highest, max(highest * shares, current_value),
              hold_days, pos_id),

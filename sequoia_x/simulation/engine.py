@@ -122,6 +122,7 @@ class SimEngine:
             "actions": [],
             "bought": [],
             "sold": [],
+            "cancelled": [],
             "marked_sell": 0,
             "positions_updated": 0,
         }
@@ -144,13 +145,16 @@ class SimEngine:
 
         # ── 3. 执行待执行订单（T+1 模型，均用今日 OPEN 价） ──
         #    先卖出（释放仓位）→ 再买入（递补）
-        sold, bought = self._execute_pending_orders(today_str)
+        sold, bought, cancelled = self._execute_pending_orders(today_str)
         results["sold"] = sold
         results["bought"] = bought
+        results["cancelled"] = cancelled
         if sold:
             results["actions"].append(f"卖出 {len(sold)} 只")
         if bought:
             results["actions"].append(f"买入 {len(bought)} 只")
+        if cancelled:
+            results["actions"].append(f"取消 {len(cancelled)} 只")
 
         # ── 4. 更新估值 + 运行卖出规则（用今日 CLOSE 评估，标记待卖出） ──
         #    触发条件 → 写入 pending_sell_reason，明日 OPEN 再执行卖出
@@ -190,9 +194,14 @@ class SimEngine:
         Returns:
             (sold_list, bought_list)
         """
+        # 重置 T+1 标记：昨日买入的持仓今日可卖
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE sim_positions SET today_opened=0")
+            conn.commit()
         sold = self._execute_pending_sells(today_str)
-        bought = self._execute_pending_buys(today_str)
-        return sold, bought
+        bought, cancelled = self._execute_pending_buys(today_str)
+        return sold, bought, cancelled
 
     def _execute_pending_sells(self, today_str: str) -> list[dict]:
         """执行所有待卖出订单。
@@ -281,50 +290,53 @@ class SimEngine:
         cash_balance = self._get_cash()
 
         bought: list[dict] = []
+        cancelled: list[dict] = []
 
         for signal in signals[:slots_available]:
             sym = signal["symbol"]
+            cancel_reason = None
 
             today_data = self._get_today_data(sym, today_str)
             if today_data is None:
-                mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 无今日行情数据")
-                logger.warning(f"sim 买 {sym}: 无今日行情，信号取消")
+                cancel_reason = "无今日行情数据"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.warning(f"sim 买 {sym}: {cancel_reason}")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
             open_price = today_data["open"]
             prev_close = today_data.get("prev_close", open_price)
             volume = today_data.get("volume", 0)
 
-            # 涨停检查
             if self._is_limit_up(open_price, prev_close):
-                mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 开盘涨停")
-                logger.info(f"sim 买 {sym}: 涨停，信号取消")
+                cancel_reason = f"开盘涨停（前收{prev_close:.2f}→开{open_price:.2f}）"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.info(f"sim 买 {sym}: 涨停")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
-            # 跌停检查
             if self._is_limit_down(open_price, prev_close):
-                mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 开盘跌停")
-                logger.info(f"sim 买 {sym}: 跌停，信号取消")
+                cancel_reason = "开盘跌停"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.info(f"sim 买 {sym}: 跌停")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
-            # 停牌检查
             if volume == 0:
-                mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"{sym} 停牌")
-                logger.info(f"sim 买 {sym}: 停牌，信号取消")
+                cancel_reason = "停牌（当日零成交）"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.info(f"sim 买 {sym}: 停牌")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
-            # 执行买入
             budget = min(PER_STOCK_BUDGET, cash_balance)
             buy_price = open_price * (1 + SLIPPAGE)
             max_shares = int(budget // buy_price // 100) * 100
 
             if max_shares <= 0:
-                mark_signal_cancelled(self.db_path, signal["id"],
-                                      f"资金不足（预算{budget:.0f}，不够1手）")
+                cancel_reason = f"资金不足（预算{budget:.0f}，不够1手）"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
             cost = max_shares * buy_price
@@ -334,43 +346,35 @@ class SimEngine:
             if total_cost > cash_balance:
                 max_shares = int(cash_balance // buy_price // 100) * 100
                 if max_shares <= 0:
-                    mark_signal_cancelled(self.db_path, signal["id"], "现金余额不足")
+                    cancel_reason = "现金余额不足"
+                    mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                    cancelled.append({"symbol": sym, "reason": cancel_reason})
                     continue
                 cost = max_shares * buy_price
                 commission = max(cost * COMMISSION_RATE, 0.0)
                 total_cost = cost + commission
 
-            insert_position(
-                self.db_path,
-                symbol=sym,
+            insert_position(self.db_path, symbol=sym,
                 strategy_from=signal.get("strategy_from", ""),
-                buy_date=today_str,
-                buy_price=round(buy_price, 4),
-                shares=max_shares,
-                total_cost=round(total_cost, 2),
-                signal_id=signal["id"],
-            )
-
+                buy_date=today_str, buy_price=round(buy_price, 4),
+                shares=max_shares, total_cost=round(total_cost, 2),
+                signal_id=signal["id"])
             mark_signal_executed(self.db_path, signal["id"],
                                  round(buy_price, 4), max_shares)
             cash_balance -= total_cost
-
-            bought.append({
-                "symbol": sym,
-                "shares": max_shares,
-                "price": round(buy_price, 4),
-                "cost": round(total_cost, 2),
-            })
+            bought.append({"symbol": sym, "shares": max_shares,
+                           "price": round(buy_price, 4), "cost": round(total_cost, 2)})
             logger.info(f"sim 买: {sym} {max_shares}股 @ {buy_price:.4f}")
 
-        # 取消多余信号（仓位不够，不留存）
         remaining = signals[slots_available:]
         for s in remaining:
-            mark_signal_cancelled(self.db_path, s["id"], "仓位不足，取消待下次推荐")
+            r = "仓位不足，取消待下次推荐"
+            mark_signal_cancelled(self.db_path, s["id"], r)
+            cancelled.append({"symbol": s["symbol"], "reason": r})
         if remaining:
             logger.info(f"sim 买: 取消 {len(remaining)} 条未执行信号")
 
-        return bought
+        return bought, cancelled
 
     # ════════════════════════════════════════════════════════
     #  估值更新 + 卖出判定（T+1 模型：只标记，不平仓）
@@ -590,6 +594,7 @@ class SimEngine:
                 positions=positions,
                 bought=results.get("bought", []),
                 sold=results.get("sold", []),
+                cancelled=results.get("cancelled", []),
             )
             if text:
                 from wxpusher import WxPusher

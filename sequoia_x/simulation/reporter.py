@@ -102,15 +102,16 @@ def build_daily_summary_text(
     positions: list[dict],
     bought: list[dict],
     sold: list[dict],
+    cancelled: Optional[list[dict]] = None,
 ) -> str:
     """生成每日模拟盘组合日报。
 
     Args:
         today_str: 日期字符串 "YYYY-MM-DD"。
         account: 账户总览记录（含 total_value, cash 等）。
-        positions: 当前所有持仓列表。
         bought: 今日买入列表。
         sold: 今日卖出列表。
+        cancelled: 今日被取消的买入信号及原因。
 
     Returns:
         格式化的日报文本，或空字符串（当日无交易时）。
@@ -142,7 +143,7 @@ def build_daily_summary_text(
         lines.append("")
 
     # ── 今日操作 ──
-    has_action = bool(bought or sold)
+    has_action = bool(bought or sold or cancelled)
 
     if bought:
         lines.append("  ▶ 今日买入")
@@ -161,7 +162,14 @@ def build_daily_summary_text(
             lines.append(f"       原因: {s.get('exit_reason', '?')[:40]}")
         lines.append("")
 
-    if not has_action:
+    cancelled = cancelled or []
+    if cancelled:
+        lines.append("  ▶ 未执行（取消原因）")
+        for c in cancelled:
+            lines.append(f"    ⏭️ {c.get('symbol', '?')} → {c.get('reason', '?')}")
+        lines.append("")
+
+    if not has_action and not cancelled:
         lines.append("  ▶ 今日无操作")
         lines.append("")
 
