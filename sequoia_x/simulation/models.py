@@ -451,10 +451,16 @@ def get_recent_account_days(db_path: str, days: int = 30) -> list[dict]:
 
 
 def get_cash_balance(db_path: str) -> float:
-    """从账户总览获取最新现金余额，若无记录则返回初始资金。"""
+    """计算当前可用现金余额。
+
+    公式：现金 = 初始资金 - 当前持仓总成本 + 已平仓盈亏
+    """
     from sequoia_x.simulation.config import INITIAL_CAPITAL
     with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT cash FROM sim_account_daily ORDER BY date DESC LIMIT 1"
-        ).fetchone()
-    return row[0] if row else INITIAL_CAPITAL
+        pos_cost = conn.execute(
+            "SELECT COALESCE(SUM(total_cost), 0) FROM sim_positions"
+        ).fetchone()[0]
+        closed_pnl = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM sim_closed_trades"
+        ).fetchone()[0]
+    return INITIAL_CAPITAL - pos_cost + closed_pnl
