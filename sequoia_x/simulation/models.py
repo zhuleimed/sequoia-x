@@ -286,13 +286,12 @@ def update_position_valuation(db_path: str, pos_id: int, current_price: float,
     pnl_pct = round(pnl / total_cost, 6) if total_cost > 0 else 0.0
 
     with sqlite3.connect(db_path) as conn:
-        # 先查当前最高价
         row = conn.execute(
             "SELECT highest_price, hold_days FROM sim_positions WHERE id=?",
             (pos_id,),
         ).fetchone()
         highest = max(row[0] or 0, current_price) if row else current_price
-        hold_days = (row[1] or 0) + 1 if row else 1
+        hold_days = row[1] if row else 0  # 保持当前值，不递增
 
         conn.execute(
             "UPDATE sim_positions SET current_price=?, current_value=?, "

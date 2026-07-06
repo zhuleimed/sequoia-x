@@ -194,10 +194,11 @@ class SimEngine:
         Returns:
             (sold_list, bought_list)
         """
-        # 重置 T+1 标记：昨日买入的持仓今日可卖
+        # 重置 T+1 标记 + 递增持仓天数
         import sqlite3
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE sim_positions SET today_opened=0")
+            conn.execute("UPDATE sim_positions SET hold_days = hold_days + 1")
             conn.commit()
         sold = self._execute_pending_sells(today_str)
         bought, cancelled = self._execute_pending_buys(today_str)
