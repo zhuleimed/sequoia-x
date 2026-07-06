@@ -158,10 +158,10 @@ class SimEngine:
 
         # ── 4. 更新估值 + 运行卖出规则（用今日 CLOSE 评估，标记待卖出） ──
         #    触发条件 → 写入 pending_sell_reason，明日 OPEN 再执行卖出
-        marked = self._update_and_evaluate(today_str)
-        results["marked_sell"] = marked
-        if marked > 0:
-            results["actions"].append(f"标记待卖出 {marked} 只")
+        marked_positions = self._update_and_evaluate(today_str)
+        results["marked_sell"] = marked_positions
+        if marked_positions:
+            results["actions"].append(f"标记待卖出 {len(marked_positions)} 只")
 
         # ── 5. 写入账户日结 ──
         self._write_account_daily(today_str)
@@ -381,23 +381,23 @@ class SimEngine:
     #  估值更新 + 卖出判定（T+1 模型：只标记，不平仓）
     # ════════════════════════════════════════════════════════
 
-    def _update_and_evaluate(self, today_str: str) -> int:
+    def _update_and_evaluate(self, today_str: str) -> list[dict]:
         """更新所有持仓估值，运行卖出规则，触发则标记待卖出（明日 OPEN 执行）。
 
         注意：这里只写入 pending_sell_reason，不实际平仓。
         实际卖出在次日 _execute_pending_sells() 中以开盘价执行。
 
         Returns:
-            标记为待卖出的持仓数量。
+            标记为待卖出的持仓列表：[{"symbol":"000757","reason":"..."}, ...]
         """
         positions = get_all_positions(self.db_path)
         if not positions:
-            return 0
+            return []
 
         index_df = self._get_index_df(today_str)
         # 获取今日 LLM 推荐的股票（用于卖出覆盖：推荐股不卖出）
         today_llm_picks = get_today_recommended_symbols(self.db_path, today_str)
-        marked_count = 0
+        marked_positions: list[dict] = []
 
         for pos in positions:
             # 已标记待卖出的跳过（等待明日执行）
@@ -449,7 +449,7 @@ class SimEngine:
                     if override_count >= MAX_OVERRIDE:
                         mark_position_for_sell(self.db_path, pos_id,
                                                f"LLM覆盖{MAX_OVERRIDE}次后强制卖出({result.reason})")
-                        marked_count += 1
+                        marked_positions.append({"symbol": sym, "reason": result.reason})
                         logger.info(
                             f"sim 评: {sym} LLM已连续覆盖{override_count}次，"
                             f"强制执行卖出"
@@ -463,13 +463,13 @@ class SimEngine:
 
                 # 未覆盖：标记待卖出（明日以开盘价执行）
                 mark_position_for_sell(self.db_path, pos_id, result.reason)
-                marked_count += 1
+                marked_positions.append({"symbol": sym, "reason": result.reason})
                 logger.info(
                     f"sim 评: {sym} 触发卖出（{result.reason}），"
                     f"明日 OPEN 执行"
                 )
 
-        return marked_count
+        return marked_positions
 
     # ════════════════════════════════════════════════════════
     #  卖出执行
@@ -596,6 +596,7 @@ class SimEngine:
                 bought=results.get("bought", []),
                 sold=results.get("sold", []),
                 cancelled=results.get("cancelled", []),
+                pending_sells=results.get("marked_sell", []),
             )
             if text:
                 from wxpusher import WxPusher
