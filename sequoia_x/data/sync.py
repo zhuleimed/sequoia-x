@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from sequoia_x.core.config import Settings
-from sequoia_x.data.tencent_source import TencentSource
+from sequoia_x.data.tencent_source import SinaSource, TencentSource, to_sina_code
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
 
@@ -641,16 +641,23 @@ class DataSync:
 
         stock_count: int = 0
         symbols_list: list[str] = list(symbol_starts.keys())
-        # ── 数据源状态机 ──
-        # Tencent 提供 OHLCV+成交量（主力），baostock 提供估值字段（后备）
-        data_source: str = "tencent"             # "tencent" | "baostock"
-        baostock_count_since_switch: int = 0     # baostock 模式下累计处理数
-        BAOSTOCK_BATCH_SIZE: int = 200           # 每 200 只尝试恢复 Tencent
+        # ── 三轨制：源健康追踪 + 动态优先级 ──
+        # 三个数据源平级独立，按健康度排序尝试
+        SOURCE_NAMES = ["tencent", "sina", "baostock"]
+        source_failures: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
+        source_successes: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
+        FAILOVER_THRESHOLD = 5           # 连续失败 N 次 → 降级到最后
+        RECOVERY_INTERVAL = 50           # 每 N 只股票检查一次降级源是否恢复
+        # 预创建可复用实例（避免每只股票都新建 HTTP 连接）
+        _tencent_inst = TencentSource()
+        _sina_inst = SinaSource()
         requests_since_login: int = 0
         max_requests_per_conn: int = 1400
         batch_start_time: float = time.time()
         batch_start_count: int = 0
         log_batch_size: int = 100
+        # 本轮使用的数据源（用于进度日志）
+        _current_source: str = "tencent"
 
         def _log_batch_progress(current_idx: int) -> None:
             nonlocal batch_start_time, batch_start_count
@@ -661,13 +668,11 @@ class DataSync:
             # 本批股票代码范围
             batch_syms = symbols_list[batch_start_count:current_idx]
             sym_range = f"{batch_syms[0]}~{batch_syms[-1]}" if len(batch_syms) >= 2 else (batch_syms[0] if batch_syms else "?")
-            # 数据来源标识
-            if data_source == "tencent":
-                source_tag = "Tencent"
-                source_detail = ""
-            else:
-                source_tag = "baostock"
-                source_detail = f" baostock累计{baostock_count_since_switch}只"
+            # 数据来源标识（三轨制）
+            source_tag = _current_source.capitalize()
+            ok_count = source_successes.get(_current_source, 0)
+            fail_count = source_failures.get(_current_source, 0)
+            source_detail = f" ok={ok_count} fail={fail_count}"
             logger.info(
                 f"sync_daily 进度: [{current_idx}/{len(symbols_list)}] "
                 f"成功{stock_count}只 [{sym_range}] "
@@ -706,59 +711,37 @@ class DataSync:
 
                 data = None
 
-                # ===== 阶段 A：Tencent 主力拉取（OHLCV + 成交量 + 成交额）=====
-                #   pctChg 从 close 计算，主力数据源稳定高效
-                if data_source == "tencent":
+                # ===== 三轨制：依次尝试 Tencent → Sina → baostock =====
+                # 根据源健康度动态排序：健康源在前，连续失败的源降级到最后
+
+                # 每 RECOVERY_INTERVAL 只，将降级源恢复一级优先级
+                if i > 0 and i % RECOVERY_INTERVAL == 0:
+                    for s in SOURCE_NAMES:
+                        if source_failures[s] >= FAILOVER_THRESHOLD:
+                            source_failures[s] = FAILOVER_THRESHOLD - 1  # 降一级
+                            logger.debug(f"sync_daily: {s} 降级状态缓解（failures={source_failures[s]}）")
+
+                # 按失败次数排序（失败少优先），同分按 SOURCE_NAMES 原始顺序
+                attempt_order = sorted(
+                    SOURCE_NAMES,
+                    key=lambda s: (
+                        1 if source_failures[s] >= FAILOVER_THRESHOLD else 0,
+                        SOURCE_NAMES.index(s),
+                    ),
+                )
+
+                for src in attempt_order:
+                    if data is not None:
+                        break
                     try:
-                        tc_code = TencentSource.to_baostock_code(bs_code)
-                        tc = TencentSource()
-                        tc_df = tc.get_daily(tc_code, 5)
-                        if tc_df is not None and not tc_df.empty:
-                            latest = tc_df.iloc[-1:].copy()
-                            if not latest.empty:
-                                latest["symbol"] = sym
-                                rt = tc.get_realtime(tc_code)
-                                latest["amount"] = rt["amount"] if rt else 0.0
-                                latest["pctChg"] = 0.0
-                                if len(tc_df) >= 2:
-                                    prev_close = tc_df.iloc[-2]["close"]
-                                    if prev_close and prev_close > 0:
-                                        latest["pctChg"] = round(
-                                            (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
-                                        )
-                                latest["turnover"] = 0.0
-                                latest["peTTM"] = None
-                                latest["pbMRQ"] = None
-                                latest["psTTM"] = None
-                                latest["pcfNcfTTM"] = None
-                                data = latest
-                        if data is None:
-                            data_source = "baostock"
-                            baostock_count_since_switch = 0
-                            logger.info(f"sync_daily: Tencent 不可用（{sym}），切换至 baostock")
-                    except Exception as tc_e:
-                        logger.debug(f"sync_daily {sym}: Tencent exception {tc_e}")
-                        data_source = "baostock"
-                        baostock_count_since_switch = 0
-                        logger.info(f"sync_daily: Tencent 异常（{sym}），切换至 baostock")
-
-                # ===== 阶段 B：Tencent 不可用，baostock 后备拉取 =====
-                #   baostock 含估值字段，但稳定性不如 Tencent
-                if data is None:
-                    baostock_count_since_switch += 1
-
-                    # 每拉取 BAOSTOCK_BATCH_SIZE 只后尝试恢复 Tencent
-                    if baostock_count_since_switch >= BAOSTOCK_BATCH_SIZE:
-                        baostock_count_since_switch = 0
-                        try:
+                        if src == "tencent":
                             tc_code = TencentSource.to_baostock_code(bs_code)
-                            tc = TencentSource()
-                            tc_df = tc.get_daily(tc_code, 5)
+                            tc_df = _tencent_inst.get_daily(tc_code, 5)
                             if tc_df is not None and not tc_df.empty:
                                 latest = tc_df.iloc[-1:].copy()
                                 if not latest.empty:
                                     latest["symbol"] = sym
-                                    rt = tc.get_realtime(tc_code)
+                                    rt = _tencent_inst.get_realtime(tc_code)
                                     latest["amount"] = rt["amount"] if rt else 0.0
                                     latest["pctChg"] = 0.0
                                     if len(tc_df) >= 2:
@@ -773,14 +756,32 @@ class DataSync:
                                     latest["psTTM"] = None
                                     latest["pcfNcfTTM"] = None
                                     data = latest
-                                    data_source = "tencent"
-                                    logger.info("sync_daily: Tencent 恢复，切回主力拉取")
-                        except Exception as tc_e:
-                            logger.debug(f"sync_daily {sym}: Tencent 恢复尝试失败: {tc_e}")
+                                    _current_source = "tencent"
 
-                    # baostock 后备
-                    if data is None:
-                        try:
+                        elif src == "sina":
+                            sina_code = to_sina_code(bs_code)
+                            sina_df = _sina_inst.get_daily(sina_code, 5)
+                            if sina_df is not None and not sina_df.empty:
+                                latest = sina_df.iloc[-1:].copy()
+                                if not latest.empty:
+                                    latest["symbol"] = sym
+                                    latest["amount"] = 0.0
+                                    latest["pctChg"] = 0.0
+                                    if len(sina_df) >= 2:
+                                        prev_close = sina_df.iloc[-2]["close"]
+                                        if prev_close and prev_close > 0:
+                                            latest["pctChg"] = round(
+                                                (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
+                                            )
+                                    latest["turnover"] = 0.0
+                                    latest["peTTM"] = None
+                                    latest["pbMRQ"] = None
+                                    latest["psTTM"] = None
+                                    latest["pcfNcfTTM"] = None
+                                    data = latest
+                                    _current_source = "sina"
+
+                        elif src == "baostock":
                             bs_rs = bs.query_history_k_data_plus(
                                 bs_code,
                                 "date,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM",
@@ -796,12 +797,21 @@ class DataSync:
                                     bs_data["symbol"] = sym
                                     bs_data.rename(columns={"turn": "turnover"}, inplace=True)
                                     data = bs_data
-                                    logger.debug(f"sync_daily {sym}: baostock 后备替代成功")
-                        except Exception as bs_e:
-                            logger.debug(f"sync_daily {sym}: baostock also failed {bs_e}")
+                                    _current_source = "baostock"
+
+                        # 更新源健康计数
+                        if data is not None:
+                            source_successes[src] += 1
+                            source_failures[src] = 0
+                        else:
+                            source_failures[src] += 1
+
+                    except Exception as e:
+                        source_failures[src] += 1
+                        logger.debug(f"sync_daily {sym}: {src} 异常: {e}")
 
                 if data is None:
-                    logger.debug(f"sync_daily {sym}: 双数据源均失败，跳过")
+                    logger.debug(f"sync_daily {sym}: 三个数据源均失败，跳过")
                     continue
 
                 written = self._write_to_db(data)
@@ -1638,15 +1648,44 @@ class DataSync:
         )
 
         import sqlite3
+        import time as _time_module
         total_filled = 0
+        t0 = _time_module.time()
+        _last_progress = 0.0
+        MAX_DURATION = 1800  # 30 分钟超时保护，防止卡死管线
+
         for sym, missing_dates in ranked:
+            # ── 超时检查 ──
+            elapsed = _time_module.time() - t0
+            if elapsed > MAX_DURATION:
+                logger.warning(
+                    f"_fill_ohlcv_gaps: 已运行 {elapsed:.0f}s，超过 {MAX_DURATION}s 限制，"
+                    f"提前终止（已处理 {total_filled} 条）"
+                )
+                break
+
             if not missing_dates:
                 continue
             try:
                 bs_code = self.engine._to_baostock_code(sym)
                 tc_code = TencentSource.to_baostock_code(bs_code)
+                tc_df = None
+
+                # 先试 Tencent（含内部 Sina fallback）
                 tc = TencentSource()
-                tc_df = tc.get_daily(tc_code, days + 2)  # 多取 2 天用于计算 pctChg
+                tc_df = tc.get_daily(tc_code, days + 2)
+
+                # Tencent 不可用时，试用独立 SinaSource（更稳定的连接）
+                if tc_df is None or tc_df.empty:
+                    try:
+                        sina = SinaSource()
+                        sina_df = sina.get_daily(tc_code, days + 2)
+                        if sina_df is not None and not sina_df.empty:
+                            tc_df = sina_df
+                            logger.debug(f"_fill_ohlcv_gaps {sym}: 通过 SinaSource 补填")
+                    except Exception:
+                        pass
+
                 if tc_df is None or tc_df.empty:
                     continue
                 tc_df = tc_df.copy()
@@ -1685,7 +1724,20 @@ class DataSync:
                 logger.debug(f"_fill_ohlcv_gaps {sym}: {e}")
                 continue
 
-        logger.info(f"_fill_ohlcv_gaps: 完成，补填 {total_filled} 条记录")
+            # ── 每 30 秒进度日志（修复：原代码无任何中间日志）──
+            now = _time_module.time()
+            if now - _last_progress >= 30:
+                _last_progress = now
+                pct = (total_filled / (len(missing_dates) or 1)) * 100 if missing_dates else 0
+                logger.info(
+                    f"_fill_ohlcv_gaps 进度: {total_filled} 条已补填 "
+                    f"({now - t0:.0f}s, 超时限制 {MAX_DURATION}s)"
+                )
+
+        logger.info(
+            f"_fill_ohlcv_gaps: 完成，补填 {total_filled} 条记录"
+            f"（耗时 {_time_module.time() - t0:.0f}s）"
+        )
         return total_filled
 
     # ── 退市数据归档 ──
