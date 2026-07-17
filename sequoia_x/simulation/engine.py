@@ -176,8 +176,8 @@ class SimEngine:
         if sold:
             sold_str = " ".join(f'{c["symbol"]}({c["pnl_pct"]:+.1%})' for c in sold)
             logger.info(f"  卖出: {sold_str}")
-        if marked:
-            logger.info(f"  标记待卖出: {marked} 只")
+        if results["marked_sell"]:
+            logger.info(f"  标记待卖出: {results['marked_sell']} 只")
         logger.info(f"  当前持仓: {results['positions_updated']} 只")
 
         return results

@@ -1562,6 +1562,7 @@ class DataSync:
                 data = None
 
                 # 尝试 baostock（优先）
+                source_used: str = ""
                 try:
                     rs = bs.query_history_k_data_plus(
                         bs_code,
@@ -1575,6 +1576,7 @@ class DataSync:
                         bs_data = self._bs_get_data(rs)
                         if bs_data is not None and not bs_data.empty:
                             data = bs_data
+                            source_used = "baostock"
                 except Exception as e:
                     logger.debug(f"sync_index_daily {name}: baostock 异常 {e}")
 
@@ -1595,6 +1597,7 @@ class DataSync:
                                         idx_val[col] = 0.0
                                 idx_val["symbol"] = bs_code
                                 data = idx_val
+                                source_used = "tencent"
                                 logger.info(f"sync_index_daily {name}: Tencent 补 {len(data)} 条")
                     except Exception as tc_e:
                         logger.debug(f"sync_index_daily {name}: Tencent also failed {tc_e}")
@@ -1607,7 +1610,7 @@ class DataSync:
                 n: int = self._write_index_to_db(data)
                 if n > 0:
                     index_count += 1
-                    logger.info(f"sync_index_daily: {name} 写入 {n} 条")
+                    logger.info(f"sync_index_daily: {name} 写入 {n} 条 [来源:{source_used}]")
 
                 time.sleep(0.15)
 
