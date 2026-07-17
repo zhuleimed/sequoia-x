@@ -18,7 +18,7 @@ import pytest
 
 from sequoia_x.core.config import Settings
 from sequoia_x.data.sync import DataSync
-from sequoia_x.data.tencent_source import TencentSource
+from sequoia_x.data.tencent_source import SinaSource, TencentSource
 
 
 # ── 测试辅助 ──
@@ -94,14 +94,13 @@ class TestBaostockAvailable:
     @patch("baostock.login")
     @patch("baostock.query_trade_dates")
     def test_baostock_persists_after_success(
-        self, mock_qt, mock_login, mock_query, mock_symbols, mock_dates, mock_trade
+        self, mock_qt, mock_login, mock_query, mock_symbols, mock_dates, mock_trade,
     ):
         """连续多只股票 baostock 查询成功后，baostock_available 保持 True，
         所有股票都应走 baostock 而非提前切 Tencent。"""
         mock_login.return_value = MagicMock(error_code="0")
         mock_qt.return_value = make_trade_days_bs("2024-01-02", "2024-01-05")
         mock_trade.return_value = True
-
         # 返回 3 只股票
         mock_symbols.return_value = ["600000", "600001", "600002"]
         # 本地已有部分数据
@@ -110,9 +109,11 @@ class TestBaostockAvailable:
         }
 
         # baostock 返回成功（只有 2024-01-05 需要拉取）
-        mock_query.return_value = make_bs_result([
-            stock_row("600000", "2024-01-05"),
-        ])
+        mock_query.side_effect = [
+            make_bs_result([stock_row("600000", "2024-01-05")]),
+            make_bs_result([stock_row("600001", "2024-01-05")]),
+            make_bs_result([stock_row("600002", "2024-01-05")]),
+        ]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             sync = make_sync(tmp_dir)
@@ -129,8 +130,10 @@ class TestBaostockAvailable:
             conn.commit()
             conn.close()
 
-            # 执行同步
-            result = sync.sync_daily(force=True)
+            # 三轨制：mock Tencent/Sina 返回 None 强制走 baostock 路径
+            with patch.object(TencentSource, "get_daily", return_value=None), \
+                 patch.object(SinaSource, "get_daily", return_value=None):
+                result = sync.sync_daily(force=True)
 
             # baostock.query_history_k_data_plus 应该被调用了 3 次（每只股票一次）
             assert mock_query.call_count == 3, (
@@ -509,7 +512,7 @@ class TestWriteToDbLogging:
             # 验证返回值
             assert count == 1, f"应写入 1 条，实际 {count}"
             # 验证日志被调用（写入后应有日志输出）
-            log_calls = [c for c in mock_logger.info.call_args_list
+            log_calls = [c for c in mock_logger.debug.call_args_list
                          if "_write_to_db" in str(c)]
             assert len(log_calls) >= 1, "_write_to_db 应输出日志"
 
@@ -641,12 +644,14 @@ class TestNewStockSync:
     @patch("baostock.login")
     @patch("baostock.query_trade_dates")
     def test_new_stock_included_in_sync(
-        self, mock_qt, mock_login, mock_query, mock_active, mock_local_syms, mock_trade
+        self, mock_qt, mock_login, mock_query, mock_active, mock_local_syms, mock_trade,
     ):
         """新股（baostock 有但 stock_daily 无）应被 sync_daily 纳入拉取队列。"""
         mock_login.return_value = MagicMock(error_code="0")
         mock_qt.return_value = make_trade_days_bs("2024-01-02", "2024-01-05")
         mock_trade.return_value = True
+        # 三轨制：mock Tencent/Sina 返回 None 强制走 baostock 路径
+        # 必须在 sync_daily 调用前，用 with 块的嵌套上下文确保 mock 生效
 
         # get_local_symbols 只返回 2 只旧股票
         mock_local_syms.return_value = ["600000", "600001"]
@@ -682,18 +687,12 @@ class TestNewStockSync:
             conn.commit()
             conn.close()
 
-            with patch.object(TencentSource, "get_daily") as mock_tc:
-                tc_df = pd.DataFrame({
-                    "date": ["2024-01-05"],
-                    "open": [20.0], "close": [21.0],
-                    "high": [22.0], "low": [19.0], "volume": [2e6],
-                })
-                mock_tc.return_value = tc_df
-                with patch.object(TencentSource, "get_realtime") as mock_rt:
-                    mock_rt.return_value = {"amount": 2e7}
-                    result = sync.sync_daily(force=True)
+            with patch.object(TencentSource, "get_daily", return_value=None), \
+                 patch.object(SinaSource, "get_daily", return_value=None):
+                result = sync.sync_daily(force=True)
 
             # 新股应从 get_active_stocks 中被补充到拉取队列
+            # 三轨制下 Tencent/Sina 被 mock 为 None，应落到 baostock
             assert mock_query.call_count >= 3, (
                 f"baostock 应至少被调用 3 次（2只旧 + 1只新股），实际 {mock_query.call_count}"
             )
@@ -719,15 +718,15 @@ class TestRunFullPipeline:
     @patch("sequoia_x.data.sync.DataSync.sync_stock_list")
     @patch("sequoia_x.data.sync.DataSync.sync_index_daily")
     @patch("sequoia_x.data.sync.DataSync.sync_daily")
-    @patch("sequoia_x.data.sync.DataSync.repair_missing")
+    @patch("sequoia_x.data.sync.DataSync._fill_ohlcv_gaps")
     @patch.object(DataSync, "_fill_valuation_gaps")
     def test_run_full_phases_sequence(
-        self, mock_fill, mock_repair, mock_daily, mock_index, mock_stock
+        self, mock_fill, mock_ohlcv, mock_daily, mock_index, mock_stock
     ):
         """run_full 应依次执行各 Phase，遇到 Phase 2 error 应终止。"""
         mock_stock.return_value = {"status": "ok", "new_listed": [], "delisted": [], "total": 5000}
         mock_daily.return_value = {"status": "ok", "stock_count": 5000, "is_trade_day": True}
-        mock_repair.return_value = {"status": "ok", "affected_stocks": 0, "total_filled": 0}
+        mock_ohlcv.return_value = 0  # _fill_ohlcv_gaps returns int
         mock_fill.return_value = {"status": "ok", "filled": 0}
         mock_index.return_value = {"status": "ok", "index_count": 6}
 
@@ -738,17 +737,17 @@ class TestRunFullPipeline:
         assert result["status"] == "ok", f"管线应成功：{result}"
         mock_stock.assert_called_once()
         mock_daily.assert_called_once()
-        mock_repair.assert_called_once()
+        mock_ohlcv.assert_called_once()
         mock_fill.assert_called_once()
         mock_index.assert_called_once()
 
     @patch("sequoia_x.data.sync.DataSync.sync_stock_list")
     @patch("sequoia_x.data.sync.DataSync.sync_index_daily")
     @patch("sequoia_x.data.sync.DataSync.sync_daily")
-    @patch("sequoia_x.data.sync.DataSync.repair_missing")
+    @patch("sequoia_x.data.sync.DataSync._fill_ohlcv_gaps")
     @patch.object(DataSync, "_fill_valuation_gaps")
     def test_run_full_aborts_on_phase2_error(
-        self, mock_fill, mock_repair, mock_daily, mock_index, mock_stock
+        self, mock_fill, mock_ohlcv, mock_daily, mock_index, mock_stock
     ):
         """Phase 2 失败时管线应终止，后续 Phase 不执行。"""
         mock_stock.return_value = {"status": "ok", "new_listed": [], "delisted": [], "total": 5000}
@@ -759,6 +758,6 @@ class TestRunFullPipeline:
             result = sync.run_full()
 
         assert result["status"] == "error", "Phase 2 error 后管线应标记为 error"
-        mock_repair.assert_not_called()  # Phase 3 不应执行
+        mock_ohlcv.assert_not_called()  # Phase 2b 不应执行
         mock_fill.assert_not_called()    # Phase 4 不应执行
         mock_index.assert_not_called()   # Phase 5 不应执行
