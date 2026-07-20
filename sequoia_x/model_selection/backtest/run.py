@@ -1,0 +1,94 @@
+"""LSTM 模型选股策略回测 -- CLI 入口。
+
+用法:
+  python -m sequoia_x.model_selection.backtest.run
+  python -m sequoia_x.model_selection.backtest.run --period 2024
+  python -m sequoia_x.model_selection.backtest.run --start 2024-01-01 --end 2024-12-31
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+from sequoia_x.core.config import Settings
+from sequoia_x.data.engine import DataEngine
+from sequoia_x.core.logger import get_logger
+from sequoia_x.model_selection.backtest.engine import LSTMBacktestEngine
+from sequoia_x.model_selection.backtest import config as bt_cfg
+from sequoia_x.model_selection.backtest.reporter import save_results
+
+logger = get_logger(__name__)
+
+PERIODS: dict[str, tuple[str, str, str]] = {
+    "2024": ("2024-01-01", "2024-12-31", "震荡市, HS300 +1.71%"),
+    "2025": ("2025-01-01", "2025-12-31", "大牛市, HS300 +34.94%"),
+    "2026": ("2026-01-01", "2026-07-20", "快牛, HS300 +24.25%"),
+    "full": ("2024-01-01", "2026-07-20", "全周期"),
+}
+
+
+def run_period(
+    engine: DataEngine, name: str, start: str, end: str, desc: str
+) -> dict:
+    """运行单个期间回测。"""
+    logger.info(f"回测 {name}: {start} ~ {end} ({desc})")
+    t0 = time.time()
+    bt = LSTMBacktestEngine(engine)
+    metrics = bt.run(start, end)
+    elapsed = time.time() - t0
+    metrics["period"] = name
+    metrics["description"] = desc
+    metrics["duration_seconds"] = round(elapsed, 1)
+    if metrics:
+        logger.info(
+            f"回测 {name} 完成 | 收益={metrics.get('total_return',0):+.1%} "
+            f"夏普={metrics.get('sharpe',0)} "
+            f"回撤={metrics.get('max_drawdown',0):.1%} "
+            f"耗时={elapsed:.0f}s"
+        )
+    return metrics
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="LSTM-Transformer 选股策略回测")
+    parser.add_argument(
+        "--period", choices=list(PERIODS.keys()),
+        help="回测期间 (默认全部)"
+    )
+    parser.add_argument(
+        "--start", type=str, help="自定义开始日期 (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--end", type=str, help="自定义结束日期 (YYYY-MM-DD)"
+    )
+    args = parser.parse_args()
+
+    settings = Settings()
+    engine = DataEngine(settings)
+
+    if args.start:
+        bt = LSTMBacktestEngine(engine)
+        metrics = bt.run(args.start, args.end or "")
+        save_results([metrics], bt_cfg.OUTPUT_DIR)
+    elif args.period:
+        name, start, end, desc = PERIODS[args.period]
+        bt = LSTMBacktestEngine(engine)
+        metrics = bt.run(start, end)
+        save_results([metrics], bt_cfg.OUTPUT_DIR)
+    else:
+        # 运行全部4个期间
+        all_metrics: list[dict] = []
+        for name, (start, end, desc) in PERIODS.items():
+            metrics = run_period(engine, name, start, end, desc)
+            all_metrics.append(metrics)
+        save_results(all_metrics, bt_cfg.OUTPUT_DIR)
+
+
+if __name__ == "__main__":
+    main()
