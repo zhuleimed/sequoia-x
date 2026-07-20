@@ -169,7 +169,7 @@ def _build_objective(engine: DataEngine, symbols: list[str],
             model.fit(
                 X_tr, y_tr,
                 validation_data=(X_va, y_va),
-                epochs=50,
+                epochs=100,
                 batch_size=batch_size,
                 callbacks=[
                     tf.keras.callbacks.EarlyStopping(

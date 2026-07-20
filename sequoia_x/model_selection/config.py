@@ -54,7 +54,7 @@ class LSTMConfig:
     num_heads_range: tuple = (2, 12)
     ff_dim_range: tuple = (64, 768)
     num_transformers_range: tuple = (1, 4)
-    dropout_range: tuple = (0.1, 0.6)
+    dropout_range: tuple = (0.3, 0.6)
     dense_units_range: tuple = (32, 384)
     learning_rate_range: tuple = (1e-6, 3e-2)
     batch_size_options: tuple = (16, 32, 64, 128)
