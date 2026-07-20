@@ -39,10 +39,7 @@ logger = get_logger(__name__)
 
 
 def _sample_stocks(engine: DataEngine, n: int = 200) -> list[str]:
-    """分层抽样代表性股票。
-
-    从基础池中按市值（用最近收盘价×成交量近似）分层抽样。
-    """
+    """简单随机抽样代表性股票（后续可改为市值分层抽样）。"""
     pool = engine.get_base_stock_pool()
     if len(pool) <= n:
         return pool
@@ -166,13 +163,18 @@ def train_full(cfg: LSTMConfig | None = None):
 
     t0 = time.time()
     for trial_num in range(cfg.optuna_n_trials):
-        study.optimize(objective_func, n_trials=1, n_jobs=1, show_progress_bar=False)
         elapsed = time.time() - t0
+        remaining = cfg.optuna_timeout - elapsed
+        if remaining <= 0:
+            logger.info(f"Optuna 搜索超时 ({cfg.optuna_timeout}s)，已停止于 trial {trial_num}")
+            break
+        study.optimize(objective_func, n_trials=1, n_jobs=1,
+                       timeout=remaining, show_progress_bar=False)
         logger.info(
             f"[Optuna] Trial {trial_num+1}/{cfg.optuna_n_trials} 完成 | "
             f"当前值={study.trials[-1].value:.4f} | "
             f"全局最佳={study.best_value:.4f} | "
-            f"耗时={elapsed:.0f}s"
+            f"耗时={time.time()-t0:.0f}s"
         )
 
     logger.info(f"Optuna 搜索完成 | 最佳值={study.best_value:.4f}")
