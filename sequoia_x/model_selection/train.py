@@ -53,7 +53,7 @@ def _sample_stocks(engine: DataEngine, n: int = 200) -> list[str]:
 def _get_trade_dates(engine: DataEngine, lookback: int) -> list[str]:
     """获取最近 N 个交易日日期列表。"""
     import sqlite3
-    conn = sqlite3.connect(engine.settings.db_path)
+    conn = sqlite3.connect(engine.db_path)
     rows = conn.execute(
         "SELECT DISTINCT date FROM stock_daily ORDER BY date DESC LIMIT ?",
         (lookback,)
