@@ -93,12 +93,12 @@ def _build_objective(engine: DataEngine, symbols: list[str],
         # 分离训练参数与模型架构参数
         batch_size = params.pop("batch_size")
 
-        # 从多个时间点采样构建特征，增加训练样本量
-        # 取最近 30 个日期中的每第 3 个 → ~10 个时间点 × 200 只 ≈ 2000 样本
-        recent_dates = ref_dates[-30:] if len(ref_dates) > 30 else ref_dates
-        sample_dates = recent_dates[::3]
-        if len(sample_dates) < 3:
-            sample_dates = [ref_dates[-1]]
+        # 从多个时间点采样构建特征
+        # 取最近 30 天中的首/中/尾 3 个时间点 → ~3×200=600 样本
+        recent = ref_dates[-30:] if len(ref_dates) > 30 else ref_dates
+        n_dates = len(recent)
+        indices = [0, n_dates // 2, n_dates - 1] if n_dates >= 3 else list(range(n_dates))
+        sample_dates = [recent[i] for i in sorted(set(indices))]
 
         X_list, y_list = [], []
         for d in sample_dates:
