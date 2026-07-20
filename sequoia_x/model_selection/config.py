@@ -46,7 +46,7 @@ class LSTMConfig:
     # ── Optuna 搜索参数 ──
     optuna_n_trials: int = 50
     optuna_n_jobs: int = 6
-    optuna_timeout: int = 259200     # 72 小时
+    optuna_timeout: int = 345600     # 96 小时
 
     # ── Optuna 搜索范围 ──
     lstm_units_range: tuple = (64, 320)
