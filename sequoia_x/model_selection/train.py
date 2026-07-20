@@ -62,8 +62,45 @@ def _get_trade_dates(engine: DataEngine, lookback: int) -> list[str]:
     return [r[0] for r in reversed(rows)]
 
 
+def _preload_stock_cache(engine: DataEngine, symbols: list[str]) -> dict:
+    """预加载所有训练股票的OHLCV数据到内存，避免反复查询SQLite。"""
+    cache = {}
+    for symbol in symbols:
+        df = engine.get_ohlcv(symbol)
+        if df is not None and len(df) > 0:
+            cache[symbol] = df
+    logger.info(f"数据缓存就绪: {len(cache)}/{len(symbols)} 只股票")
+    return cache
+
+
+def _build_batch_from_cache(
+    symbols: list[str],
+    ref_date: str,
+    cache: dict,
+    engine: DataEngine,
+    cfg: LSTMConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    """从内存缓存构建特征矩阵，避免查询数据库。
+
+    与 build_batch_features 功能相同，但使用预加载的缓存数据。
+    """
+    from sequoia_x.model_selection.features import build_stock_features
+
+    # 为缓存版本临时替换 get_ohlcv
+    _orig_get_ohlcv = engine.get_ohlcv
+
+    def _cached_get_ohlcv(symbol):
+        return cache.get(symbol)
+
+    engine.get_ohlcv = _cached_get_ohlcv  # type: ignore
+    try:
+        return build_batch_features(symbols, ref_date, engine, cfg)
+    finally:
+        engine.get_ohlcv = _orig_get_ohlcv  # type: ignore
+
+
 def _build_objective(engine: DataEngine, symbols: list[str],
-                     ref_dates: list[str], cfg: LSTMConfig):
+                     ref_dates: list[str], cache: dict, cfg: LSTMConfig):
     """构建 Optuna 目标函数。"""
 
     def objective(trial: optuna.Trial) -> float:
@@ -93,16 +130,16 @@ def _build_objective(engine: DataEngine, symbols: list[str],
         # 分离训练参数与模型架构参数
         batch_size = params.pop("batch_size")
 
-        # 从多个时间点采样构建特征
-        # 取最近 30 天中的首/中/尾 3 个时间点 → ~3×200=600 样本
-        recent = ref_dates[-30:] if len(ref_dates) > 30 else ref_dates
-        n_dates = len(recent)
-        indices = [0, n_dates // 2, n_dates - 1] if n_dates >= 3 else list(range(n_dates))
-        sample_dates = [recent[i] for i in sorted(set(indices))]
+        # 从内存缓存快速构建多日期特征
+        # 取最近 36 天中的每第 3 个 → ~12 个时间点 × 200 只 ≈ 2400 样本
+        recent = ref_dates[-36:] if len(ref_dates) > 36 else ref_dates
+        sample_dates = [recent[i] for i in range(0, len(recent), 3)]
+        if len(sample_dates) < 3:
+            sample_dates = [ref_dates[-1]]
 
         X_list, y_list = [], []
         for d in sample_dates:
-            X_batch, y_batch = build_batch_features(symbols, d, engine, cfg)
+            X_batch, y_batch = _build_batch_from_cache(symbols, d, cache, engine, cfg)
             if len(X_batch) > 0:
                 X_list.append(X_batch)
                 y_list.append(y_batch)
@@ -163,9 +200,10 @@ def train_full(cfg: LSTMConfig | None = None):
     logger.info(f"LSTM 模型完整训练 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     logger.info("=" * 60)
 
-    # 抽样股票
+    # 抽样股票 + 预加载数据缓存
     symbols = _sample_stocks(engine, cfg.train_sample_stocks)
     logger.info(f"训练股票池: {len(symbols)} 只")
+    cache = _preload_stock_cache(engine, symbols)
 
     # 获取最近交易日
     dates = _get_trade_dates(engine, cfg.window + cfg.predict_horizon + 30)
@@ -173,7 +211,7 @@ def train_full(cfg: LSTMConfig | None = None):
 
     # Phase 1: Optuna 搜索
     logger.info("Phase 1: Optuna 超参数搜索")
-    objective_func = _build_objective(engine, symbols, dates, cfg)
+    objective_func = _build_objective(engine, symbols, dates, cache, cfg)
 
     study = optuna.create_study(
         direction="minimize",
@@ -199,10 +237,22 @@ def train_full(cfg: LSTMConfig | None = None):
     logger.info(f"Optuna 搜索完成 | 最佳值={study.best_value:.4f}")
     logger.info(f"最佳参数: {study.best_params}")
 
-    # Phase 2: 最终训练
+    # Phase 2: 最终训练（使用全部12个采样点+缓存）
     logger.info("Phase 2: 最终训练")
-    ref_date = dates[-1]
-    X, y = build_batch_features(symbols, ref_date, engine, cfg)
+    # 与 Optuna 相同的多日期采样
+    recent = dates[-36:] if len(dates) > 36 else dates
+    sample_dates = [recent[i] for i in range(0, len(recent), 3)]
+    if len(sample_dates) < 3:
+        sample_dates = [dates[-1]]
+
+    X_list, y_list = [], []
+    for d in sample_dates:
+        X_batch, y_batch = _build_batch_from_cache(symbols, d, cache, engine, cfg)
+        if len(X_batch) > 0:
+            X_list.append(X_batch)
+            y_list.append(y_batch)
+    X = np.concatenate(X_list, axis=0)
+    y = np.concatenate(y_list, axis=0)
     logger.info(f"最终训练数据: X={X.shape}, y={y.shape}")
 
     best_params = study.best_params
