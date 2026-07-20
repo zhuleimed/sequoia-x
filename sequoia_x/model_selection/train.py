@@ -131,9 +131,9 @@ def _build_objective(engine: DataEngine, symbols: list[str],
         batch_size = params.pop("batch_size")
 
         # 从内存缓存快速构建多日期特征
-        # 取最近 36 天中的每第 3 个 → ~12 个时间点 × 200 只 ≈ 2400 样本
+        # 取最近 36 天中的每第 6 个 → ~6 个时间点 × 200 只 ≈ 1200 样本
         recent = ref_dates[-36:] if len(ref_dates) > 36 else ref_dates
-        sample_dates = [recent[i] for i in range(0, len(recent), 3)]
+        sample_dates = [recent[i] for i in range(0, len(recent), 6)]
         if len(sample_dates) < 3:
             sample_dates = [ref_dates[-1]]
 
@@ -241,7 +241,7 @@ def train_full(cfg: LSTMConfig | None = None):
     logger.info("Phase 2: 最终训练")
     # 与 Optuna 相同的多日期采样
     recent = dates[-36:] if len(dates) > 36 else dates
-    sample_dates = [recent[i] for i in range(0, len(recent), 3)]
+    sample_dates = [recent[i] for i in range(0, len(recent), 6)]
     if len(sample_dates) < 3:
         sample_dates = [dates[-1]]
 
