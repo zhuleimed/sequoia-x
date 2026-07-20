@@ -90,6 +90,9 @@ def _build_objective(engine: DataEngine, symbols: list[str],
                                                      list(cfg.batch_size_options)),
         }
 
+        # 分离训练参数与模型架构参数
+        batch_size = params.pop("batch_size")
+
         # 用最后一个日期构建特征
         ref_date = ref_dates[-1]
         X, y = build_batch_features(symbols, ref_date, engine, cfg)
@@ -114,7 +117,7 @@ def _build_objective(engine: DataEngine, symbols: list[str],
                 X_tr, y_tr,
                 validation_data=(X_va, y_va),
                 epochs=50,
-                batch_size=params["batch_size"],
+                batch_size=batch_size,
                 callbacks=[
                     tf.keras.callbacks.EarlyStopping(
                         monitor="val_loss", patience=10,
