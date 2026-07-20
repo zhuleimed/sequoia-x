@@ -94,6 +94,8 @@ def _sync_stock_tables(cfg: LSTMConfig) -> None:
             "  low      REAL,"
             "  close    REAL,"
             "  volume   REAL,"
+            "  amount   REAL,"
+            "  pctChg   REAL,"
             "  UNIQUE (symbol, date)"
             ")"
         )
@@ -182,6 +184,11 @@ def run_lstm_daily(
     )
 
     # ── 5. 运行 SimEngine（LSTM 账户） ──
+    # 先注入 LSTM 策略参数，覆盖 simulation/config.py 中的 LLM 参数
+    import sequoia_x.simulation.config as sim_cfg
+    sim_cfg.INITIAL_CAPITAL = cfg.initial_capital
+    sim_cfg.MAX_POSITIONS = cfg.max_positions
+    sim_cfg.PER_STOCK_BUDGET = cfg.per_stock_budget
     lstm_settings = Settings(db_path=cfg.sim_db_path)
     sim_engine = SimEngine(lstm_settings)
     sim_results = sim_engine.run_daily()

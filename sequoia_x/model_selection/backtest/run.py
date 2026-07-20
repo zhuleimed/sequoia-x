@@ -19,9 +19,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
 from sequoia_x.core.logger import get_logger
+from sequoia_x.model_selection.config import get_config as get_lstm_config
 from sequoia_x.model_selection.backtest.engine import LSTMBacktestEngine
 from sequoia_x.model_selection.backtest import config as bt_cfg
 from sequoia_x.model_selection.backtest.reporter import save_results
+from sequoia_x.model_selection.model import load_latest_model
 
 logger = get_logger(__name__)
 
@@ -39,7 +41,15 @@ def run_period(
     """运行单个期间回测。"""
     logger.info(f"回测 {name}: {start} ~ {end} ({desc})")
     t0 = time.time()
-    bt = LSTMBacktestEngine(engine)
+
+    # 加载最新的 LSTM 模型（prediction_cache 在无模型时回退至跳过，但不报错）
+    lstm_cfg = get_lstm_config()
+    model_data = load_latest_model(lstm_cfg)
+    model = model_data[0] if model_data else None
+    if model is None:
+        logger.warning("未找到 LSTM 模型，回测将跳过所有交易信号")
+
+    bt = LSTMBacktestEngine(engine, model=model)
     metrics = bt.run(start, end)
     elapsed = time.time() - t0
     metrics["period"] = name
@@ -71,14 +81,17 @@ def main() -> None:
 
     settings = Settings()
     engine = DataEngine(settings)
+    lstm_cfg = get_lstm_config()
+    model_data = load_latest_model(lstm_cfg)
+    model = model_data[0] if model_data else None
 
     if args.start:
-        bt = LSTMBacktestEngine(engine)
+        bt = LSTMBacktestEngine(engine, model=model)
         metrics = bt.run(args.start, args.end or "")
         save_results([metrics], bt_cfg.OUTPUT_DIR)
     elif args.period:
         name, start, end, desc = PERIODS[args.period]
-        bt = LSTMBacktestEngine(engine)
+        bt = LSTMBacktestEngine(engine, model=model)
         metrics = bt.run(start, end)
         save_results([metrics], bt_cfg.OUTPUT_DIR)
     else:

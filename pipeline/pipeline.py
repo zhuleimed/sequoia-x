@@ -93,16 +93,6 @@ STEPS: list[dict] = [
         "required": False,
         "timeout": 900,  # 15min（包括股票池预测）
     },
-    # ── 2.7. 策略汇总推送（可选） ──
-    {
-        "id": "strategy_summary",
-        "name": "策略汇总推送",
-        "cmd": ["-m", "sequoia_x.simulation.strategy_summary", "--push"],
-        "cwd": str(PROJECT_DIR),
-        "python": PY312,
-        "required": False,
-        "timeout": 30,
-    },
     # ── 3. 模拟盘更新（策略选股后执行，T+1 模式） ──
     {
         "id": "simulation",
@@ -112,6 +102,16 @@ STEPS: list[dict] = [
         "python": PY312,
         "required": False,
         "timeout": 600,  # 10min（主要是数据库操作）
+    },
+    # ── 3.5. 策略汇总推送（可选，必须在模拟盘更新之后） ──
+    {
+        "id": "strategy_summary",
+        "name": "策略汇总推送",
+        "cmd": ["-m", "sequoia_x.simulation.strategy_summary", "--push"],
+        "cwd": str(PROJECT_DIR),
+        "python": PY312,
+        "required": False,
+        "timeout": 30,
     },
     # ── 4. 018 LSTM 策略（可选，已暂停） ──
     # {
