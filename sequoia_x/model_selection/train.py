@@ -93,9 +93,25 @@ def _build_objective(engine: DataEngine, symbols: list[str],
         # 分离训练参数与模型架构参数
         batch_size = params.pop("batch_size")
 
-        # 用最后一个日期构建特征
-        ref_date = ref_dates[-1]
-        X, y = build_batch_features(symbols, ref_date, engine, cfg)
+        # 从多个时间点采样构建特征，增加训练样本量
+        # 取最近 30 个日期中的每第 3 个 → ~10 个时间点 × 200 只 ≈ 2000 样本
+        recent_dates = ref_dates[-30:] if len(ref_dates) > 30 else ref_dates
+        sample_dates = recent_dates[::3]
+        if len(sample_dates) < 3:
+            sample_dates = [ref_dates[-1]]
+
+        X_list, y_list = [], []
+        for d in sample_dates:
+            X_batch, y_batch = build_batch_features(symbols, d, engine, cfg)
+            if len(X_batch) > 0:
+                X_list.append(X_batch)
+                y_list.append(y_batch)
+
+        if not X_list:
+            return float("inf")
+
+        X = np.concatenate(X_list, axis=0)
+        y = np.concatenate(y_list, axis=0)
         if len(X) < 50:
             return float("inf")
 
