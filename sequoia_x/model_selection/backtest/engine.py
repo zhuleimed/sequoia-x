@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
-from datetime import datetime
 
 import numpy as np
 
@@ -71,7 +69,7 @@ class LSTMBacktestEngine:
 
         # 初始训练（用起始日期之前的数据）
         # 跳过前60+horizon天用于特征构建
-        warmup = 60 + self.cfg.predict_horizon
+        warmup = self.cfg.window + self.cfg.predict_horizon
         prediction_cache: dict = {}
 
         for idx, today in enumerate(dates):
@@ -191,24 +189,43 @@ class LSTMBacktestEngine:
     # ──────────────────────────────────────────────────────────
 
     def _execute_sells(self, symbols: list[str], date_str: str) -> None:
-        """执行卖出（用当日开盘价，考虑滑点）。"""
+        """执行卖出（用当日开盘价，考虑滑点）。
+
+        止盈（pnl_pct > 20%）卖出半数持仓，保留剩余仓位；
+        止损（pnl_pct < -8%）卖出全部持仓。
+        """
         for symbol in symbols:
             if symbol not in self.positions:
                 continue
-            pos = self.positions.pop(symbol)
+            pos = self.positions[symbol]
             price = self._get_open_price(symbol, date_str)
             if price is None:
                 continue
+
+            # 判断为止盈（卖出半数）还是止损（卖出全部）
+            pnl_pct = pos.get("pnl_pct", 0)
+            is_take_profit = pnl_pct > 0.20
+            sell_shares = pos["shares"] // 2 if is_take_profit else pos["shares"]
+            orig_shares = pos["shares"]
+
             sell_price = price * (1 - bt_cfg.SLIPPAGE)
-            revenue = pos["shares"] * sell_price
+            revenue = sell_shares * sell_price
             commission = revenue * bt_cfg.COMMISSION_RATE
             tax = revenue * bt_cfg.STAMP_TAX_RATE
             net = revenue - commission - tax
-            pnl = net - pos["cost"]
+            pnl = net - (pos["cost"] * sell_shares // orig_shares) if is_take_profit else net - pos["cost"]
             self.cash += net
+
+            if is_take_profit:
+                # 保留剩余半数：减少股数并按比例调整成本
+                pos["shares"] -= sell_shares
+                pos["cost"] = pos["cost"] * pos["shares"] // orig_shares
+            else:
+                self.positions.pop(symbol)
+
             self.trade_records.append({
                 "symbol": symbol, "type": "sell", "date": date_str,
-                "price": round(sell_price, 4), "shares": pos["shares"],
+                "price": round(sell_price, 4), "shares": sell_shares,
                 "pnl": round(pnl, 2),
             })
 
@@ -247,7 +264,7 @@ class LSTMBacktestEngine:
     def _get_open_price(self, symbol: str, date_str: str) -> float | None:
         """获取某日开盘价。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.db_path)
+        conn = sqlite3.connect(self.engine.settings.db_path)
         row = conn.execute(
             "SELECT open FROM stock_daily WHERE symbol=? AND date=?",
             (symbol, date_str)
@@ -258,7 +275,7 @@ class LSTMBacktestEngine:
     def _get_close_price(self, symbol: str, date_str: str) -> float | None:
         """获取某日收盘价。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.db_path)
+        conn = sqlite3.connect(self.engine.settings.db_path)
         row = conn.execute(
             "SELECT close FROM stock_daily WHERE symbol=? AND date=?",
             (symbol, date_str)
@@ -273,7 +290,7 @@ class LSTMBacktestEngine:
     def _mark_to_market(self, date_str: str) -> None:
         """日终按收盘价估值。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.db_path)
+        conn = sqlite3.connect(self.engine.settings.db_path)
         for symbol, pos in self.positions.items():
             row = conn.execute(
                 "SELECT close FROM stock_daily WHERE symbol=? AND date=?",
