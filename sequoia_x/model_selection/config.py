@@ -20,7 +20,7 @@ class LSTMConfig:
     output_dir: str = "output/sim_lstm"            # 模拟盘状态输出
 
     # ── 时间窗口 ──
-    window: int = 60             # 时序窗口（交易日）
+    window: int = 120            # 时序窗口（交易日）
     predict_horizon: int = 5     # 预测未来 N 日收益率
 
     # ── 模型架构（默认值，Optuna 会覆盖） ──
@@ -34,7 +34,7 @@ class LSTMConfig:
     learning_rate: float = 0.001
 
     # ── 训练参数 ──
-    train_sample_stocks: int = 200   # 训练时抽样股票数（市值分层）
+    train_sample_stocks: int = 400   # 训练时抽样股票数（市值分层）
     test_ratio: float = 0.15        # 测试集比例
     val_ratio: float = 0.15         # 验证集比例
     random_seed: int = 42
@@ -44,7 +44,7 @@ class LSTMConfig:
     min_learning_rate: float = 1e-6
 
     # ── Optuna 搜索参数 ──
-    optuna_n_trials: int = 50
+    optuna_n_trials: int = 100
     optuna_n_jobs: int = 6
     optuna_timeout: int = 345600     # 96 小时
 
