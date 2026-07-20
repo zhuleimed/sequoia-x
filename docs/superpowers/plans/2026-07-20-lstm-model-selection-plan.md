@@ -1,5 +1,6 @@
 # LSTM-Transformer 模型选股策略 — 实现计划
 
+> **v1.1 更新 (2026-07-21):** 训练参数全面升级：400股+12日期+100trials+窗口120+epochs300，预期~80-96h。
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 004_sequoia-x 项目中新增 LSTM-Transformer 股票收益率预测模块，含训练/预测/回测/模拟盘/收益报告。
@@ -76,7 +77,7 @@ class LSTMConfig:
     learning_rate: float = 0.001
 
     # ── 训练参数 ──
-    train_sample_stocks: int = 200   # 训练时抽样股票数（市值分层）
+    train_sample_stocks: int = 400   # 训练时抽样股票数（市值分层）
     test_ratio: float = 0.15        # 测试集比例
     val_ratio: float = 0.15         # 验证集比例
     random_seed: int = 42

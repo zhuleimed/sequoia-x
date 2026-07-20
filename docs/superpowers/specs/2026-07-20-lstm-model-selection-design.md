@@ -1,6 +1,6 @@
 # LSTM-Transformer 模型选股策略 — 设计文档
 
-> 版本: v1.0 | 日期: 2026-07-20 | 状态: 已确认
+> 版本: v1.1 | 日期: 2026-07-21 | 状态: 已确认 (参数升级: 400股+12日期+100trials+窗口120+epochs300)
 
 ## 一、项目目标
 
@@ -77,7 +77,7 @@
 
 ### 输入输出
 - 输入: 单只股票 symbol + 截止日期 ref_date + DB 连接
-- 输出: `(window=60, n_features≈55)` 三维张量
+- 输出: `(window=120, n_features≈55)` 三维张量
 - 标签 y: 未来 5 日收益率 = `close[T+5] / close[T] - 1`
 
 ### 特征分组（全部从 stock_daily 表计算）
@@ -140,7 +140,7 @@ Loss: MSE
 
 | 模式 | CLI | 触发 | 耗时 | 内容 |
 |------|-----|------|:---:|------|
-| 完整训练 | `--full` | 每月15日 00:00 | 50-80h | Optuna 50 trials + 最终训练 200 epochs |
+| 完整训练 | `--full` | 每月15日 00:00 | ~80-96h | Optuna 100 trials + 最终训练 300 epochs (12日期×400股≈4800样本) |
 | 增量学习 | `--incremental` | 每日管线 18:10 | ~5min | 加载模型 → 近60日数据微调10轮 |
 | 每周刷新 | `--weekly` | 每周六 00:00 | 2-3h | 最佳参数 → 近252日数据训练100轮 |
 
@@ -148,14 +148,14 @@ Loss: MSE
 
 ```
 Phase 1: Optuna 搜索
-  - 50 trials × 3-fold TimeSeriesSplit
+  - 100 trials × 3-fold TimeSeriesSplit
   - MedianPruner 剪枝
   - 目标: 最小化 val_loss (MSE)
   - 并行: n_jobs=6
 
 Phase 2: 最终训练
   - 用最佳参数
-  - 200 epochs + EarlyStopping(patience=20)
+  - 300 epochs + EarlyStopping(patience=20)
   - 训练/验证/测试: 70/15/15 按时间切分
   - 评估: IC + Rank IC + Q1-Q5 分层收益
 ```
@@ -164,7 +164,7 @@ Phase 2: 最终训练
 
 ```
 1. 加载 data/models/lstm_selection/ 下最新模型
-2. 抽样 200 只代表性股票（市值分层）
+2. 抽样 400 只代表性股票（市值分层）
 3. 构建近 60 个交易日特征
 4. Adam(lr=1e-5), epochs=10, batch_size=64
 5. 保存（覆盖原文件，不做版本管理）
