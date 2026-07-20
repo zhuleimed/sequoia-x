@@ -23,15 +23,25 @@ from sequoia_x.data.engine import DataEngine
 from sequoia_x.core.logger import get_logger
 from sequoia_x.model_selection.config import LSTMConfig, get_config
 from sequoia_x.model_selection.features import build_prediction_features
-from sequoia_x.model_selection.model import load_latest_model, predict_returns
+from sequoia_x.model_selection.model import predict_returns
 
 logger = get_logger(__name__)
 
 
 def _predict_single(args: tuple) -> tuple[str, float | None]:
-    """单只股票预测（供多进程使用）。"""
-    symbol, engine, model, cfg, n_features = args
+    """单只股票预测（供多进程使用）。
+
+    Worker 内独立加载模型，避免跨进程 pickle Keras 模型。
+    """
+    symbol, engine, model_path, cfg, n_features = args
     try:
+        # Load model inside worker (avoids pickle issue)
+        import tensorflow as tf
+        from sequoia_x.model_selection.model import TransformerBlock
+        model = tf.keras.models.load_model(
+            model_path,
+            custom_objects={"TransformerBlock": TransformerBlock},
+        )
         X = build_prediction_features(symbol, engine, cfg)
         if X is None:
             return (symbol, None)
@@ -40,13 +50,13 @@ def _predict_single(args: tuple) -> tuple[str, float | None]:
             return (symbol, None)
         pred = predict_returns(model, X)[0]
         return (symbol, float(pred))
-    except Exception as e:
+    except Exception:
         return (symbol, None)
 
 
 def predict_all(
     engine: DataEngine,
-    model,
+    model=None,
     cfg: LSTMConfig | None = None,
     n_workers: int = 28,
 ) -> list[tuple[str, float]]:
@@ -54,7 +64,7 @@ def predict_all(
 
     Args:
         engine: DataEngine 实例。
-        model: 训练好的 Keras Model。
+        model: 保留参数，不再使用（自动从磁盘加载）。
         cfg: 配置对象。
         n_workers: 并行进程数。
 
@@ -64,14 +74,29 @@ def predict_all(
     if cfg is None:
         cfg = get_config()
 
+    # 从磁盘获取最新模型路径（避免跨进程 pickle TF 模型）
+    model_dir = cfg.model_dir_path
+    versions = sorted([d for d in model_dir.iterdir() if d.is_dir()], reverse=True)
+    if not versions:
+        logger.error("无可用模型，请先训练")
+        return []
+    model_save_path = str(versions[0] / "model.keras")
+
+    # 临时加载模型以获取特征维度 n_features
+    import tensorflow as tf
+    from sequoia_x.model_selection.model import TransformerBlock
+    tmp_model = tf.keras.models.load_model(
+        model_save_path,
+        custom_objects={"TransformerBlock": TransformerBlock},
+    )
+    n_features = tmp_model.input_shape[2]
+
     symbols = engine.get_base_stock_pool()
     logger.info(f"预测池: {len(symbols)} 只股票")
 
-    n_features = model.input_shape[2]
-
-    # 多进程并行预测
+    # 多进程并行预测（每个 worker 独立加载模型）
     t0 = time.time()
-    tasks = [(s, engine, model, cfg, n_features) for s in symbols]
+    tasks = [(s, engine, model_save_path, cfg, n_features) for s in symbols]
 
     with Pool(processes=n_workers) as pool:
         results = pool.map(_predict_single, tasks)
@@ -99,15 +124,8 @@ def main():
     settings = Settings()
     engine = DataEngine(settings)
 
-    # 加载模型
-    loaded = load_latest_model(cfg)
-    if loaded is None:
-        logger.error("无可用模型，请先训练")
-        sys.exit(1)
-    model, params = loaded
-
-    # 预测
-    predictions = predict_all(engine, model, cfg)
+    # 预测（自动从磁盘加载最新模型）
+    predictions = predict_all(engine, cfg=cfg)
 
     # 输出
     print(f"\n{'='*60}")
