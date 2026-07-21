@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -379,9 +380,32 @@ def train_full(cfg: LSTMConfig | None = None, skip_optuna: bool = False):
 
 
 def train_incremental(cfg: LSTMConfig | None = None):
-    """增量学习：加载最新模型，用近60日数据微调。"""
+    """增量学习：加载最新模型，用近60日数据微调。
+
+    月度全量训练（--full）运行时自动跳过，避免两个 TF 进程抢 CPU/内存。
+    不影响后续预测步骤——预测照常用已有模型。
+    """
     if cfg is None:
         cfg = get_config()
+
+    # 检查是否有 --full 训练正在运行（避免 CPU/内存冲突）
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"sequoia_x\.model_selection\.train.*--full"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            pids = result.stdout.strip().split()
+            # 排除自身
+            other_pids = [p for p in pids if p != str(os.getpid())]
+            if other_pids:
+                logger.info(
+                    f"月度全量训练进行中 (PID={','.join(other_pids)})，"
+                    f"跳过增量学习"
+                )
+                return
+    except Exception:
+        pass  # pgrep 不可用时继续正常执行
 
     logger.info("LSTM 增量学习开始...")
     t0 = time.time()
@@ -433,9 +457,29 @@ def train_incremental(cfg: LSTMConfig | None = None):
 
 
 def train_weekly(cfg: LSTMConfig | None = None):
-    """每周刷新：用最佳参数 + 近252日数据重新训练。"""
+    """每周刷新：用最佳参数 + 近252日数据重新训练。
+
+    月度全量训练（--full）运行时自动跳过。
+    """
     if cfg is None:
         cfg = get_config()
+
+    # 检查是否有 --full 训练正在运行
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", r"sequoia_x\.model_selection\.train.*--full"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            other_pids = [p for p in result.stdout.strip().split() if p != str(os.getpid())]
+            if other_pids:
+                logger.info(
+                    f"月度全量训练进行中 (PID={','.join(other_pids)})，"
+                    f"跳过周刷新"
+                )
+                return
+    except Exception:
+        pass
 
     logger.info("LSTM 每周刷新开始...")
 
