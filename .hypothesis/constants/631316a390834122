@@ -1,4 +1,0 @@
-# file: G:\中心同步盘_20251027\文档\学习\001_量化平台\013_sequoia-x\sequoia_x\strategy\private_placement.py
-# hypothesis_version: 6.155.2
-
-['(\\d{6})', 'coerce', 'private_placement', '发行方式', '发行日期', '定向增发', '股票代码']

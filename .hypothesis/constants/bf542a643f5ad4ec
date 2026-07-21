@@ -1,4 +1,0 @@
-# file: G:\中心同步盘_20251027\文档\学习\001_量化平台\013_sequoia-x\main.py
-# hypothesis_version: 6.155.2
-
-[10.0, '--backfill', 'Sequoia-X V2 启动', 'Sequoia-X V2 运行完成', 'Sequoia-X V2 选股系统', '__main__', 'store_true', '主流程发生未捕获异常，程序终止', '开始拉取最新快照...', '进入回填模式...']
