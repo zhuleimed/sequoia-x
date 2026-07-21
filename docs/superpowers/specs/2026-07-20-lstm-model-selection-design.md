@@ -1,6 +1,6 @@
 # LSTM-Transformer 模型选股策略 — 设计文档
 
-> 版本: v1.2 | 日期: 2026-07-21 | 状态: 已确认 (参数升级: 400股+12日期+100trials+窗口120+epochs300 + v1.2 全面优化)
+> 版本: v1.2.1 | 日期: 2026-07-21 | 状态: 已确认 (参数升级: 400股+12日期+100trials+窗口120+epochs300 + v1.2 全面优化 + v1.2.1 数据源替换)
 
 ## 一、项目目标
 
@@ -95,8 +95,9 @@
 
 ### 关键约束
 - 严格避免 look-ahead：第 T 日特征只用 T 日及之前的数据
-- 归一化：每个特征序列独立做 Z-score 标准化（rolling basis）
+- 归一化：每个特征序列独立做 Z-score 标准化（沿时间轴 per-feature）
 - 缺失值：停牌日沿用前值（与数据同步的停牌保全策略一致）
+- 标签 y: 超额收益 = `stock_ret_5d - index_ret_5d`（沪深300为基准，聚焦个股相对强弱）
 
 ---
 
@@ -127,8 +128,10 @@ Input: (batch, 60, ~55)
   └─ Dense(1, linear)  → 预测 5 日收益率
 
 参数量: 30万 ~ 1500万（由 Optuna 自动决定最优值）
-Loss: MSE
+Loss: Huber(delta=0.1, Optuna 可搜索)
 早停: patience=20, min_delta=1e-4
+正则化: L2(kernel_regularizer, Optuna 可搜索)
+梯度裁剪: clipnorm=1.0 (Optuna 可搜索)
 学习率调度: ReduceLROnPlateau(factor=0.5, patience=8, min_lr=1e-6)
 ```
 
@@ -411,3 +414,65 @@ LSTM 策略: data/sim_lstm.db     → 同上表结构，独立 DB 文件
 11. **参数冲突** (`model.py`): `window`/`n_features` 在 `create_stock_model()` 中被 `**model_params` 和显式参数重复传递，导致 TypeError。
 12. **TF 安装损坏**: `tensorflow_cpu` 重新安装（原安装缺少 `tensorflow/core` 模块）。
 13. **磁盘空间不足**: pip cache 清理 ~11GB。
+
+---
+
+## 十五、v1.2.1 数据源与代码质量改进 (2026-07-21)
+
+> 详见 git log `13415f3`~`a9c43af`
+
+### 15.1 股票名称查询全面本地化
+
+**不再使用 baostock** 查询股票名称。新架构：
+
+```
+请求 get_stock_name("600519")
+  ├── 1. SQLite stock_list.name 列查询 → 命中直接返回
+  └── 2. 未命中 → 腾讯实时行情 API (https://qt.gtimg.cn/q=sh600519)
+       └── 3. 自动回写 stock_list.name（下次命中，零网络开销）
+```
+
+**对比**:
+| 指标 | 旧方案 (baostock) | 新方案 (SQLite+腾讯) |
+|------|:---:|:---:|
+| 单次查询 | ~2s (login+query+logout) | ~0.01s (SQLite) / ~0.3s (腾讯) |
+| 批量查询 (7只) | ~14s (7次 login/logout) | ~0.1s (SQLite 全命中) |
+| 稳定性 | 差（baostock 常超时） | 高（本地优先，网络仅回退） |
+
+**涉及文件** (6 处替换):
+`data/engine.py`, `simulation/engine.py`, `simulation/reporter.py`, `analysis/analyst.py`, `notify/wxpusher.py`, `notify/feishu.py`
+
+### 15.2 股票代码格式规范
+
+**内部统一使用纯 6 位数字**。对外转换规则：
+
+| 源 | 格式 | 转换函数 |
+|------|------|------|
+| 内部 | `600519` | — |
+| Baostock | `sh.600519` | `_to_baostock_code()` |
+| Tencent | `sh600519` | `to_tencent_code()` |
+| Sina | `sh600519` | `to_sina_code()` |
+| 雪球 | `SH600519` | `_to_xueqiu_code()` |
+
+**市场判断规则**（全局统一）:
+- `("5", "6", "9")` 开头 → 上海交易所 (sh)
+- `("0", "3")` 开头 → 深圳交易所 (sz)
+- `("4", "8")` 开头 → 北京交易所 (bj)
+
+### 15.3 全流程审计修复
+
+**回测模块** (commit `4893e90`):
+- 股票池缓存: 一次 baostock 调用，所有交易日复用
+- warmup 修复: 移除多余的 `predict_horizon` 参数
+- 去重模型加载: `run_period()` 接受 model 参数
+- CSV 导出: `daily_records.csv` + `trade_records.csv`
+
+**管线模块** (commit `a9c43af`):
+- 回测预测函数: `build_stock_features` → `build_prediction_features`（消除 look-ahead）
+- 日报推送: `push_lstm_daily_report()` 调用补充
+- 批量名称: 逐只查询 → `get_stock_names_batch()`
+- n_features 轻量化: 加载 TF 模型 → 读取 `params.json`
+
+### 15.4 数据同步名称写入
+
+`sync_stock_list()` 在 INSERT 时同步写入 baostock 返回的 `code_name`，确保 `stock_list.name` 列在首次同步时即有初始值，减少后续腾讯 API 调用量。
