@@ -412,17 +412,7 @@ def build_monthly_report_text(year: int, month: int, db_path: str) -> str:
 
 
 def _get_name(symbol: str) -> str:
-    """获取股票名称（缓存 + baostock 查询）。"""
-    try:
-        import baostock as bs
-        bs.login()
-        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-        rs = bs.query_stock_basic(code=f"{prefix}.{symbol}")
-        while rs.next():
-            name = rs.get_row_data()[1]
-            bs.logout()
-            return name
-        bs.logout()
-    except Exception:
-        pass
-    return ""
+    """获取股票名称（本地 SQLite 优先，腾讯 API 回退）。"""
+    from sequoia_x.core.config import get_settings
+    from sequoia_x.data.engine import DataEngine
+    return DataEngine(get_settings()).get_stock_name(symbol)

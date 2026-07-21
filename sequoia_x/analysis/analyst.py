@@ -49,21 +49,17 @@ def _get_zhitu_token() -> str:
 
 
 def _get_stock_name(code: str) -> str:
-    """通过 baostock 查询股票名称（带缓存）。"""
+    """查询股票名称（本地 SQLite 优先，腾讯 API 回退，不再依赖 baostock）。"""
     if code in _STOCK_NAME_CACHE:
         return _STOCK_NAME_CACHE[code]
     try:
-        import baostock as bs
-
-        bs.login()
-        prefix = "sh" if code.startswith(("6", "9")) else "sz"
-        rs = bs.query_stock_basic(code=f"{prefix}.{code}")
-        name = code
-        while rs.next():
-            name = rs.get_row_data()[1]
-        bs.logout()
-        _STOCK_NAME_CACHE[code] = name
-        return name
+        from sequoia_x.core.config import get_settings
+        from sequoia_x.data.engine import DataEngine
+        engine = DataEngine(get_settings())
+        name = engine.get_stock_name(code)
+        if name:
+            _STOCK_NAME_CACHE[code] = name
+            return name
     except Exception:
         return code
 

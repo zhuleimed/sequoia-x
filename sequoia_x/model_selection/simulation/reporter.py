@@ -24,53 +24,17 @@ logger = get_logger(__name__)
 # ════════════════════════════════════════════════════════════
 
 
-# 股票名称缓存（baostock 查询较慢，同一次运行中缓存结果）
-_name_cache: dict[str, str] = {}
-
-
 def _get_stock_names_batch(symbols: list[str]) -> dict[str, str]:
-    """批量获取股票名称（一次 baostock 连接查询全部）。
-
-    避免逐只 login/logout 导致的速率限制和性能问题。
-    结果写入模块级缓存 _name_cache，后续调用直接返回。
-    """
-    uncached = [s for s in symbols if s not in _name_cache]
-    if not uncached:
-        return {s: _name_cache.get(s, "") for s in symbols}
-
-    try:
-        import baostock as bs
-
-        bs.login()
-        try:
-            rs = bs.query_stock_basic()
-            if rs.error_code == "0":
-                while rs.next():
-                    row = rs.get_row_data()
-                    code = row[0].split(".")[1] if "." in row[0] else row[0]
-                    name = row[1]
-                    if code in uncached:
-                        _name_cache[code] = name
-        finally:
-            bs.logout()
-    except Exception:
-        pass
-
-    # 未命中的返回空字符串
-    for s in uncached:
-        if s not in _name_cache:
-            _name_cache[s] = ""
-
-    return {s: _name_cache.get(s, "") for s in symbols}
+    """批量获取股票名称（本地 SQLite 优先，腾讯 API 回退，不再依赖 baostock）。"""
+    from sequoia_x.core.config import Settings
+    from sequoia_x.data.engine import DataEngine
+    engine = DataEngine(Settings())
+    return engine.get_stock_names_batch(symbols)
 
 
 def _get_stock_name(symbol: str) -> str:
-    """获取单只股票名称（优先查缓存，缓存未命中时批量查询）。"""
-    if symbol in _name_cache:
-        return _name_cache[symbol]
-    # 单个未命中时走批量查询（最小开销）
-    _get_stock_names_batch([symbol])
-    return _name_cache.get(symbol, "")
+    """获取单只股票名称（委托给 DataEngine 本地+腾讯双源查询）。"""
+    return _get_stock_names_batch([symbol]).get(symbol, "")
 
 
 def _query_dict(conn: sqlite3.Connection, sql: str,

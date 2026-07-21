@@ -688,18 +688,8 @@ class SimEngine:
         return row[0] if row else today_str
 
     def _get_stock_name(self, symbol: str) -> str:
-        """通过 baostock 获取股票名称。"""
-        try:
-            import baostock as bs
-            bs.login()
-            prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-            rs = bs.query_stock_basic(code=f"{prefix}.{symbol}")
-            while rs.next():
-                return rs.get_row_data()[1]
-            bs.logout()
-        except Exception:
-            pass
-        return ""
+        """获取股票名称（本地 SQLite 优先，腾讯 API 回退）。"""
+        return self.engine.get_stock_name(symbol)
 
     def _calc_max_drawdown(self, symbol: str, start_date: str, end_date: str) -> Optional[float]:
         """计算某只股票在指定区间内的最大回撤。"""

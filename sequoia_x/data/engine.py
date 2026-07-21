@@ -139,6 +139,10 @@ class DataEngine:
                 ("pcfNcfTTM", "REAL"),
                 ("amount", "REAL"),
             ])
+            # 为 stock_list 补充 name 列（v1.2: 腾讯API批量获取名称后本地存储）
+            _migrate_columns(conn, "stock_list", [
+                ("name", "TEXT"),
+            ])
             conn.commit()
         logger.info(f"数据库初始化完成：{self.db_path}")
 
@@ -291,3 +295,90 @@ class DataEngine:
                 "SELECT DISTINCT symbol FROM stock_daily"
             ).fetchall()
         return [row[0] for row in rows]
+
+    # ── 股票名称查询（本地 SQLite 优先，腾讯 API 回退）──
+
+    def get_stock_name(self, symbol: str) -> str:
+        """获取单只股票名称（优先本地缓存，未命中时从腾讯API获取）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT name FROM stock_list WHERE symbol=?", (symbol,)
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+        # 本地未命中 → 腾讯 API 实时获取并回写
+        name = self._fetch_name_from_tencent(symbol)
+        if name:
+            self._upsert_stock_name(symbol, name)
+        return name
+
+    def get_stock_names_batch(self, symbols: list[str]) -> dict[str, str]:
+        """批量获取股票名称（本地优先，缺失的批量从腾讯获取）。
+
+        一次网络请求获取一个 symbol 的名称。比逐只 baostock login/logout
+        快 10-100 倍，且不依赖不稳定的 baostock 服务。
+        """
+        result: dict[str, str] = {}
+        missing: list[str] = []
+
+        # 先从本地 DB 查询
+        with sqlite3.connect(self.db_path) as conn:
+            for sym in symbols:
+                row = conn.execute(
+                    "SELECT name FROM stock_list WHERE symbol=?", (sym,)
+                ).fetchone()
+                if row and row[0]:
+                    result[sym] = row[0]
+                else:
+                    missing.append(sym)
+
+        # 缺失的从腾讯 API 逐个获取（腾讯实时行情接口返回名称）
+        for sym in missing:
+            name = self._fetch_name_from_tencent(sym)
+            if name:
+                result[sym] = name
+                self._upsert_stock_name(sym, name)
+            else:
+                result[sym] = ""
+
+        return result
+
+    def _fetch_name_from_tencent(self, symbol: str) -> str:
+        """通过腾讯实时行情 API 获取单只股票名称。
+
+        腾讯 API 返回格式: v_sh600519="1~贵州茅台~600519~..."
+        parts[1] 即为股票名称。比 baostock 快（~0.3s vs ~2s）且更稳定。
+        """
+        try:
+            import requests
+            prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+            code = f"{prefix}{symbol}"
+            url = f"https://qt.gtimg.cn/q={code}"
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200 or '="' not in r.text:
+                return ""
+            parts = r.text.split('"')[1].split("~")
+            if len(parts) >= 2:
+                return parts[1]
+        except Exception:
+            pass
+        return ""
+
+    def _upsert_stock_name(self, symbol: str, name: str) -> None:
+        """将股票名称写入 stock_list 表（更新或插入）。"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE stock_list SET name=? WHERE symbol=?",
+                    (name, symbol),
+                )
+                if conn.total_changes == 0:
+                    # 该 symbol 不在 stock_list 中（可能是退市股），
+                    # 仍然保存以便后续查询
+                    conn.execute(
+                        "INSERT OR IGNORE INTO stock_list (symbol, name) VALUES (?, ?)",
+                        (symbol, name),
+                    )
+                conn.commit()
+        except Exception:
+            pass

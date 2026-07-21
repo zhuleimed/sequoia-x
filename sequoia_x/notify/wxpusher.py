@@ -36,21 +36,10 @@ class WxPusherNotifier:
 
     @staticmethod
     def _get_stock_names(symbols: list[str]) -> dict[str, str]:
-        """通过 baostock 批量查询股票名称，返回 {code: name} 映射。"""
-        import baostock as bs
-
-        bs.login()
-        mapping: dict[str, str] = {}
-        try:
-            for code in symbols:
-                prefix = "sh" if code.startswith(("6", "9")) else "sz"
-                rs = bs.query_stock_basic(code=f"{prefix}.{code}")
-                while rs.next():
-                    row = rs.get_row_data()
-                    mapping[code] = row[1]  # 第2个字段是股票名称
-        finally:
-            bs.logout()
-        return mapping
+        """批量获取股票名称（本地 SQLite 优先，腾讯 API 回退）。"""
+        from sequoia_x.core.config import get_settings
+        from sequoia_x.data.engine import DataEngine
+        return DataEngine(get_settings()).get_stock_names_batch(symbols)
 
     def _build_message(self, symbols: list[str], strategy_name: str) -> str:
         """构建纯文本推送消息。
