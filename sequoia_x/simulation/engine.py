@@ -275,19 +275,23 @@ class SimEngine:
         Returns:
             [{"symbol": "600519", "shares": 300, "price": 150.00, ...}, ...]
         """
+        # 运行时读取配置（支持 LSTM 等策略动态覆盖）
+        from sequoia_x.simulation.config import MAX_POSITIONS as _MAX_POS
+        from sequoia_x.simulation.config import PER_STOCK_BUDGET as _PER_BUDGET
+
         signals = get_pending_signals(self.db_path)
         if not signals:
             return [], []
 
         # 检查当前持仓数量（卖出已执行完，此时仓位已释放）
         current_positions = get_all_positions(self.db_path)
-        if len(current_positions) >= MAX_POSITIONS:
-            logger.info(f"sim 买: 持仓已达上限({MAX_POSITIONS}只)，取消所有买入信号")
+        if len(current_positions) >= _MAX_POS:
+            logger.info(f"sim 买: 持仓已达上限({_MAX_POS}只)，取消所有买入信号")
             for s in signals:
                 mark_signal_cancelled(self.db_path, s["id"], "持仓已达上限")
             return [], []
 
-        slots_available = MAX_POSITIONS - len(current_positions)
+        slots_available = _MAX_POS - len(current_positions)
         cash_balance = self._get_cash()
 
         bought: list[dict] = []
@@ -330,7 +334,7 @@ class SimEngine:
                 cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
-            budget = min(PER_STOCK_BUDGET, cash_balance)
+            budget = min(_PER_BUDGET, cash_balance)
             buy_price = open_price * (1 + SLIPPAGE)
             max_shares = int(budget // buy_price // 100) * 100
 
@@ -544,6 +548,9 @@ class SimEngine:
 
     def _write_account_daily(self, today_str: str) -> None:
         """写入当日账户总览。"""
+        # 运行时读取配置（支持 LSTM 等策略动态覆盖模块级参数）
+        from sequoia_x.simulation.config import INITIAL_CAPITAL as _INIT_CAP
+
         positions = get_all_positions(self.db_path)
         cash = self._get_cash()
         stock_value = sum(p["current_value"] or 0 for p in positions)
@@ -557,11 +564,11 @@ class SimEngine:
             daily_pnl = total_value - prev_day["total_value"]
             daily_pnl_pct = daily_pnl / prev_day["total_value"] if prev_day["total_value"] > 0 else 0.0
         else:
-            daily_pnl = total_value - INITIAL_CAPITAL
-            daily_pnl_pct = daily_pnl / INITIAL_CAPITAL if INITIAL_CAPITAL > 0 else 0.0
+            daily_pnl = total_value - _INIT_CAP
+            daily_pnl_pct = daily_pnl / _INIT_CAP if _INIT_CAP > 0 else 0.0
 
-        total_pnl = total_value - INITIAL_CAPITAL
-        total_return = total_pnl / INITIAL_CAPITAL if INITIAL_CAPITAL > 0 else 0.0
+        total_pnl = total_value - _INIT_CAP
+        total_return = total_pnl / _INIT_CAP if _INIT_CAP > 0 else 0.0
 
         record = {
             "date": today_str,
