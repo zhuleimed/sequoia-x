@@ -68,9 +68,19 @@ class LSTMBacktestEngine:
                      f"{len(boundaries)} 个月")
 
         # 初始训练（用起始日期之前的数据）
-        # 跳过前60+horizon天用于特征构建
-        warmup = self.cfg.window + self.cfg.predict_horizon
+        # 跳过前 window 天用于特征构建（build_prediction_features 只需要 window 天历史数据）
+        warmup = self.cfg.window
         prediction_cache: dict = {}
+
+        # 缓存基础股票池：只在回测开始时调用一次 baostock，
+        # 避免每交易日重复 login/logout（500+ 天回测可节省数千次连接）
+        base_pool: list[str] = []
+        try:
+            base_pool = self.engine.get_base_stock_pool()
+            logger.info(f"回测股票池: {len(base_pool)} 只（缓存复用，不再逐日查询）")
+        except Exception as e:
+            logger.error(f"获取基础股票池失败: {e}")
+            return {}
 
         for idx, today in enumerate(dates):
             if idx < warmup:
@@ -88,11 +98,9 @@ class LSTMBacktestEngine:
                 # 尚无模型，跳过（使用动量策略会引入 bias）
                 continue
 
-            # Step 1: 获取候选池
-            pool = self.engine.get_base_stock_pool()
-
+            # Step 1: 使用缓存的股票池（已在 run() 开头加载）
             # Step 2: 预测（用 prev_date 数据避免 look-ahead）
-            predictions = self._predict_batch(pool, prev_date)
+            predictions = self._predict_batch(base_pool, prev_date)
             if not predictions:
                 continue
 
@@ -366,4 +374,6 @@ class LSTMBacktestEngine:
             "win_rate": len(win_trades) / len(sells) if sells else 0,
             "total_value": float(tv[-1]),
             "final_cash": self.cash,
+            "daily_records": self.daily_records,
+            "trade_records": self.trade_records,
         }

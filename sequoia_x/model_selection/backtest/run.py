@@ -36,16 +36,18 @@ PERIODS: dict[str, tuple[str, str, str]] = {
 
 
 def run_period(
-    engine: DataEngine, name: str, start: str, end: str, desc: str
+    engine: DataEngine, name: str, start: str, end: str, desc: str,
+    model=None,
 ) -> dict:
-    """运行单个期间回测。"""
+    """运行单个期间回测。
+
+    Args:
+        model: 预加载的 Keras 模型（避免多期间回测时重复加载）。
+    """
     logger.info(f"回测 {name}: {start} ~ {end} ({desc})")
     t0 = time.time()
 
-    # 加载最新的 LSTM 模型（prediction_cache 在无模型时回退至跳过，但不报错）
-    lstm_cfg = get_lstm_config()
-    model_data = load_latest_model(lstm_cfg)
-    model = model_data[0] if model_data else None
+    # model 由调用方传入（main() 中统一加载一次），不再重复加载
     if model is None:
         logger.warning("未找到 LSTM 模型，回测将跳过所有交易信号")
 
@@ -88,19 +90,32 @@ def main() -> None:
     if args.start:
         bt = LSTMBacktestEngine(engine, model=model)
         metrics = bt.run(args.start, args.end or "")
-        save_results([metrics], bt_cfg.OUTPUT_DIR)
+        _save_with_details(metrics, bt_cfg.OUTPUT_DIR)
     elif args.period:
         name, start, end, desc = PERIODS[args.period]
         bt = LSTMBacktestEngine(engine, model=model)
         metrics = bt.run(start, end)
-        save_results([metrics], bt_cfg.OUTPUT_DIR)
+        _save_with_details(metrics, bt_cfg.OUTPUT_DIR)
     else:
-        # 运行全部4个期间
+        # 运行全部4个期间（model 统一加载一次，复用给各期间）
         all_metrics: list[dict] = []
+        all_daily: list[dict] = []
+        all_trades: list[dict] = []
         for name, (start, end, desc) in PERIODS.items():
-            metrics = run_period(engine, name, start, end, desc)
+            metrics = run_period(engine, name, start, end, desc, model=model)
+            # 分离绩效指标和明细数据
+            all_daily.extend(metrics.pop("daily_records", []))
+            all_trades.extend(metrics.pop("trade_records", []))
             all_metrics.append(metrics)
-        save_results(all_metrics, bt_cfg.OUTPUT_DIR)
+        save_results(all_metrics, bt_cfg.OUTPUT_DIR,
+                     daily_records=all_daily, trade_records=all_trades)
+
+
+def _save_with_details(metrics: dict, output_dir: str) -> None:
+    """保存单个期间的回测结果（含日结和交易明细）。"""
+    daily = metrics.pop("daily_records", None)
+    trades = metrics.pop("trade_records", None)
+    save_results([metrics], output_dir, daily_records=daily, trade_records=trades)
 
 
 if __name__ == "__main__":

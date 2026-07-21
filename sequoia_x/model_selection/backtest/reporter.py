@@ -23,25 +23,45 @@ HS300_BENCHMARKS: dict[str, float] = {
 }
 
 
-def save_results(all_metrics: list[dict], output_dir: str) -> None:
+def save_results(
+    all_metrics: list[dict],
+    output_dir: str,
+    daily_records: list[dict] | None = None,
+    trade_records: list[dict] | None = None,
+) -> None:
     """保存回测结果并打印对比报告。
 
     Args:
         all_metrics: 各期间回测指标列表。
         output_dir: 输出目录。
+        daily_records: 逐日净值记录（可选，导出 CSV 便于绘图分析）。
+        trade_records: 逐笔交易记录（可选，导出 CSV 便于审计）。
     """
+    import pandas as pd
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # 转储 JSON
+    # 转储 JSON（绩效指标）
     with open(out / "metrics.json", "w") as f:
         json.dump(all_metrics, f, indent=2, ensure_ascii=False,
                   default=lambda x: float(x) if hasattr(x, "item") else str(x))
 
+    # 导出日结记录 CSV（净值曲线绘图用）
+    if daily_records:
+        df_daily = pd.DataFrame(daily_records)
+        df_daily.to_csv(out / "daily_records.csv", index=False)
+        logger.info(f"逐日净值已保存: {out / 'daily_records.csv'} ({len(df_daily)} 行)")
+
+    # 导出交易记录 CSV（审计每笔买卖）
+    if trade_records:
+        df_trades = pd.DataFrame(trade_records)
+        df_trades.to_csv(out / "trade_records.csv", index=False)
+        logger.info(f"交易明细已保存: {out / 'trade_records.csv'} ({len(df_trades)} 笔)")
+
     # 打印对比报告
     print_benchmark_report(all_metrics)
 
-    # 保存交易记录摘要
     logger.info(f"回测结果已保存: {out.resolve()}")
 
 
