@@ -277,7 +277,7 @@ class SimEngine:
         """
         signals = get_pending_signals(self.db_path)
         if not signals:
-            return []
+            return [], []
 
         # 检查当前持仓数量（卖出已执行完，此时仓位已释放）
         current_positions = get_all_positions(self.db_path)
@@ -285,7 +285,7 @@ class SimEngine:
             logger.info(f"sim 买: 持仓已达上限({MAX_POSITIONS}只)，取消所有买入信号")
             for s in signals:
                 mark_signal_cancelled(self.db_path, s["id"], "持仓已达上限")
-            return []
+            return [], []
 
         slots_available = MAX_POSITIONS - len(current_positions)
         cash_balance = self._get_cash()
