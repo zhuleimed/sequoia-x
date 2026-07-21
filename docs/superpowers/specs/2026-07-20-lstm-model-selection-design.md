@@ -476,3 +476,67 @@ LSTM 策略: data/sim_lstm.db     → 同上表结构，独立 DB 文件
 ### 15.4 数据同步名称写入
 
 `sync_stock_list()` 在 INSERT 时同步写入 baostock 返回的 `code_name`，确保 `stock_list.name` 列在首次同步时即有初始值，减少后续腾讯 API 调用量。
+
+---
+
+## 十六、v1.2.1 运维修复与首次训练结果 (2026-07-21 晚间)
+
+### 16.1 首次训练结果
+
+| 指标 | 数值 | 说明 |
+|------|:---:|------|
+| 训练方式 | `--skip-optuna` | 使用之前 50-trials 快速验证参数 |
+| 最佳 val_loss | 0.0617 | Epoch 108/300 (早停) |
+| test_loss | 0.2108 | 验证/测试间有一定过拟合 |
+| Train IC (Pearson) | -0.045 | Huber loss 下线性相关弱属正常 |
+| **Rank IC (Spearman)** | **0.1575** | >0.15 为业界强因子水平 |
+| 模型版本 | v20260721_1323 | data/models/lstm_selection/ |
+
+### 16.2 首次管线运行的 Bug 修复
+
+**DB 锁冲突** (commit `a61de5e`):
+`_sync_stock_tables` 使用 ATTACH DATABASE 需排他锁，管线连续步骤中极��失败。
+→ 改为双连接逐批 INSERT，WAL 模式读写可并发。同步失败非致命。
+
+**SimEngine 解包崩溃** (commit `e31f415`):
+`_execute_pending_buys` 两个早期 return 返回 `[]` 而非 `[],[]`。
+→ caller `bought, cancelled = ...` 解包时 ValueError。
+
+**配置覆盖不生效** (commit `99e077f`):
+`INITIAL_CAPITAL`/`MAX_POSITIONS`/`PER_STOCK_BUDGET` 在模块加载时导入为不可变 int，
+LSTM 策略后续 `sim_cfg.XXX = ...` 修改无效。
+→ `_write_account_daily` 和 `_execute_pending_buys` 改为函数内运行时 import。
+
+**信号重复插入** (commit `55705de`):
+`submit_buy_signals` 无去重，管线重跑或手动重复调用产生重复信号。
+→ 插入前查询当日已有 pending 信号，同 symbol 跳过。
+
+**三层训练冲突** (commit `572810e`):
+月度 `--full` 运行期间，日增量和周刷新可能同时启动抢占 CPU。
+→ `train_incremental` 和 `train_weekly` 入口 pgrep 检测 `--full`，冲突时跳过。
+→ Cron 层同样 pgrep 检测（双层防护）。
+→ 线程控制 env OMP/MKL=4, TF=6 限制 CPU 占用。
+
+**基础股票池重复调用** (commit `6fb7d70`):
+`get_base_stock_pool()` 在 `--incremental` 和 `--predict` 中被各调用一次（同一管线）。
+→ 同日缓存，避免重复 baostock login/logout。
+
+**模型版本清理** (commit `6fb7d70`):
+每周/每月训练产生新版本目录(~34MB/个)，长期累积占用磁盘。
+→ `_cleanup_old_models` 每次训练后保留最新 6 个版本。
+
+**LSTM 月度报告缺失**:
+LLM 有独立月度报告，LSTM 无。
+→ cron 月末 `build_monthly_report_text(sim_lstm.db)` 推送。
+
+### 16.3 当前部署状态
+
+| 组件 | 状态 |
+|------|:---:|
+| 每日管线 (LSTM 增量+预测+模拟盘) | ✅ 运行中 |
+| 每周刷新 cron | ✅ 本周六 (7/26) 首次触发 |
+| 月度全量 cron | ✅ 8/15 首次触发 |
+| LSTM 月度报告 cron | ✅ 7/31 首次触发 |
+| LLM 模拟盘 | ✅ 运行中 |
+| 双策略汇总推送 | ✅ 运行中 |
+| LSTM 首笔交易 | 📅 7/22 (周三) 执行 |
