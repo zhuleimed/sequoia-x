@@ -194,6 +194,15 @@ def run_lstm_daily(
     sim_results = sim_engine.run_daily()
     result["sim_results"] = sim_results
 
+    # ── 6. 推送 LSTM 策略日报到微信 ──
+    try:
+        from sequoia_x.model_selection.simulation.reporter import (
+            push_lstm_daily_report,
+        )
+        push_lstm_daily_report(today_str, cfg.sim_db_path)
+    except Exception as e:
+        logger.warning(f"LSTM 日报推送异常: {e}")
+
     elapsed = time.time() - t0
     logger.info(
         f"═══ LSTM 每日模拟盘完成 [{today_str}] "

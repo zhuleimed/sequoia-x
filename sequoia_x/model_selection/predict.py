@@ -82,14 +82,15 @@ def predict_all(
         return []
     model_save_path = str(versions[0] / "model.keras")
 
-    # 临时加载模型以获取特征维度 n_features
-    import tensorflow as tf
-    from sequoia_x.model_selection.model import TransformerBlock
-    tmp_model = tf.keras.models.load_model(
-        model_save_path,
-        custom_objects={"TransformerBlock": TransformerBlock},
-    )
-    n_features = tmp_model.input_shape[2]
+    # 从 params.json 读取 n_features（轻量，避免加载完整 TF 模型）
+    import json
+    params_path = versions[0] / "params.json"
+    n_features = cfg.window  # fallback
+    if params_path.exists():
+        with open(params_path) as f:
+            saved_params = json.load(f)
+            n_features = saved_params.get("n_features", 62)
+    logger.debug(f"n_features={n_features} (from params.json)")
 
     symbols = engine.get_base_stock_pool()
     logger.info(f"预测池: {len(symbols)} 只股票")

@@ -17,7 +17,7 @@ from sequoia_x.data.engine import DataEngine
 from sequoia_x.core.logger import get_logger
 from sequoia_x.model_selection.config import LSTMConfig, get_config as get_lstm_config
 from sequoia_x.model_selection.backtest import config as bt_cfg
-from sequoia_x.model_selection.features import build_stock_features
+from sequoia_x.model_selection.features import build_prediction_features
 
 logger = get_logger(__name__)
 
@@ -120,20 +120,21 @@ class LSTMBacktestEngine:
     def _predict_batch(self, pool: list[str], ref_date: str) -> list[tuple[str, float]]:
         """预测一批股票的收益率。
 
-        对候选池中每只股票，用 ``build_stock_features`` 构建 ref_date 之前的
-        窗口特征，然后调用加载的 LSTM-Transformer 模型推理。
+        对候选池中每只股票，用 ``build_prediction_features`` 构建 ref_date 之前
+        的窗口特征（仅 X，不需要未来数据），然后调用模型推理。
+
+        注意：使用 build_prediction_features 而非 build_stock_features，
+        前者不需要 predict_horizon 天的未来数据，可预测到最新交易日。
         """
         import tensorflow as tf
 
         results: list[tuple[str, float]] = []
         for symbol in pool[:100]:  # 限制候选数加速回测
             try:
-                X, _ = build_stock_features(symbol, ref_date, self.engine, self.cfg)
+                X = build_prediction_features(symbol, self.engine, self.cfg)
                 if X is None:
                     continue
-                # X 形状 (window, n_features)，扩展 batch 维
-                X_batch = X[np.newaxis, :, :]
-                pred = self.model.predict(X_batch, verbose=0)[0, 0]
+                pred = self.model.predict(X, verbose=0)[0, 0]
                 if np.isfinite(pred):
                     results.append((symbol, float(pred)))
             except Exception:
