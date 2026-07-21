@@ -126,27 +126,32 @@ class LSTMBacktestEngine:
     # ──────────────────────────────────────────────────────────
 
     def _predict_batch(self, pool: list[str], ref_date: str) -> list[tuple[str, float]]:
-        """预测一批股票的收益率。
+        """预测一批股票的收益率（批量推理，大幅快于逐个 predict）。
 
-        对候选池中每只股票，用 ``build_prediction_features`` 构建 ref_date 之前
-        的窗口特征（仅 X，不需要未来数据），然后调用模型推理。
-
-        注意：使用 build_prediction_features 而非 build_stock_features，
-        前者不需要 predict_horizon 天的未来数据，可预测到最新交易日。
+        收集所有有效股票的 (1,120,62) 特征，stack 为 (N,120,62) 后单次
+        model.predict 调用，避免逐个 predict 的 TF session 开销。
         """
-        import tensorflow as tf
-
-        results: list[tuple[str, float]] = []
-        for symbol in pool[:100]:  # 限制候选数加速回测
+        xs: list[np.ndarray] = []
+        symbols: list[str] = []
+        for symbol in pool:  # 全量预测，批量推理足够快
             try:
                 X = build_prediction_features(symbol, self.engine, self.cfg)
-                if X is None:
-                    continue
-                pred = self.model.predict(X, verbose=0)[0, 0]
-                if np.isfinite(pred):
-                    results.append((symbol, float(pred)))
+                if X is not None:
+                    xs.append(X)
+                    symbols.append(symbol)
             except Exception:
                 continue
+
+        if not xs:
+            return []
+
+        X_batch = np.vstack(xs)  # (N, window, n_features)
+        preds = self.model.predict(X_batch, verbose=0).flatten()
+
+        results: list[tuple[str, float]] = []
+        for sym, pred in zip(symbols, preds):
+            if np.isfinite(pred):
+                results.append((sym, float(pred)))
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results
@@ -273,7 +278,7 @@ class LSTMBacktestEngine:
     def _get_open_price(self, symbol: str, date_str: str) -> float | None:
         """获取某日开盘价。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.settings.db_path)
+        conn = sqlite3.connect(self.engine.db_path)
         row = conn.execute(
             "SELECT open FROM stock_daily WHERE symbol=? AND date=?",
             (symbol, date_str)
@@ -284,7 +289,7 @@ class LSTMBacktestEngine:
     def _get_close_price(self, symbol: str, date_str: str) -> float | None:
         """获取某日收盘价。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.settings.db_path)
+        conn = sqlite3.connect(self.engine.db_path)
         row = conn.execute(
             "SELECT close FROM stock_daily WHERE symbol=? AND date=?",
             (symbol, date_str)
@@ -299,7 +304,7 @@ class LSTMBacktestEngine:
     def _mark_to_market(self, date_str: str) -> None:
         """日终按收盘价估值。"""
         import sqlite3
-        conn = sqlite3.connect(self.engine.settings.db_path)
+        conn = sqlite3.connect(self.engine.db_path)
         for symbol, pos in self.positions.items():
             row = conn.execute(
                 "SELECT close FROM stock_daily WHERE symbol=? AND date=?",

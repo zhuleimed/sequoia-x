@@ -20,7 +20,7 @@ def get_trade_dates(
     Returns:
         交易日日期列表，按时间升序。
     """
-    conn = sqlite3.connect(engine.settings.db_path)
+    conn = sqlite3.connect(engine.db_path)
     query = "SELECT DISTINCT date FROM stock_daily WHERE date >= ?"
     params = [start_date]
     if end_date:
