@@ -371,6 +371,21 @@ class DataSync:
             new_listed: list[str] = sorted(remote_set - local_set)
             delisted: list[str] = sorted(local_set - remote_set)
 
+            # 提取股票名称映射（code → name），供 sync_stock_list 写入本地缓存
+            names: dict[str, str] = {}
+            if "code_name" in raw.columns:
+                for _, row in filtered.items() if hasattr(filtered, 'items') else raw.iterrows():
+                    pass
+            # 用更简单的方式：从 filtered Series 对应的 raw 行提取
+            try:
+                name_map = dict(zip(
+                    raw.loc[mask, "code"].str.split(".").str[1],
+                    raw.loc[mask, "code_name"]
+                ))
+                names = {k: v for k, v in name_map.items() if isinstance(k, str)}
+            except Exception:
+                pass
+
             logger.info(
                 f"get_active_stocks: 远程 {len(remote_symbols)} 只，"
                 f"本地 {len(local_symbols)} 只，"
@@ -381,6 +396,7 @@ class DataSync:
                 "new_listed": new_listed,
                 "delisted": delisted,
                 "count": len(remote_symbols),
+                "names": names,
             }
         except Exception as e:
             logger.error(f"get_active_stocks 异常: {e}")
@@ -423,21 +439,25 @@ class DataSync:
                 is_empty = count_row[0] == 0 if count_row else True
 
                 if is_empty:
-                    # 全量写入
+                    # 全量写入（含股票名称）
+                    names = active.get("names", {})
                     for sym in active["symbols"]:
+                        name = names.get(sym)
                         conn.execute(
-                            "INSERT OR IGNORE INTO stock_list (symbol) VALUES (?)",
-                            (sym,),
+                            "INSERT OR IGNORE INTO stock_list (symbol, name) VALUES (?, ?)",
+                            (sym, name),
                         )
                     logger.info(
                         f"sync_stock_list: 全量写入 {active['count']} 只股票"
                     )
                 else:
-                    # 增量：新股 INSERT
+                    # 增量：新股 INSERT（含名称）
+                    names = active.get("names", {})
                     for sym in active["new_listed"]:
+                        name = names.get(sym)
                         conn.execute(
-                            "INSERT OR IGNORE INTO stock_list (symbol) VALUES (?)",
-                            (sym,),
+                            "INSERT OR IGNORE INTO stock_list (symbol, name) VALUES (?, ?)",
+                            (sym, name),
                         )
                     # 退市股更新 delisted_date
                     today_str: str = date.today().strftime("%Y-%m-%d")
