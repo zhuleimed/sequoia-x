@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 os.environ.setdefault("OMP_NUM_THREADS", "6")
@@ -41,6 +43,27 @@ logger = get_logger(__name__)
 # ════════════════════════════════════════════════════════════
 #  Optuna 剪枝回调：让 HyperbandPruner 在训练中途淘汰差 trial
 # ════════════════════════════════════════════════════════════
+
+def _cleanup_old_models(model_dir: Path, keep: int = 6) -> None:
+    """清理旧模型版本，仅保留最近 keep 个版本目录。
+
+    不区分训练模式（全量/增量/周度），所有版本按目录名排序，
+    删除最旧的超出保留数的目录。每次训练完成后自动调用。
+    """
+    if not model_dir.exists():
+        return
+    dirs = sorted(
+        [d for d in model_dir.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    for old_dir in dirs[keep:]:
+        try:
+            shutil.rmtree(old_dir)
+            logger.info(f"清理旧模型: {old_dir.name}")
+        except Exception as e:
+            logger.warning(f"清理旧模型失败 {old_dir.name}: {e}")
+
 
 class _OptunaPruneCallback(tf.keras.callbacks.Callback):
     """每 epoch 向 Optuna 上报 val_loss，支持 HyperbandPruner 中间剪枝。"""
@@ -339,6 +362,9 @@ def train_full(cfg: LSTMConfig | None = None, skip_optuna: bool = False):
         **best_params,
     )
 
+    # 清理旧模型版本（保留最新 6 个）
+    _cleanup_old_models(cfg.model_dir_path)
+
     # 计算 IC
     from scipy.stats import spearmanr
     model_preds = model.predict(X[-int(len(X)*0.15):], verbose=0).flatten()
@@ -399,6 +425,9 @@ def train_incremental(cfg: LSTMConfig | None = None):
     )[-1].name
     model.save(str(loaded_version_dir / "model.keras"))
 
+    # 清理旧模型版本（保留最新 6 个）
+    _cleanup_old_models(cfg.model_dir_path)
+
     elapsed = time.time() - t0
     logger.info(f"增量学习完成 | 样本={len(X)} | 耗时={elapsed:.0f}s")
 
@@ -449,6 +478,9 @@ def train_weekly(cfg: LSTMConfig | None = None):
 
     version_dir = save_model(model, cfg, model_params)
     logger.info(f"每周刷新完成 | 版本: {version_dir} | val_loss={result['val_loss']:.4f}")
+
+    # 清理旧模型版本（保留最新 6 个）
+    _cleanup_old_models(cfg.model_dir_path)
 
 
 def main():

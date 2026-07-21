@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS sync_log (
 """
 
 
+# ── 基础股票池缓存（同日内多次调用只查一次 baostock）──
+_base_pool_cache: dict[str, list[str]] = {}
+
+
 class DataEngine:
     """行情数据引擎，负责 SQLite 存储和行情数据查询。"""
 
@@ -186,7 +190,7 @@ class DataEngine:
     # ── 基础股票池 ──
 
     def get_base_stock_pool(self) -> list[str]:
-        """获取基础股票池（三步过滤）。
+        """获取基础股票池（三步过滤，同日缓存避免重复 baostock 调用）。
 
         1. 板块剔除：科创板(688/689)、创业板(300/301)、北交所(4xx/8xx)
         2. 质量剔除：ST/*ST/退市股、上市不满1年的次新股
@@ -195,6 +199,13 @@ class DataEngine:
         Returns:
             符合条件的股票代码列表。
         """
+        from datetime import date as dt_date
+
+        cache_key = dt_date.today().isoformat()
+        if cache_key in _base_pool_cache:
+            logger.debug(f"基础股票池命中缓存: {len(_base_pool_cache[cache_key])} 只")
+            return _base_pool_cache[cache_key]
+
         import baostock as bs
         from datetime import date, timedelta
 
@@ -266,6 +277,7 @@ class DataEngine:
                 logger.warning(f"价格过滤失败（数据未回填?）: {e}")
 
         logger.info(f"基础股票池最终: {len(candidates)} 只")
+        _base_pool_cache[cache_key] = candidates
         return candidates
 
     # ── 股票列表 ──
