@@ -13,6 +13,7 @@ T+1 模型（同 019 ETF 模拟盘）：
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections import Counter
 from datetime import date
 from typing import Optional
@@ -238,6 +239,9 @@ def submit_buy_signals(
     写入的信号会进入 sim_buy_signals 表，次日的 pipeline --sim-update
     步骤会自动读取并执行（T+1 开盘买入），无需额外配置。
 
+    自动去重：同 symbol + 同 buy_date + 同 status='pending' 的信号不会重复插入。
+    这防止了管线重新运行或手动重复调用产生重复信号。
+
     Args:
         db_path: 数据库路径（settings.db_path）。
         symbols: 策略选出的股票代码列表。
@@ -251,9 +255,34 @@ def submit_buy_signals(
 
     init_sim_tables(db_path)
 
+    today_str = date.today().isoformat()
+
+    # 去重：查询今天已有的 pending 信号，排除重复 symbol
+    existing: set[str] = set()
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM sim_buy_signals "
+            "WHERE buy_date=? AND status='pending'",
+            (today_str,),
+        ).fetchall()
+        existing = {r[0] for r in rows}
+
+    candidates = symbols[:top_n]
+    deduped = [s for s in candidates if s not in existing]
+    skipped = len(candidates) - len(deduped)
+    if skipped > 0:
+        logger.info(
+            f"submit_buy_signals: 去重跳过 {skipped} 只（今日已有 pending 信号）: "
+            f"{[s for s in candidates if s in existing]}"
+        )
+
+    if not deduped:
+        logger.info("submit_buy_signals: 全部去重跳过，无新信号")
+        return 0
+
     signals = [
         {"symbol": s, "strategy_from": strategy_name, "llm_score": None}
-        for s in symbols[:top_n]
+        for s in deduped
     ]
 
     count = insert_buy_signals_batch(db_path, signals)
