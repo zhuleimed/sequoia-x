@@ -43,9 +43,9 @@ logger = get_logger(__name__)
 def _sync_stock_tables(cfg: LSTMConfig) -> None:
     """将 stock_daily 和 index_daily 从主 DB 同步到 LSTM 模拟盘 DB。
 
-    SQLite ATTACH 方式跨库拷贝，增量式（INSERT OR IGNORE），首次完整拷贝后
-    每日仅追加新增数据行。SimEngine._get_today_data() 直接查询
-    self.db_path 下的 stock_daily，因此模拟盘 DB 中必须有这张表。
+    用逐批 INSERT 方式替代 ATTACH，避免跨库锁冲突。
+    ATTACH 需要对源库加排他锁，在管线中上一步刚写完源库时极易失败。
+    改为独立连接读取→写入，WAL 模式下读写可并发。
     """
     main_path = Path(cfg.db_path)
     lstm_path = Path(cfg.sim_db_path)
@@ -54,13 +54,11 @@ def _sync_stock_tables(cfg: LSTMConfig) -> None:
         return
 
     lstm_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_main = str(main_path.resolve())
 
     t0 = time.time()
+    # ── 先在 LSTM DB 中建表（如果不存在） ──
     with sqlite3.connect(str(lstm_path)) as dst:
-        dst.execute(f"ATTACH DATABASE '{abs_main}' AS src")
-
-        # stock_daily: 先创建空表（如果不存在），再增量插入
+        dst.execute("PRAGMA busy_timeout=30000")  # 30s 超时而非立即失败
         dst.execute(
             "CREATE TABLE IF NOT EXISTS stock_daily ("
             "  id       INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -81,9 +79,6 @@ def _sync_stock_tables(cfg: LSTMConfig) -> None:
             "  UNIQUE (symbol, date)"
             ")"
         )
-        dst.execute("INSERT OR IGNORE INTO stock_daily SELECT * FROM src.stock_daily")
-
-        # index_daily
         dst.execute(
             "CREATE TABLE IF NOT EXISTS index_daily ("
             "  id       INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -99,9 +94,66 @@ def _sync_stock_tables(cfg: LSTMConfig) -> None:
             "  UNIQUE (symbol, date)"
             ")"
         )
-        dst.execute("INSERT OR IGNORE INTO index_daily SELECT * FROM src.index_daily")
+        dst.commit()
 
-        # 索引
+    # ── 从主 DB 逐表增量同步（独立连接，WAL 模式可并发读） ──
+    with sqlite3.connect(str(main_path)) as src:
+        src.row_factory = sqlite3.Row
+
+        with sqlite3.connect(str(lstm_path)) as dst:
+            dst.execute("PRAGMA busy_timeout=30000")
+
+            # stock_daily: 只同步目标库中尚不存在的行
+            existing_dates = set()
+            for row in dst.execute("SELECT date FROM stock_daily LIMIT 1"):
+                pass  # 快速探测表是否为空
+            if dst.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0] == 0:
+                # 首次同步：全量
+                batch = []
+                for row in src.execute("SELECT * FROM stock_daily"):
+                    batch.append(tuple(row))
+                    if len(batch) >= 5000:
+                        dst.executemany(
+                            "INSERT OR IGNORE INTO stock_daily VALUES ("
+                            + ",".join("?" * 15) + ")", batch
+                        )
+                        batch = []
+                if batch:
+                    dst.executemany(
+                        "INSERT OR IGNORE INTO stock_daily VALUES ("
+                        + ",".join("?" * 15) + ")", batch
+                    )
+            else:
+                # 增量：只同步最近3天
+                for row in src.execute(
+                    "SELECT * FROM stock_daily WHERE date >= date('now', '-3 days')"
+                ):
+                    dst.execute(
+                        "INSERT OR IGNORE INTO stock_daily VALUES ("
+                        + ",".join("?" * 15) + ")", tuple(row)
+                    )
+
+            # index_daily: 同样策略
+            if dst.execute("SELECT COUNT(*) FROM index_daily").fetchone()[0] == 0:
+                for row in src.execute("SELECT * FROM index_daily"):
+                    dst.execute(
+                        "INSERT OR IGNORE INTO index_daily VALUES ("
+                        + ",".join("?" * 10) + ")", tuple(row)
+                    )
+            else:
+                for row in src.execute(
+                    "SELECT * FROM index_daily WHERE date >= date('now', '-3 days')"
+                ):
+                    dst.execute(
+                        "INSERT OR IGNORE INTO index_daily VALUES ("
+                        + ",".join("?" * 10) + ")", tuple(row)
+                    )
+
+            dst.commit()
+
+    # 创建索引
+    with sqlite3.connect(str(lstm_path)) as dst:
+        dst.execute("PRAGMA busy_timeout=30000")
         for idx in [
             "CREATE INDEX IF NOT EXISTS idx_sd_sym_date ON stock_daily(symbol, date)",
             "CREATE INDEX IF NOT EXISTS idx_id_date ON index_daily(date)",
@@ -110,8 +162,6 @@ def _sync_stock_tables(cfg: LSTMConfig) -> None:
                 dst.execute(idx)
             except sqlite3.OperationalError:
                 pass
-
-        dst.execute("DETACH DATABASE src")
 
     elapsed = time.time() - t0
     logger.debug(f"行情数据同步完成（{elapsed:.1f}s）: {lstm_path}")
@@ -142,8 +192,11 @@ def run_lstm_daily(
     logger.info(f"═══ LSTM 每日模拟盘 [{today_str}] ═══")
     t0 = time.time()
 
-    # ── 1. 同步行情数据 ──
-    _sync_stock_tables(cfg)
+    # ── 1. 同步行情数据（非致命：失败也继续，SimEngine 会跳过无行情日） ──
+    try:
+        _sync_stock_tables(cfg)
+    except Exception as e:
+        logger.warning(f"行情数据同步失败（非致命，SimEngine 将跳过无行情日）: {e}")
 
     # ── 2. 预测全量股票 ──
     logger.info("LSTM 预测全量股票...")
