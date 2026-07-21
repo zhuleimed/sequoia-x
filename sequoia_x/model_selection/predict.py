@@ -140,11 +140,11 @@ def main():
             name = conn.execute(
                 "SELECT name FROM stock_list WHERE symbol=?", (symbol,)
             ).fetchone()
-            name_str = name[0] if name else ""
+            name_str = name[0] if name and name[0] else ""
             conn.close()
         except Exception:
             name_str = ""
-        print(f"  {i:2d}. {symbol} {name_str:8s} 预测5日收益: {pred:+.2%}")
+        print(f"  {i:2d}. {symbol} {(name_str or ''):8s} 预测5日收益: {pred:+.2%}")
 
     # 可选保存
     if args.output:
