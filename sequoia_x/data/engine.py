@@ -171,8 +171,16 @@ class DataEngine:
 
     @staticmethod
     def _to_baostock_code(symbol: str) -> str:
-        """将纯数字代码转为 baostock 格式：6/9开头 -> sh，其余 -> sz。"""
-        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+        """将纯数字代码转为 baostock 格式：5/6/9开头(沪市) -> sh，其余(深市) -> sz。
+
+        A 股市场前缀规则：
+          - 5xxxxx: 上海 ETF/基金
+          - 6xxxxx: 上海主板
+          - 9xxxxx: 上海主板
+          - 0xxxxx: 深圳主板
+          - 3xxxxx: 深圳创业板
+        """
+        prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
         return f"{prefix}.{symbol}"
 
     # ── 基础股票池 ──
@@ -346,20 +354,24 @@ class DataEngine:
     def _fetch_name_from_tencent(self, symbol: str) -> str:
         """通过腾讯实时行情 API 获取单只股票名称。
 
+        兼容多种输入格式：纯6位数字('600519')、baostock格式('sh.600519')、
+        腾讯格式('sh600519')。内部统一转为腾讯格式后请求。
+
         腾讯 API 返回格式: v_sh600519="1~贵州茅台~600519~..."
         parts[1] 即为股票名称。比 baostock 快（~0.3s vs ~2s）且更稳定。
         """
         try:
             import requests
-            prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
-            code = f"{prefix}{symbol}"
+            from sequoia_x.data.tencent_source import to_tencent_code
+            code = to_tencent_code(symbol)  # 统一转腾讯格式，处理各类输入
             url = f"https://qt.gtimg.cn/q={code}"
             r = requests.get(url, timeout=10)
             if r.status_code != 200 or '="' not in r.text:
                 return ""
             parts = r.text.split('"')[1].split("~")
             if len(parts) >= 2:
-                return parts[1]
+                name = parts[1].strip()
+                return name if name else ""
         except Exception:
             pass
         return ""

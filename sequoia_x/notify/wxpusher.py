@@ -27,8 +27,8 @@ class WxPusherNotifier:
 
     @staticmethod
     def _to_xueqiu_code(code: str) -> str:
-        """将纯数字代码转为雪球格式：6开头→SH，4/8开头→BJ，其余→SZ。"""
-        if code.startswith("6"):
+        """将纯数字代码转为雪球格式：5/6/9开头→SH(沪市)，4/8开头→BJ(北交)，其余→SZ(深市)。"""
+        if code.startswith(("5", "6", "9")):
             return f"SH{code}"
         elif code.startswith(("4", "8")):
             return f"BJ{code}"

@@ -133,7 +133,8 @@ def _fetch_sina_quotes(codes: list[str]) -> dict[str, dict]:
 
     sina_codes = []
     for c in codes:
-        if c.startswith(("6", "9")):
+        # 5/6/9 → 沪市(sh), 0/3 → 深市(sz)
+        if c.startswith(("5", "6", "9")):
             sina_codes.append(f"sh{c}")
         else:
             sina_codes.append(f"sz{c}")
