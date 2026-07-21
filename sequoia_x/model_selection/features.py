@@ -280,6 +280,17 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
     features = np.column_stack(feature_list).astype(np.float32)
     # 处理 NaN 和 Inf
     features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # ── Z-score 归一化（每特征独立，沿时间轴滚动标准化）──
+    # 逐列计算均值和标准差，避免不同量纲特征（价格/量能/RSI等）
+    # 互相干扰，显著改善神经网络训练的收敛性和泛化能力。
+    mean = features.mean(axis=0, keepdims=True)
+    std = features.std(axis=0, keepdims=True)
+    std_safe = np.where(std < 1e-8, 1.0, std)  # 常数列（如涨跌停标记）保持为 0
+    features = (features - mean) / std_safe
+    # 将常数列（std≈0 的特征）清零而非保留噪声
+    features[:, std.flatten() < 1e-8] = 0.0
+
     return features
 
 
@@ -338,10 +349,19 @@ def build_stock_features(
 
     X = per_day[start_idx:end_idx]  # (window, n_features)
 
-    # 标签：未来 predict_horizon 日的收益率
+    # 标签：未来 predict_horizon 日的超额收益率（相对沪深300）
+    # 用超额收益替代绝对收益，让模型聚焦于个股相对强弱，
+    # 而非浪费参数去拟合市场整体的涨跌（市场β）。
     future_close = df["close"].values.astype(float)[end_idx + cfg.predict_horizon - 1]
     current_close = df["close"].values.astype(float)[end_idx - 1]
-    y = (future_close / current_close) - 1.0
+    stock_ret = (future_close / current_close) - 1.0
+    if df_index is not None:
+        idx_future = df_index["close"].values.astype(float)[end_idx + cfg.predict_horizon - 1]
+        idx_current = df_index["close"].values.astype(float)[end_idx - 1]
+        index_ret = (idx_future / idx_current) - 1.0
+        y = stock_ret - index_ret  # 超额收益
+    else:
+        y = stock_ret               # 无指数数据时回退为绝对收益
 
     return X, y
 

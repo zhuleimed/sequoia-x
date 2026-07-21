@@ -38,6 +38,29 @@ from sequoia_x.model_selection.model import (
 logger = get_logger(__name__)
 
 
+# ════════════════════════════════════════════════════════════
+#  Optuna 剪枝回调：让 HyperbandPruner 在训练中途淘汰差 trial
+# ════════════════════════════════════════════════════════════
+
+class _OptunaPruneCallback(tf.keras.callbacks.Callback):
+    """每 epoch 向 Optuna 上报 val_loss，支持 HyperbandPruner 中间剪枝。"""
+
+    def __init__(self, trial: optuna.Trial, monitor: str = "val_loss"):
+        super().__init__()
+        self._trial = trial
+        self._monitor = monitor
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        logs = logs or {}
+        val = logs.get(self._monitor)
+        if val is not None:
+            self._trial.report(val, step=epoch)
+            if self._trial.should_prune():
+                raise optuna.TrialPruned(
+                    f"Trial pruned at epoch {epoch}: {self._monitor}={val:.4f}"
+                )
+
+
 def _sample_stocks(engine: DataEngine, n: int = 200) -> list[str]:
     """简单随机抽样代表性股票（后续可改为市值分层抽样）。"""
     pool = engine.get_base_stock_pool()
@@ -125,6 +148,12 @@ def _build_objective(engine: DataEngine, symbols: list[str],
                                                     ["adam", "nadam", "rmsprop"]),
             "batch_size": trial.suggest_categorical("batch_size",
                                                      list(cfg.batch_size_options)),
+            "l2_reg": trial.suggest_float("l2_reg",
+                                           *cfg.l2_reg_range, log=True),
+            "huber_delta": trial.suggest_float("huber_delta",
+                                                *cfg.huber_delta_range),
+            "gradient_clip_norm": trial.suggest_float("gradient_clip_norm",
+                                                       0.1, 5.0, log=True),
         }
 
         # 分离训练参数与模型架构参数
@@ -176,6 +205,9 @@ def _build_objective(engine: DataEngine, symbols: list[str],
                         monitor="val_loss", patience=10,
                         restore_best_weights=True, min_delta=1e-4,
                     ),
+                    # HyperbandPruner 中间剪枝：每个 epoch 上报 val_loss，
+                    # 让 Optuna 在 trial 明显无望时提前终止，节省搜索时间。
+                    _OptunaPruneCallback(trial),
                 ],
                 verbose=0,
             )
@@ -188,8 +220,13 @@ def _build_objective(engine: DataEngine, symbols: list[str],
     return objective
 
 
-def train_full(cfg: LSTMConfig | None = None):
-    """完整训练：Optuna 搜索 + 最终训练。"""
+def train_full(cfg: LSTMConfig | None = None, skip_optuna: bool = False):
+    """完整训练：Optuna 搜索 + 最终训练。
+
+    Args:
+        cfg: 配置对象。
+        skip_optuna: True=跳过 Optuna，从 best_params.json 读取参数直接 Phase 2。
+    """
     if cfg is None:
         cfg = get_config()
 
@@ -198,6 +235,8 @@ def train_full(cfg: LSTMConfig | None = None):
 
     logger.info("=" * 60)
     logger.info(f"LSTM 模型完整训练 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if skip_optuna:
+        logger.info("模式: 跳过 Optuna，使用已有最佳参数")
     logger.info("=" * 60)
 
     # 抽样股票 + 预加载数据缓存
@@ -209,35 +248,70 @@ def train_full(cfg: LSTMConfig | None = None):
     dates = _get_trade_dates(engine, cfg.window + cfg.predict_horizon + 30)
     logger.info(f"可用交易日: {len(dates)} 天")
 
-    # Phase 1: Optuna 搜索
-    logger.info("Phase 1: Optuna 超参数搜索")
-    objective_func = _build_objective(engine, symbols, dates, cache, cfg)
+    # ── Phase 1: Optuna 搜索（可跳过）──
+    if skip_optuna:
+        # 从 best_params.json 读取已有最佳参数
+        import json
+        params_path = cfg.model_dir_path / "best_params.json"
+        if not params_path.exists():
+            logger.error(f"最佳参数文件不存在: {params_path}，请先运行完整 Optuna 搜索")
+            return
+        with open(params_path) as f:
+            best_params = json.load(f)
+        # 移除元数据字段（以 _ 开头）
+        best_params = {k: v for k, v in best_params.items() if not k.startswith("_")}
+        logger.info(f"从 {params_path} 加载最佳参数: {best_params}")
+    else:
+        logger.info("Phase 1: Optuna 超参数搜索")
+        objective_func = _build_objective(engine, symbols, dates, cache, cfg)
 
-    study = optuna.create_study(
-        direction="minimize",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3),
-    )
+        # ── study 持久化：防止进程崩溃丢失搜索结果 ──
+        study_db = str(cfg.model_dir_path / "optuna_study.db")
+        storage_url = f"sqlite:///{study_db}"
+        logger.info(f"Optuna study 存储: {storage_url}")
 
-    t0 = time.time()
-    for trial_num in range(cfg.optuna_n_trials):
-        elapsed = time.time() - t0
-        remaining = cfg.optuna_timeout - elapsed
-        if remaining <= 0:
-            logger.info(f"Optuna 搜索超时 ({cfg.optuna_timeout}s)，已停止于 trial {trial_num}")
-            break
-        study.optimize(objective_func, n_trials=1, n_jobs=1,
-                       timeout=remaining, show_progress_bar=False)
-        logger.info(
-            f"[Optuna] Trial {trial_num+1}/{cfg.optuna_n_trials} 完成 | "
-            f"当前值={study.trials[-1].value:.4f} | "
-            f"全局最佳={study.best_value:.4f} | "
-            f"耗时={time.time()-t0:.0f}s"
+        study = optuna.create_study(
+            direction="minimize",
+            # HyperbandPruner：比 MedianPruner 更高效——自动决定
+            # 哪些 trial 值得分配更多资源（epochs），差的提前终止。
+            pruner=optuna.pruners.HyperbandPruner(
+                min_resource=3,         # 最少 3 步后开始剪枝
+                max_resource=100,       # 每 fold 最多 100 epochs
+                reduction_factor=3,     # 每轮淘汰 2/3 的 trial
+            ),
+            storage=storage_url,
+            study_name="lstm_stock_selection",
+            load_if_exists=True,
         )
 
-    logger.info(f"Optuna 搜索完成 | 最佳值={study.best_value:.4f}")
-    logger.info(f"最佳参数: {study.best_params}")
+        t0 = time.time()
+        for trial_num in range(cfg.optuna_n_trials):
+            elapsed = time.time() - t0
+            remaining = cfg.optuna_timeout - elapsed
+            if remaining <= 0:
+                logger.info(f"Optuna 搜索超时 ({cfg.optuna_timeout}s)，已停止于 trial {trial_num}")
+                break
+            study.optimize(objective_func, n_trials=1, n_jobs=1,
+                           timeout=remaining, show_progress_bar=False)
+            logger.info(
+                f"[Optuna] Trial {trial_num+1}/{cfg.optuna_n_trials} 完成 | "
+                f"当前值={study.trials[-1].value:.4f} | "
+                f"全局最佳={study.best_value:.4f} | "
+                f"耗时={time.time()-t0:.0f}s"
+            )
 
-    # Phase 2: 最终训练（使用全部12个采样点+缓存）
+        logger.info(f"Optuna 搜索完成 | 最佳值={study.best_value:.4f}")
+        logger.info(f"最佳参数: {study.best_params}")
+
+        # 持久化最佳参数到 JSON（双保险，即使 study.db 损坏也能恢复）
+        best_params = dict(study.best_params)
+        import json
+        params_path = cfg.model_dir_path / "best_params.json"
+        with open(params_path, "w") as f:
+            json.dump(best_params, f, indent=2, ensure_ascii=False)
+        logger.info(f"最佳参数已保存: {params_path}")
+
+    # ── Phase 2: 最终训练（使用全部12个采样点+缓存）──
     logger.info("Phase 2: 最终训练")
     # 与 Optuna 相同的多日期采样
     recent = dates[-36:] if len(dates) > 36 else dates
@@ -255,7 +329,6 @@ def train_full(cfg: LSTMConfig | None = None):
     y = np.concatenate(y_list, axis=0)
     logger.info(f"最终训练数据: X={X.shape}, y={y.shape}")
 
-    best_params = study.best_params
     best_params["window"] = cfg.window
     best_params["n_features"] = X.shape[2]
 
@@ -311,8 +384,11 @@ def train_incremental(cfg: LSTMConfig | None = None):
 
     # 微调
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(cfg.incremental_lr),
-        loss="mse",
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=cfg.incremental_lr,
+            clipnorm=cfg.gradient_clip_norm,
+        ),
+        loss=tf.keras.losses.Huber(delta=cfg.huber_delta),
         metrics=["mae"],
     )
     model.fit(X, y, epochs=cfg.incremental_epochs, batch_size=64, verbose=0)
@@ -378,6 +454,8 @@ def train_weekly(cfg: LSTMConfig | None = None):
 def main():
     parser = argparse.ArgumentParser(description="LSTM-Transformer 模型训练")
     parser.add_argument("--full", action="store_true", help="完整 Optuna 搜索+训练")
+    parser.add_argument("--skip-optuna", action="store_true",
+                        help="跳过 Optuna，使用 best_params.json 直接进入最终训练")
     parser.add_argument("--incremental", action="store_true", help="增量学习")
     parser.add_argument("--weekly", action="store_true", help="每周刷新")
     parser.add_argument("--trials", type=int, help="Optuna 试验次数")
@@ -394,8 +472,8 @@ def main():
         train_incremental(cfg)
     elif args.weekly:
         train_weekly(cfg)
-    elif args.full:
-        train_full(cfg)
+    elif args.full or args.skip_optuna:
+        train_full(cfg, skip_optuna=args.skip_optuna)
     else:
         # 默认：增量学习
         train_incremental(cfg)

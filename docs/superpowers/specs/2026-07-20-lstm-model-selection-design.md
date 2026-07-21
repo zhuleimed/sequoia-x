@@ -1,6 +1,6 @@
 # LSTM-Transformer 模型选股策略 — 设计文档
 
-> 版本: v1.1 | 日期: 2026-07-21 | 状态: 已确认 (参数升级: 400股+12日期+100trials+窗口120+epochs300)
+> 版本: v1.2 | 日期: 2026-07-21 | 状态: 已确认 (参数升级: 400股+12日期+100trials+窗口120+epochs300 + v1.2 全面优化)
 
 ## 一、项目目标
 
@@ -375,3 +375,39 @@ LSTM 策略: data/sim_lstm.db     → 同上表结构，独立 DB 文件
 3. **停牌处理** — 停牌日沿用前值，成交量=0 的股票跳过
 4. **过拟合** — 用 Optuna 的验证集 IC 而非训练集 IC 选最佳参数
 5. **双色球训练冲突** — 15 日 vs 27-31 日，间隔 12 天确保错开
+
+---
+
+## 十四、v1.2 更新记录 (2026-07-21)
+
+> 详见 git log `7月21日` 的多个 commits 和 [[lstm-model-selection-strategy]]
+
+### 新增参数
+
+| 参数 | 默认值 | Optuna 范围 | 说明 |
+|------|:---:|------|------|
+| `l2_reg` | 1e-4 | (1e-6, 1e-2) log | LSTM/Dense 层 L2 正则化 |
+| `huber_delta` | 0.1 | (0.01, 0.5) | Huber loss MSE→MAE 切换阈值 |
+| `gradient_clip_norm` | 1.0 | (0.1, 5.0) log | 优化器梯度裁剪 |
+
+### P0 改动（已实施并生效于当前 Phase 2 训练）
+
+1. **特征 Z-score 归一化** (`features.py`): 从 `_extract_per_day_features` 输出前统一标准化，消除价格/量能/RSI 等不同量纲特征的尺度差异。这是 val_loss 从 0.86 降到 0.16 的关键。
+2. **标签改为超额收益** (`features.py`): `y = stock_ret_5d - index_ret_5d`，模型聚焦个股相对强弱而非市场 β。
+3. **Huber loss 替代 MSE** (`model.py`): `tf.keras.losses.Huber(delta=huber_delta)`，对涨跌停等异常收益更鲁棒。
+4. **L2 正则化** (`model.py`): `kernel_regularizer=l2(l2_reg)` 应用于 LSTM 和 Dense 层，抑制过拟合。
+
+### P1 改动（已实施，下月 `--full` 生效）
+
+5. **Optuna 搜索空间扩展** (`train.py`): l2_reg、huber_delta、gradient_clip_norm 加入搜索。
+6. **HyperbandPruner** (`train.py`): 替代 MedianPruner，自适应剪枝，预计缩短搜索 20-30%。
+7. **`_OptunaPruneCallback`** (`train.py`): Keras 回调，每 epoch 上报 val_loss 到 Optuna。
+8. **梯度裁剪** (`model.py`): `optimizer(clipnorm=gradient_clip_norm)` 防 LSTM 梯度爆炸。
+9. **TimeSeriesSplit** (`model.py`): `train_model()` 用于多日期混合数据的验证集切分。
+10. **study 持久化** (`train.py`): `sqlite:///optuna_study.db`，进程崩溃后可恢复。
+
+### Bug 修复
+
+11. **参数冲突** (`model.py`): `window`/`n_features` 在 `create_stock_model()` 中被 `**model_params` 和显式参数重复传递，导致 TypeError。
+12. **TF 安装损坏**: `tensorflow_cpu` 重新安装（原安装缺少 `tensorflow/core` 模块）。
+13. **磁盘空间不足**: pip cache 清理 ~11GB。

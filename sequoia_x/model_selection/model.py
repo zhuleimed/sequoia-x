@@ -144,6 +144,9 @@ def create_stock_model(
     dense_units: int = 128,
     optimizer: str = "adam",
     learning_rate: float = 0.001,
+    l2_reg: float = 1e-4,
+    huber_delta: float = 0.1,
+    gradient_clip_norm: float = 1.0,
 ) -> Model:
     """构建 LSTM-Transformer 股票收益率预测模型。
 
@@ -159,14 +162,26 @@ def create_stock_model(
         dense_units: 中间 Dense 层单元数。
         optimizer: 优化器名称。
         learning_rate: 学习率。
+        l2_reg: L2 正则化强度 (0 = 不启用)。
+        huber_delta: Huber loss 的 delta 阈值——误差在此范围内用 MSE，
+                     超出则用 MAE，对异常收益率更鲁棒。
+        gradient_clip_norm: 全局梯度范数裁剪阈值，防止 LSTM 梯度爆炸。
 
     Returns:
         Keras Model，输入 (batch, window, n_features)，输出 (batch, 1)。
     """
+    from tensorflow.keras import regularizers
+
     inputs = Input(shape=(window, n_features), name="stock_sequence")
 
+    # L2 正则化：由 Optuna 搜索最佳强度。
+    # l2_reg=0 时不启用（向后兼容已有 best_params.json）。
+    reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
+
     # LSTM(1) → 全序列输出
-    x = LSTM(lstm_units, return_sequences=True, name="lstm_1")(inputs)
+    x = LSTM(lstm_units, return_sequences=True,
+             kernel_regularizer=reg, recurrent_regularizer=reg,
+             name="lstm_1")(inputs)
     x = Dropout(dropout_rate, name="dropout_lstm1")(x)
 
     # Transformer × N
@@ -180,11 +195,14 @@ def create_stock_model(
         )(x)
 
     # LSTM(2) → 压缩为向量
-    x = LSTM(lstm_units2, return_sequences=False, name="lstm_2")(x)
+    x = LSTM(lstm_units2, return_sequences=False,
+             kernel_regularizer=reg, recurrent_regularizer=reg,
+             name="lstm_2")(x)
     x = Dropout(dropout_rate, name="dropout_lstm2")(x)
 
     # 共享 Dense
-    x = Dense(dense_units, activation="relu", name="shared_dense")(x)
+    x = Dense(dense_units, activation="relu",
+              kernel_regularizer=reg, name="shared_dense")(x)
     x = Dropout(dropout_rate, name="dropout_dense")(x)
 
     # 回归输出
@@ -192,12 +210,21 @@ def create_stock_model(
 
     model = Model(inputs, output, name="stock_lstm_transformer")
 
-    # 选择优化器
+    # 选择优化器 + 梯度裁剪
     opt_class = {"adam": Adam, "nadam": Nadam, "rmsprop": RMSprop}.get(
         optimizer.lower(), Adam)
-    opt = opt_class(learning_rate=learning_rate)
+    opt = opt_class(
+        learning_rate=learning_rate,
+        clipnorm=gradient_clip_norm,   # 全局梯度裁剪，防止 LSTM 梯度爆炸
+    )
 
-    model.compile(optimizer=opt, loss="mse", metrics=["mae"])
+    # Huber loss：delta 控制 MSE→MAE 的切换阈值。
+    # 超额收益通常在 ±10% 以内，delta=0.1 意味着异常涨跌停（>10%）用 MAE 处理。
+    model.compile(
+        optimizer=opt,
+        loss=tf.keras.losses.Huber(delta=huber_delta),
+        metrics=["mae"],
+    )
     return model
 
 
@@ -229,24 +256,36 @@ def train_model(
     if cfg is None:
         cfg = get_config()
 
-    # 时间顺序切分：训练/验证/测试 = 70/15/15
+    # 时间顺序切分：用 TimeSeriesSplit 确保验证集时间在训练集之后
+    # （数据按日期拼接，索引顺序即时间顺序，TS 切分尊重这一约束）
     n = len(X)
-    test_end = n
-    val_end = int(n * 0.85)
-    train_end = int(n * 0.70)
-
-    X_train, y_train = X[:train_end], y[:train_end]
-    X_val, y_val = X[train_end:val_end], y[train_end:val_end]
-
-    if len(X_val) == 0:
-        # 数据太少，简单 80/20 切分
+    if n >= 100:
+        # 数据充足时：3-fold TS，用最后一折的 val_idx 作为验证集
+        tscv = TimeSeriesSplit(n_splits=3)
+        splits = list(tscv.split(X))
+        train_idx, val_idx = splits[-1]  # 训练前 2/3，验证后 1/3
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
+        # 测试集：val 之后的所有数据
+        test_start = val_idx[-1] + 1
+        if test_start < n:
+            X_test, y_test = X[test_start:], y[test_start:]
+        else:
+            X_test, y_test = X_val, y_val  # 退化：测试=验证
+    else:
+        # 数据太少：简单 80/20 切分
         split = int(n * 0.8)
         X_train, y_train = X[:split], y[:split]
         X_val, y_val = X[split:], y[split:]
+        X_test, y_test = X_val, y_val
 
-    # 分离训练参数（batch_size 不传递给 create_stock_model）
+    # 分离训练参数（batch_size/window/n_features 不传递给 create_stock_model）
+    # window 和 n_features 由数据 Shape 决定，不从外部 params 传入，
+    # 防止 train_full() 中 best_params["window"] 与显式参数冲突。
     model_params = dict(model_params)
     batch_size = model_params.pop("batch_size", 64)
+    model_params.pop("window", None)
+    model_params.pop("n_features", None)
 
     model = create_stock_model(
         window=X.shape[1],
@@ -282,7 +321,6 @@ def train_model(
     )
 
     # 测试集评估
-    X_test, y_test = X[val_end:test_end], y[val_end:test_end]
     test_loss, test_mae = model.evaluate(X_test, y_test, verbose=0)
 
     result = {

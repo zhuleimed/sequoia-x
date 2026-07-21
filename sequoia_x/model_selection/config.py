@@ -32,6 +32,8 @@ class LSTMConfig:
     dropout_rate: float = 0.2
     dense_units: int = 128
     learning_rate: float = 0.001
+    l2_reg: float = 1e-4                # L2 正则化强度，Optuna 可覆盖
+    huber_delta: float = 0.1            # Huber loss 的 delta 阈值（超额收益 ±10% 以内用 MSE，之外用 MAE）
 
     # ── 训练参数 ──
     train_sample_stocks: int = 400   # 训练时抽样股票数（市值分层）
@@ -58,6 +60,11 @@ class LSTMConfig:
     dense_units_range: tuple = (32, 384)
     learning_rate_range: tuple = (1e-6, 3e-2)
     batch_size_options: tuple = (16, 32, 64, 128)
+    l2_reg_range: tuple = (1e-6, 1e-2)       # L2 正则化搜索范围（log 尺度）
+    huber_delta_range: tuple = (0.01, 0.5)    # Huber delta 搜索范围
+
+    # ── 梯度裁剪 ──
+    gradient_clip_norm: float = 1.0           # 全局梯度范数裁剪阈值
 
     # ── 增量学习参数 ──
     incremental_lr: float = 1e-5
