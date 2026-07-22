@@ -104,8 +104,8 @@ class LSTMBacktestEngine:
             if not predictions:
                 continue
 
-            # Step 3: 生成信号
-            signals = self._generate_signals(predictions)
+            # Step 3: 生成信号 (v1.3: 使用完整 rules.py 评估)
+            signals = self._generate_signals(predictions, today)
 
             # Step 4: 执行卖出（用今天开盘价）
             self._execute_sells(signals.get("sell", []), today)
@@ -157,32 +157,67 @@ class LSTMBacktestEngine:
         return results
 
     # ──────────────────────────────────────────────────────────
-    #  信号生成
+    #  信号生成 (v1.3: 使用完整13条卖出规则 + LSTM因子)
     # ──────────────────────────────────────────────────────────
 
-    def _generate_signals(self, predictions: list[tuple[str, float]]) -> dict:
+    def _generate_signals(
+        self, predictions: list[tuple[str, float]], date_str: str,
+    ) -> dict:
         """生成买卖信号。
 
-        卖出规则：
-          - 持有股票中亏损超过 8% 的强制卖出（止损）
-          - 持有股票中盈利超过 20% 的卖出半数（止盈）
-        买入规则：
-          - 取预测收益率最高的 TOP_N 只
-          - 排除已有持仓的股票
-          - 不超过 MAX_POSITIONS 限制
+        卖出: 使用 simulation/rules.py 的 evaluate_exit (13条规则 + LSTM因子 + min_hold)
+        买入: 取预测收益率最高的 TOP_N 只
         """
+        import json
+        from pathlib import Path
+        from sequoia_x.simulation.config import LSTM_PREDICT_CACHE
+
         signals: dict = {"buy": [], "sell": []}
 
-        # 卖出：止损止盈
-        for symbol, pos in list(self.positions.items()):
-            pnl_pct = pos.get("pnl_pct", 0)
-            if pnl_pct < -0.08:
-                signals["sell"].append(symbol)
-            elif pnl_pct > 0.20:
-                # 止盈：卖出半数
-                signals["sell"].append(symbol)
+        # ── 保存预测缓存 (供 evaluate_exit 中的 LSTM 因子读取) ──
+        pred_dict = {sym: float(pred) for sym, pred in predictions}
+        cache_path = Path(LSTM_PREDICT_CACHE)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(pred_dict, f)
+        except Exception:
+            pass
 
-        # 买入：取预测最高的 N 只
+        # ── 卖出: 使用完整 rules.py 评估 ──
+        for symbol, pos in list(self.positions.items()):
+            try:
+                # 获取个股OHLCV数据(用于均线/夏普等规则)
+                df = self.engine.get_ohlcv(symbol)
+                if df.empty:
+                    continue
+                # 获取指数OHLCV(用于相对弱势规则)
+                idx_df = self._get_index_df()
+                # 当前收盘价
+                current_price = pos.get("current_price", 0)
+                if current_price <= 0:
+                    continue
+
+                from sequoia_x.simulation.rules import evaluate_exit
+                result = evaluate_exit(
+                    entry_price=pos["cost"] / pos["shares"] if pos["shares"] > 0 else pos["cost"],
+                    current_price=current_price,
+                    highest_price=pos.get("highest_price", current_price),
+                    hold_days=pos.get("hold_days", 0),
+                    symbol=symbol,
+                    symbol_df=df.tail(60) if df is not None else None,
+                    index_df=idx_df.tail(60) if idx_df is not None else None,
+                    today_opened=False,
+                )
+                if result.should_exit:
+                    signals["sell"].append(symbol)
+            except Exception:
+                # evaluate_exit 失败时回退到简单止损
+                pnl_pct = pos.get("pnl_pct", 0)
+                if pnl_pct < -0.08:
+                    signals["sell"].append(symbol)
+
+        # ── 买入：取预测最高的 N 只 ──
         bought_today = 0
         for symbol, pred in predictions:
             if symbol in self.positions:
@@ -203,11 +238,7 @@ class LSTMBacktestEngine:
     # ──────────────────────────────────────────────────────────
 
     def _execute_sells(self, symbols: list[str], date_str: str) -> None:
-        """执行卖出（用当日开盘价，考虑滑点）。
-
-        止盈（pnl_pct > 20%）卖出半数持仓，保留剩余仓位；
-        止损（pnl_pct < -8%）卖出全部持仓。
-        """
+        """执行卖出（用当日开盘价，考虑滑点）。v1.3: evaluate_exit 决定的均为全额卖出。"""
         for symbol in symbols:
             if symbol not in self.positions:
                 continue
@@ -216,26 +247,15 @@ class LSTMBacktestEngine:
             if price is None:
                 continue
 
-            # 判断为止盈（卖出半数）还是止损（卖出全部）
-            pnl_pct = pos.get("pnl_pct", 0)
-            is_take_profit = pnl_pct > 0.20
-            sell_shares = pos["shares"] // 2 if is_take_profit else pos["shares"]
-            orig_shares = pos["shares"]
-
+            sell_shares = pos["shares"]
             sell_price = price * (1 - bt_cfg.SLIPPAGE)
             revenue = sell_shares * sell_price
             commission = revenue * bt_cfg.COMMISSION_RATE
             tax = revenue * bt_cfg.STAMP_TAX_RATE
             net = revenue - commission - tax
-            pnl = net - (pos["cost"] * sell_shares // orig_shares) if is_take_profit else net - pos["cost"]
+            pnl = net - pos["cost"]
             self.cash += net
-
-            if is_take_profit:
-                # 保留剩余半数：减少股数并按比例调整成本
-                pos["shares"] -= sell_shares
-                pos["cost"] = pos["cost"] * pos["shares"] // orig_shares
-            else:
-                self.positions.pop(symbol)
+            self.positions.pop(symbol)
 
             self.trade_records.append({
                 "symbol": symbol, "type": "sell", "date": date_str,
@@ -264,6 +284,7 @@ class LSTMBacktestEngine:
             self.positions[symbol] = {
                 "shares": shares, "cost": total,
                 "buy_date": date_str, "highest_price": buy_price,
+                "hold_days": 0,  # v1.3: 追踪持有天数
             }
             self.trade_records.append({
                 "symbol": symbol, "type": "buy", "date": date_str,
@@ -274,6 +295,21 @@ class LSTMBacktestEngine:
     # ──────────────────────────────────────────────────────────
     #  行情查询
     # ──────────────────────────────────────────────────────────
+
+    def _get_index_df(self) -> "pd.DataFrame":
+        """获取上证指数 OHLCV 数据（用于相对弱势规则）。"""
+        import pandas as pd
+        df = self.engine.get_ohlcv("sh.000001")
+        if df.empty:
+            # fallback: try local index_daily
+            import sqlite3
+            conn = sqlite3.connect(self.engine.db_path)
+            df = pd.read_sql(
+                "SELECT * FROM index_daily WHERE symbol='sh.000001' ORDER BY date",
+                conn,
+            )
+            conn.close()
+        return df if not df.empty else pd.DataFrame()
 
     def _get_open_price(self, symbol: str, date_str: str) -> float | None:
         """获取某日开盘价。"""
@@ -316,6 +352,7 @@ class LSTMBacktestEngine:
                 pos["current_value"] = pos["shares"] * close
                 pos["pnl"] = pos["current_value"] - pos["cost"]
                 pos["pnl_pct"] = pos["pnl"] / pos["cost"]
+                pos["hold_days"] = pos.get("hold_days", 0) + 1  # v1.3
                 if close > pos["highest_price"]:
                     pos["highest_price"] = close
         conn.close()
