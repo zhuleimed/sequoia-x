@@ -76,14 +76,14 @@ class LSTMConfig:
     weekly_lookback: int = 252      # 近 1 年
 
     # ── 每日预测参数 ──
-    min_pred_return: float = 0.0    # 最低预测收益率阈值 (v1.3: 0→不设绝对门槛,靠排序)
-    top_n_buy_per_day: int = 5      # 每天最多买入数 (v1.3: 2→5,释放Rank IC广度)
+    min_pred_return: float = 0.01   # 最低预测收益率阈值
+    top_n_buy_per_day: int = 2      # 每天最多买入数
 
     # ── 模拟盘参数 ──
     initial_capital: float = 500_000.0
-    per_stock_budget: float = 16_000.0   # v1.3: 5万→1.6万,匹配30只持仓总预算
-    max_positions: int = 30          # v1.3: 10→30,大数定律释放排序能力
-    min_hold_days: int = 5           # v1.3: 最低持有天数(硬止损-8%例外)
+    per_stock_budget: float = 50_000.0
+    max_positions: int = 10
+    min_hold_days: int = 5           # 最低持有天数(硬止损-8%例外)
     commission_rate: float = 0.00025
     stamp_tax_rate: float = 0.001
     slippage: float = 0.0001
