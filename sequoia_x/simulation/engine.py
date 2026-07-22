@@ -101,7 +101,7 @@ class SimEngine:
     #  主入口
     # ════════════════════════════════════════════════════════
 
-    def run_daily(self) -> dict:
+    def run_daily(self, push_report: bool = True) -> dict:
         """执行一个交易日的完整模拟盘流程。
 
         T+1 模型（同 019 ETF 模拟盘）：
@@ -111,6 +111,9 @@ class SimEngine:
           Step 4: 更新估值 + 运行卖出规则（用今日 CLOSE）
             └─ 触发则标记 pending_sell（明日 OPEN 执行）
           Step 5: 写入账户日结
+
+        Args:
+            push_report: 是否推送通用日报。LSTM 策略应传 False。
 
         Returns:
             {"status": "ok"|"skipped"|"error", "actions": [...], ...}
@@ -167,8 +170,9 @@ class SimEngine:
         self._write_account_daily(today_str)
         results["positions_updated"] = len(get_all_positions(self.db_path))
 
-        # ── 6. 推送组合日报 ──
-        self._push_daily_summary(today_str, results)
+        # ── 6. 推送组合日报（仅 LLM 策略；LSTM 用独立日报函数）──
+        if push_report:
+            self._push_daily_summary(today_str, results)
 
         logger.info(f"═══ 模拟盘更新完成 [{today_str}] ═══")
         if bought:

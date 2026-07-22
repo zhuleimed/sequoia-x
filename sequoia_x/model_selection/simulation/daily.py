@@ -259,7 +259,7 @@ def run_lstm_daily(
     sim_cfg.PER_STOCK_BUDGET = cfg.per_stock_budget
     lstm_settings = Settings(db_path=cfg.sim_db_path)
     sim_engine = SimEngine(lstm_settings)
-    sim_results = sim_engine.run_daily()
+    sim_results = sim_engine.run_daily(push_report=False)  # LSTM有独立日报,不推通用日报
     result["sim_results"] = sim_results
 
     # ── 6. 推送 LSTM 策略日报到微信 ──
