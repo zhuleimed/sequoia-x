@@ -64,3 +64,9 @@ RELATIVE_WARN_THRESHOLD: float = -0.03  # 跑输 3%
 
 # ── 参考指数 ──
 INDEX_SYMBOL: str = "sh.000001"         # 上证指数
+
+# ── v1.3: LSTM 策略增强 ──
+MIN_HOLD_DAYS: int = 5                   # 最低持有天数（硬止损例外）
+LSTM_PREDICT_CACHE: str = "output/lstm_predict_cache.json"  # LSTM每日预测缓存
+LSTM_BUY_BONUS: int = -30               # LSTM看好: 减30分(卖出门槛提高)
+LSTM_SELL_PENALTY: int = 20             # LSTM看空: 加20分(加速卖出)

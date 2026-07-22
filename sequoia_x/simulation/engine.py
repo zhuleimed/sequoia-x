@@ -439,6 +439,7 @@ class SimEngine:
                 current_price=close_price,
                 highest_price=updated_pos["highest_price"] or updated_pos["buy_price"],
                 hold_days=updated_pos["hold_days"],
+                symbol=sym,
                 symbol_df=df.tail(30),
                 index_df=index_df.tail(30) if index_df is not None else None,
                 today_opened=bool(updated_pos.get("today_opened", 0)),

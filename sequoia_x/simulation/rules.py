@@ -43,6 +43,11 @@ from sequoia_x.simulation.config import (
     RELATIVE_WEAK_THRESHOLD,
     RELATIVE_WARN_THRESHOLD,
     SELL_THRESHOLD,
+    # v1.3 新增
+    MIN_HOLD_DAYS,
+    LSTM_PREDICT_CACHE,
+    LSTM_BUY_BONUS,
+    LSTM_SELL_PENALTY,
     # 分值
     SCORE_HARD_STOP,
     SCORE_HARD_STOP_WARN,
@@ -276,6 +281,56 @@ def _check_relative_strength(symbol_close: pd.Series,
     return 0, ""
 
 
+def _load_lstm_cache() -> dict[str, float]:
+    """加载 LSTM 每日预测缓存。"""
+    import json
+    from pathlib import Path
+    cache_path = Path(LSTM_PREDICT_CACHE)
+    if not cache_path.exists():
+        return {}
+    try:
+        with open(cache_path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _check_lstm_factor(symbol: str) -> tuple[int, str]:
+    """LSTM 预测因子。
+
+    读取当日 LSTM 预测缓存:
+      - LSTM 看好(预测>2%): 返回负分(BUY_BONUS=-30), 提高卖出门槛
+      - LSTM 看空(预测<0%): 返回正分(SELL_PENALTY=20), 加速卖出
+      - 中性: 0 分
+
+    这利用了 LSTM Rank IC=0.16 的排序能力，在卖出决策中"征求 LSTM 意见"。
+    """
+    cache = _load_lstm_cache()
+    pred = cache.get(symbol)
+    if pred is None:
+        return 0, ""
+    if pred > 0.02:
+        return (LSTM_BUY_BONUS,
+                f"LSTM看好(预测{pred:+.1%}), 延迟卖出")
+    if pred < 0:
+        return (LSTM_SELL_PENALTY,
+                f"LSTM看空(预测{pred:+.1%}), 加速卖出")
+    return 0, ""
+
+
+def _check_min_hold(hold_days: int, total_score: int) -> bool:
+    """最低持有天数保护。
+
+    hold_days < MIN_HOLD_DAYS 时，除非硬止损穿透(S1)，
+    否则强制阻止卖出（返回 True = 跳过卖出）。
+    """
+    if hold_days < MIN_HOLD_DAYS:
+        # 硬止损(100分=S1穿透)例外
+        if total_score < SCORE_HARD_STOP:
+            return True
+    return False
+
+
 # ════════════════════════════════════════════════════════════
 #  综合评分入口
 # ════════════════════════════════════════════════════════════
@@ -286,6 +341,7 @@ def evaluate_exit(
     current_price: float,
     highest_price: float,
     hold_days: int,
+    symbol: str = "",
     symbol_df: Optional[pd.DataFrame] = None,
     index_df: Optional[pd.DataFrame] = None,
     today_opened: bool = False,
@@ -294,11 +350,14 @@ def evaluate_exit(
 
     T+1 保护：今日买入（today_opened=True）不触发任何卖出。
 
+    v1.3 新增: LSTM 预测因子 + 最低持有天数保护。
+
     Args:
         entry_price: 持仓成本价。
         current_price: 当日收盘价。
         highest_price: 持仓期间最高价。
         hold_days: 已持有天数。
+        symbol: 股票代码（v1.3: LSTM因子查询）。
         symbol_df: 个股日线 DataFrame（含 close 列）。
         index_df: 指数日线 DataFrame（含 close 列，用于相对强弱）。
         today_opened: 今日是否新开仓（T+1 保护）。
@@ -362,7 +421,18 @@ def evaluate_exit(
             breakdown.append((f"R(相对弱势)", score))
             total_score += score
 
+    # ── LSTM 预测因子 (v1.3) ──
+    if symbol:
+        score, reason = _check_lstm_factor(symbol)
+        if score != 0:
+            breakdown.append(("LSTM因子", score))
+            total_score += score
+
     should_exit = total_score >= SELL_THRESHOLD
+
+    # ── 最低持有天数保护 (v1.3) ──
+    if should_exit and _check_min_hold(hold_days, total_score):
+        should_exit = False
 
     if should_exit:
         # 构建原因描述（取最高分的 2 条）

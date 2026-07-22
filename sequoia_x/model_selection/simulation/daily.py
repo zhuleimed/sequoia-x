@@ -209,6 +209,21 @@ def run_lstm_daily(
         result["status"] = "skipped"
         return result
 
+    # ── 2.5. 保存 LSTM 预测缓存（v1.3: SimEngine 卖出规则会读取）──
+    try:
+        import json
+        from pathlib import Path
+        from sequoia_x.simulation.config import LSTM_PREDICT_CACHE
+
+        cache_path = Path(LSTM_PREDICT_CACHE)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_data = {sym: float(pred) for sym, pred in predictions}
+        with open(cache_path, "w") as f:
+            json.dump(cache_data, f)
+        logger.debug(f"LSTM 预测缓存已保存: {cache_path} ({len(cache_data)} 只)")
+    except Exception as e:
+        logger.warning(f"LSTM 预测缓存保存失败(非致命): {e}")
+
     # ── 3. 过滤 + 取 top N ──
     top_symbols = [
         s for s, r in predictions
