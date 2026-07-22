@@ -42,7 +42,11 @@ class LSTMBacktestEngine:
         self.daily_records: list[dict] = []
         self.trade_records: list[dict] = []
 
-    def run(self, start_date: str, end_date: str = "") -> dict:
+    def run(
+        self, start_date: str, end_date: str = "",
+        predictions_cache: dict[str, list[tuple[str, float]]] | None = None,
+        save_predictions: bool = False,
+    ) -> dict:
         """运行回测。
 
         逐日循环：
@@ -51,9 +55,15 @@ class LSTMBacktestEngine:
           3. 用 T 开盘价执行交易
           4. 日终估值
 
+        Args:
+            predictions_cache: 预计算的每日预测{(symbol,pred),...}, 传入则跳过预测。
+            save_predictions: 是否保存预测到外部缓存文件。
+
         Returns:
             dict with metrics.
         """
+        import json
+
         from sequoia_x.model_selection.backtest.data import (
             get_trade_dates, get_monthly_boundaries,
         )
@@ -67,13 +77,12 @@ class LSTMBacktestEngine:
         logger.info(f"回测: {dates[0]} ~ {dates[-1]}, {len(dates)} 天, "
                      f"{len(boundaries)} 个月")
 
-        # 初始训练（用起始日期之前的数据）
-        # 跳过前 window 天用于特征构建（build_prediction_features 只需要 window 天历史数据）
         warmup = self.cfg.window
-        prediction_cache: dict = {}
+        _cache_miss = predictions_cache is None
+        _new_cache: dict[str, list] = {}  # 本次新计算的预测
+        cache_path = Path("output/backtest_lstm/predictions_cache.json")
 
-        # 缓存基础股票池：只在回测开始时调用一次 baostock，
-        # 避免每交易日重复 login/logout（500+ 天回测可节省数千次连接）
+        # 缓存基础股票池
         base_pool: list[str] = []
         try:
             base_pool = self.engine.get_base_stock_pool()
@@ -92,19 +101,22 @@ class LSTMBacktestEngine:
             if idx in boundaries and self.model_train_fn:
                 logger.info(f"回测重训: {today}")
                 self.model = self.model_train_fn(today)
-                prediction_cache.clear()
 
             if self.model is None:
-                # 尚无模型，跳过（使用动量策略会引入 bias）
                 continue
 
-            # Step 1: 使用缓存的股票池（已在 run() 开头加载）
-            # Step 2: 预测（用 prev_date 数据避免 look-ahead）
-            predictions = self._predict_batch(base_pool, prev_date)
+            # Step 1-2: 获取预测（缓存命中→跳过，否则→模型推理）
+            if predictions_cache is not None and prev_date in predictions_cache:
+                predictions = predictions_cache[prev_date]
+            else:
+                predictions = self._predict_batch(base_pool, prev_date)
+                if save_predictions and predictions:
+                    _new_cache[prev_date] = [(s, float(p)) for s, p in predictions]
+
             if not predictions:
                 continue
 
-            # Step 3: 生成信号 (v1.3: 使用完整 rules.py 评估)
+            # Step 3: 生成信号
             signals = self._generate_signals(predictions, today)
 
             # Step 4: 执行卖出（用今天开盘价）
@@ -118,6 +130,16 @@ class LSTMBacktestEngine:
 
             # Step 7: 日结记录
             self._record_daily(today)
+
+        # 保存新计算的预测缓存
+        if save_predictions and _new_cache:
+            import json
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            # 转为可JSON序列化的格式
+            json_data = {k: [[s, p] for s, p in v] for k, v in _new_cache.items()}
+            with open(cache_path, "w") as f:
+                json.dump(json_data, f)
+            logger.info(f"预测缓存已保存: {cache_path} ({len(_new_cache)} 天)")
 
         return self._compute_metrics()
 
