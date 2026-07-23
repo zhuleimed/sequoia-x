@@ -69,6 +69,13 @@ def train_all(
     elapsed = time.time() - t0
     logger.info(f"全部训练完成: {elapsed:.0f}s ({elapsed/60:.1f}min)")
 
+    # 保存模型到磁盘（供回测加载）
+    cfg.model_dir_path.mkdir(parents=True, exist_ok=True)
+    model_t1.save_model(str(cfg.model_dir_path / "t1_xgb.json"))
+    model_t2.save_model(str(cfg.model_dir_path / "t2_lgbm.txt"))
+    model_t3.save_model(str(cfg.model_dir_path / "t3_cat.cbm"))
+    logger.info(f"模型已保存: {cfg.model_dir_path}")
+
     # 汇总特征重要性（以 T2 LightGBM 的特征重要性为主）
     feature_importance = {
         "t1_xgb": model_t1.feature_importances_.tolist() if hasattr(model_t1, 'feature_importances_') else [],
