@@ -149,81 +149,122 @@ def _compute_label_t3(
     return min(vol, 2.0)
 
 
+def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Worker：处理一个日期的一批股票（~200只），数据量小，直接经管道返回。
+
+    不写磁盘，不初始化完整 DataEngine，仅用 SQLite 读取。
+    """
+    ref_date, symbols_chunk, cfg = args
+    from sequoia_x.core.config import Settings as _Settings
+    engine = DataEngine.__new__(DataEngine)
+    engine.db_path = _Settings().db_path
+
+    X_list, y1_list, y2_list, y3_list = [], [], [], []
+    for symbol in symbols_chunk:
+        try:
+            X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
+            if X_i is None:
+                continue
+            y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
+            y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
+            y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
+            if y1 is None or y2 is None or y3 is None:
+                continue
+            X_list.append(X_i)
+            y1_list.append(y1)
+            y2_list.append(y2)
+            y3_list.append(y3)
+        except Exception:
+            continue
+
+    if not X_list:
+        return ref_date, np.array([]), np.array([]), np.array([]), np.array([])
+    return (ref_date,
+            np.array(X_list, dtype=np.float32),
+            np.array(y1_list, dtype=np.int32),
+            np.array(y2_list, dtype=np.float32),
+            np.array(y3_list, dtype=np.float32))
+
+
 def build_training_dataset(
     engine: DataEngine, cfg: V2Config | None = None,
     symbols: list[str] | None = None,
+    n_workers: int = 8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """构建完整训练数据集。
+    """构建完整训练数据集（多进程并行，小chunk无磁盘中转）。
 
-    遍历所有采样日期和股票，构建特征矩阵 + 三任务标签。
+    将每个日期按 ~200 只股票切分为小任务，worker 直接经管道返回结果。
+    避免大 npz 文件 I/O 和 pipe 阻塞。
 
     Args:
-        engine: DataEngine 实例。
+        engine: DataEngine 实例（仅用于获取采样日期和股票池）。
         cfg: V2Config 配置。
         symbols: 股票列表，默认从 engine.get_base_stock_pool() 获取。
+        n_workers: 并行进程数（默认 8）。
 
     Returns:
-        (X, y1, y2, y3, date_labels):
-          X  — (n_samples, window, n_features)
-          y1 — (n_samples,) 二分类标签
-          y2 — (n_samples,) 超额收益率
-          y3 — (n_samples,) 波动率
-          date_labels — (n_samples,) 每行对应的采样日期，用于 Walk-Forward 切分
+        (X, y1, y2, y3, date_labels)
     """
     import time
+    from multiprocessing import Pool
+
     if cfg is None:
         cfg = get_config()
     if symbols is None:
         symbols = engine.get_base_stock_pool()
 
     dates = _get_sample_dates(engine, cfg)
-    logger.info(f"采样日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]})")
-    logger.info(f"股票池: {len(symbols)} 只")
+    logger.info(f"采样日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]}), "
+                f"股票: {len(symbols)} 只, workers: {n_workers}")
 
-    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
+    # 每个日期切成小块（~200只/块），避免大pipe传输
+    CHUNK = 200
+    tasks = []
+    for d in dates:
+        for i in range(0, len(symbols), CHUNK):
+            tasks.append((d, symbols[i:i+CHUNK], cfg))
+
+    total_chunks = len(dates) * ((len(symbols) + CHUNK - 1) // CHUNK)
+    logger.info(f"  共 {len(tasks)} 个小任务（{CHUNK}只/块）")
+
     t0 = time.time()
+    all_X, all_y1, all_y2, all_y3, all_dates = [], [], [], [], []
+    done_chunks, done_dates = 0, set()
+    last_report = 0
 
-    for di, ref_date in enumerate(dates):
-        for symbol in symbols:
-            try:
-                X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
-                if X_i is None:
-                    continue
-
-                y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
-                y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
-                y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
-
-                if y1 is None or y2 is None or y3 is None:
-                    continue
-
-                X_list.append(X_i)
-                y1_list.append(y1)
-                y2_list.append(y2)
-                y3_list.append(y3)
-                date_list.append(ref_date)
-            except Exception:
-                continue
-
-        if (di + 1) % 10 == 0 or di == 0:
+    with Pool(processes=n_workers) as pool:
+        for ref_date, Xc, y1c, y2c, y3c in pool.imap_unordered(_process_chunk, tasks):
+            if len(Xc) > 0:
+                all_X.append(Xc)
+                all_y1.append(y1c)
+                all_y2.append(y2c)
+                all_y3.append(y3c)
+                all_dates.extend([ref_date] * len(Xc))
+            done_chunks += 1
+            done_dates.add(ref_date)
+            # 每完成一批日期或每2分钟报告一次
             elapsed = time.time() - t0
-            logger.info(
-                f"  日期 {di+1}/{len(dates)} ({ref_date}): "
-                f"累计 {len(X_list)} 样本, {elapsed:.0f}s"
-            )
+            if len(done_dates) > last_report and (len(done_dates) % 10 == 0 or elapsed - t0 > 120):
+                last_report = len(done_dates)
+                logger.info(
+                    f"  已完成 {len(done_dates)}/{len(dates)} 日期, "
+                    f"{done_chunks}/{len(tasks)} chunks, "
+                    f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s"
+                )
 
     elapsed = time.time() - t0
-    logger.info(f"数据集构建完成: {len(X_list)} 样本, {elapsed:.0f}s")
+    total_samples = sum(len(x) for x in all_X)
+    logger.info(f"数据集构建完成: {total_samples} 样本, {elapsed:.0f}s")
 
-    if not X_list:
+    if total_samples == 0:
         return (np.array([]).reshape(0, cfg.window, 0),
                 np.array([]), np.array([]), np.array([]),
                 [])
 
-    X = np.stack(X_list, axis=0)
-    y1 = np.array(y1_list, dtype=np.int32)
-    y2 = np.array(y2_list, dtype=np.float32)
-    y3 = np.array(y3_list, dtype=np.float32)
+    X = np.concatenate(all_X, axis=0)
+    y1 = np.concatenate(all_y1, axis=0).astype(np.int32)
+    y2 = np.concatenate(all_y2, axis=0).astype(np.float32)
+    y3 = np.concatenate(all_y3, axis=0).astype(np.float32)
 
     logger.info(
         f"X.shape={X.shape}, "
@@ -231,7 +272,7 @@ def build_training_dataset(
         f"y2 均值={y2.mean():.4f}, "
         f"y3 均值={y3.mean():.4f}"
     )
-    return X, y1, y2, y3, date_list
+    return X, y1, y2, y3, all_dates
 
 
 # ════════════════════════════════════════════════════════════
