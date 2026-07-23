@@ -152,11 +152,14 @@ def _compute_label_t3(
 def _process_date_stocks(args: tuple) -> tuple[str, list, list, list, list]:
     """Worker：处理一个采样日期的全部股票，返回该日所有有效样本。
 
-    独立创建 DataEngine，避免跨进程 pickle 问题。
+    仅用 SQLite 读取数据，不初始化 baostock（避免多进程争用）。
     """
     ref_date, symbols, cfg = args
-    from sequoia_x.core.config import Settings
-    engine = DataEngine(Settings())
+    # 轻量 engine：跳过 baostock 登录，仅设 db_path 用于 get_ohlcv (SQLite)
+    from sequoia_x.core.config import Settings as _Settings
+    _settings = _Settings()
+    _settings.baostock_enabled = False  # 阻止 baostock 登录
+    engine = DataEngine(_settings)
 
     X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
     for symbol in symbols:
