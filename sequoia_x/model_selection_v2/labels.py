@@ -156,8 +156,10 @@ def _process_date_stocks(args: tuple) -> tuple[str, str, int]:
     """
     import tempfile
     ref_date, symbols, cfg = args
+    # 极简 engine：绕过 __init__（避免12进程争SQLite DDL锁），仅 db_path 即可
     from sequoia_x.core.config import Settings as _Settings
-    engine = DataEngine(_Settings())
+    engine = DataEngine.__new__(DataEngine)
+    engine.db_path = _Settings().db_path
 
     X_list, y1_list, y2_list, y3_list = [], [], [], []
     for symbol in symbols:
