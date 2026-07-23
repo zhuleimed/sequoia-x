@@ -149,28 +149,56 @@ def _compute_label_t3(
     return min(vol, 2.0)
 
 
+def _process_date_stocks(args: tuple) -> tuple[str, list, list, list, list]:
+    """Worker：处理一个采样日期的全部股票，返回该日所有有效样本。
+
+    独立创建 DataEngine，避免跨进程 pickle 问题。
+    """
+    ref_date, symbols, cfg = args
+    from sequoia_x.core.config import Settings
+    engine = DataEngine(Settings())
+
+    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
+    for symbol in symbols:
+        try:
+            X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
+            if X_i is None:
+                continue
+            y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
+            y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
+            y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
+            if y1 is None or y2 is None or y3 is None:
+                continue
+            X_list.append(X_i)
+            y1_list.append(y1)
+            y2_list.append(y2)
+            y3_list.append(y3)
+            date_list.append(ref_date)
+        except Exception:
+            continue
+
+    return ref_date, X_list, y1_list, y2_list, y3_list
+
+
 def build_training_dataset(
     engine: DataEngine, cfg: V2Config | None = None,
     symbols: list[str] | None = None,
+    n_workers: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """构建完整训练数据集。
-
-    遍历所有采样日期和股票，构建特征矩阵 + 三任务标签。
+    """构建完整训练数据集（多进程并行，每进程独立 DataEngine）。
 
     Args:
-        engine: DataEngine 实例。
+        engine: DataEngine 实例（仅用于获取采样日期和股票池）。
         cfg: V2Config 配置。
         symbols: 股票列表，默认从 engine.get_base_stock_pool() 获取。
+        n_workers: 并行进程数（默认 12，不超过 CPU 限制）。
 
     Returns:
-        (X, y1, y2, y3, date_labels):
-          X  — (n_samples, window, n_features)
-          y1 — (n_samples,) 二分类标签
-          y2 — (n_samples,) 超额收益率
-          y3 — (n_samples,) 波动率
-          date_labels — (n_samples,) 每行对应的采样日期，用于 Walk-Forward 切分
+        (X, y1, y2, y3, date_labels)
     """
     import time
+    from multiprocessing import Pool
+
     if cfg is None:
         cfg = get_config()
     if symbols is None:
@@ -178,39 +206,32 @@ def build_training_dataset(
 
     dates = _get_sample_dates(engine, cfg)
     logger.info(f"采样日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]})")
-    logger.info(f"股票池: {len(symbols)} 只")
+    logger.info(f"股票池: {len(symbols)} 只, 并行: {n_workers} workers")
 
-    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
     t0 = time.time()
 
-    for di, ref_date in enumerate(dates):
-        for symbol in symbols:
-            try:
-                X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
-                if X_i is None:
-                    continue
+    # 多进程并行：每个 worker 处理一个日期（所有股票）
+    tasks = [(d, symbols, cfg) for d in dates]
+    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
+    completed = 0
 
-                y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
-                y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
-                y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
-
-                if y1 is None or y2 is None or y3 is None:
-                    continue
-
-                X_list.append(X_i)
-                y1_list.append(y1)
-                y2_list.append(y2)
-                y3_list.append(y3)
-                date_list.append(ref_date)
-            except Exception:
-                continue
-
-        if (di + 1) % 10 == 0 or di == 0:
-            elapsed = time.time() - t0
-            logger.info(
-                f"  日期 {di+1}/{len(dates)} ({ref_date}): "
-                f"累计 {len(X_list)} 样本, {elapsed:.0f}s"
-            )
+    with Pool(processes=n_workers) as pool:
+        # 使用 imap_unordered 实时报告进度
+        for ref_date, x_chunk, y1_chunk, y2_chunk, y3_chunk in pool.imap_unordered(
+            _process_date_stocks, tasks
+        ):
+            X_list.extend(x_chunk)
+            y1_list.extend(y1_chunk)
+            y2_list.extend(y2_chunk)
+            y3_list.extend(y3_chunk)
+            date_list.extend([ref_date] * len(x_chunk))
+            completed += 1
+            if completed % 10 == 0 or completed == 1:
+                elapsed = time.time() - t0
+                logger.info(
+                    f"  已完成 {completed}/{len(dates)} 日期, "
+                    f"累计 {len(X_list)} 样本, {elapsed:.0f}s"
+                )
 
     elapsed = time.time() - t0
     logger.info(f"数据集构建完成: {len(X_list)} 样本, {elapsed:.0f}s")
