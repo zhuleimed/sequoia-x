@@ -149,28 +149,64 @@ def _compute_label_t3(
     return min(vol, 2.0)
 
 
+def _process_date_stocks(args: tuple) -> tuple[str, str, int]:
+    """Worker：处理一个采样日期，结果写入临时 .npz 文件，返回 (ref_date, tmp_path, n_samples)。
+
+    不通过 multiprocessing pipe 传大数据，避免序列化 OOM/断管。
+    """
+    import tempfile
+    ref_date, symbols, cfg = args
+    # 极简 engine：绕过 __init__（避免12进程争SQLite DDL锁），仅 db_path 即可
+    from sequoia_x.core.config import Settings as _Settings
+    engine = DataEngine.__new__(DataEngine)
+    engine.db_path = _Settings().db_path
+
+    X_list, y1_list, y2_list, y3_list = [], [], [], []
+    for symbol in symbols:
+        try:
+            X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
+            if X_i is None:
+                continue
+            y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
+            y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
+            y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
+            if y1 is None or y2 is None or y3 is None:
+                continue
+            X_list.append(X_i)
+            y1_list.append(y1)
+            y2_list.append(y2)
+            y3_list.append(y3)
+        except Exception:
+            continue
+
+    # 写入临时文件（避免 pipe 传输大数据）
+    tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False, prefix="v2data_")
+    np.savez_compressed(tmp, X=np.array(X_list, dtype=np.float32) if X_list else np.array([]),
+                        y1=np.array(y1_list, dtype=np.int32), y2=np.array(y2_list, dtype=np.float32),
+                        y3=np.array(y3_list, dtype=np.float32))
+    tmp.close()
+    return ref_date, tmp.name, len(X_list)
+
+
 def build_training_dataset(
     engine: DataEngine, cfg: V2Config | None = None,
     symbols: list[str] | None = None,
+    n_workers: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """构建完整训练数据集。
-
-    遍历所有采样日期和股票，构建特征矩阵 + 三任务标签。
+    """构建完整训练数据集（多进程并行，每进程独立 DataEngine）。
 
     Args:
-        engine: DataEngine 实例。
+        engine: DataEngine 实例（仅用于获取采样日期和股票池）。
         cfg: V2Config 配置。
         symbols: 股票列表，默认从 engine.get_base_stock_pool() 获取。
+        n_workers: 并行进程数（默认 12，不超过 CPU 限制）。
 
     Returns:
-        (X, y1, y2, y3, date_labels):
-          X  — (n_samples, window, n_features)
-          y1 — (n_samples,) 二分类标签
-          y2 — (n_samples,) 超额收益率
-          y3 — (n_samples,) 波动率
-          date_labels — (n_samples,) 每行对应的采样日期，用于 Walk-Forward 切分
+        (X, y1, y2, y3, date_labels)
     """
     import time
+    from multiprocessing import Pool
+
     if cfg is None:
         cfg = get_config()
     if symbols is None:
@@ -178,52 +214,58 @@ def build_training_dataset(
 
     dates = _get_sample_dates(engine, cfg)
     logger.info(f"采样日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]})")
-    logger.info(f"股票池: {len(symbols)} 只")
+    logger.info(f"股票池: {len(symbols)} 只, 并行: {n_workers} workers")
 
-    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
     t0 = time.time()
 
-    for di, ref_date in enumerate(dates):
-        for symbol in symbols:
-            try:
-                X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
-                if X_i is None:
-                    continue
+    # 多进程并行：每个 worker 处理一个日期，结果写入临时 .npz 文件
+    tasks = [(d, symbols, cfg) for d in dates]
+    all_X, all_y1, all_y2, all_y3, all_dates = [], [], [], [], []
+    completed = 0
+    tmp_files: list[str] = []
 
-                y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
-                y2 = _compute_label_t2(symbol, ref_date, engine, cfg)
-                y3 = _compute_label_t3(symbol, ref_date, engine, cfg)
+    with Pool(processes=n_workers) as pool:
+        for ref_date, tmp_path, n_samples in pool.imap_unordered(
+            _process_date_stocks, tasks
+        ):
+            if n_samples > 0:
+                data = np.load(tmp_path)
+                all_X.append(data["X"])
+                all_y1.append(data["y1"])
+                all_y2.append(data["y2"])
+                all_y3.append(data["y3"])
+                all_dates.extend([ref_date] * n_samples)
+                data.close()
+            tmp_files.append(tmp_path)
+            completed += 1
+            if completed % 10 == 0 or completed == 1:
+                elapsed = time.time() - t0
+                logger.info(
+                    f"  已完成 {completed}/{len(dates)} 日期, "
+                    f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s"
+                )
 
-                if y1 is None or y2 is None or y3 is None:
-                    continue
-
-                X_list.append(X_i)
-                y1_list.append(y1)
-                y2_list.append(y2)
-                y3_list.append(y3)
-                date_list.append(ref_date)
-            except Exception:
-                continue
-
-        if (di + 1) % 10 == 0 or di == 0:
-            elapsed = time.time() - t0
-            logger.info(
-                f"  日期 {di+1}/{len(dates)} ({ref_date}): "
-                f"累计 {len(X_list)} 样本, {elapsed:.0f}s"
-            )
+    # 清理临时文件
+    import os as _os
+    for f in tmp_files:
+        try:
+            _os.unlink(f)
+        except OSError:
+            pass
 
     elapsed = time.time() - t0
-    logger.info(f"数据集构建完成: {len(X_list)} 样本, {elapsed:.0f}s")
+    total_samples = sum(len(x) for x in all_X)
+    logger.info(f"数据集构建完成: {total_samples} 样本, {elapsed:.0f}s")
 
-    if not X_list:
+    if total_samples == 0:
         return (np.array([]).reshape(0, cfg.window, 0),
                 np.array([]), np.array([]), np.array([]),
                 [])
 
-    X = np.stack(X_list, axis=0)
-    y1 = np.array(y1_list, dtype=np.int32)
-    y2 = np.array(y2_list, dtype=np.float32)
-    y3 = np.array(y3_list, dtype=np.float32)
+    X = np.concatenate(all_X, axis=0)
+    y1 = np.concatenate(all_y1, axis=0).astype(np.int32)
+    y2 = np.concatenate(all_y2, axis=0).astype(np.float32)
+    y3 = np.concatenate(all_y3, axis=0).astype(np.float32)
 
     logger.info(
         f"X.shape={X.shape}, "
@@ -231,7 +273,7 @@ def build_training_dataset(
         f"y2 均值={y2.mean():.4f}, "
         f"y3 均值={y3.mean():.4f}"
     )
-    return X, y1, y2, y3, date_list
+    return X, y1, y2, y3, all_dates
 
 
 # ════════════════════════════════════════════════════════════

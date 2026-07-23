@@ -73,26 +73,26 @@ STEPS: list[dict] = [
         "required": False,   # 可选：失败不阻断管线
         "timeout": 1800,  # 30min
     },
-    # ── 2.5. LSTM 增量学习（可选） ──
-    {
-        "id": "lstm_incremental",
-        "name": "LSTM 增量学习",
-        "cmd": ["-m", "sequoia_x.model_selection.train", "--incremental"],
-        "cwd": str(PROJECT_DIR),
-        "python": PY312,
-        "required": False,
-        "timeout": 600,  # 10min
-    },
-    # ── 2.6. LSTM 预测+信号写入（可选） ──
-    {
-        "id": "lstm_predict",
-        "name": "LSTM 预测+信号写入",
-        "cmd": ["-m", "sequoia_x.model_selection.simulation.daily"],
-        "cwd": str(PROJECT_DIR),
-        "python": PY312,
-        "required": False,
-        "timeout": 900,  # 15min（包括股票池预测）
-    },
+    # ── 2.5. LSTM 增量学习（已暂停-新模型开发中） ──
+    # {
+    #     "id": "lstm_incremental",
+    #     "name": "LSTM 增量学习",
+    #     "cmd": ["-m", "sequoia_x.model_selection.train", "--incremental"],
+    #     "cwd": str(PROJECT_DIR),
+    #     "python": PY312,
+    #     "required": False,
+    #     "timeout": 600,  # 10min
+    # },
+    # ── 2.6. LSTM 预测+信号写入（已暂停-新模型开发中） ──
+    # {
+    #     "id": "lstm_predict",
+    #     "name": "LSTM 预测+信号写入",
+    #     "cmd": ["-m", "sequoia_x.model_selection.simulation.daily"],
+    #     "cwd": str(PROJECT_DIR),
+    #     "python": PY312,
+    #     "required": False,
+    #     "timeout": 900,  # 15min（包括股票池预测）
+    # },
     # ── 3. 模拟盘更新（策略选股后执行，T+1 模式） ──
     {
         "id": "simulation",
