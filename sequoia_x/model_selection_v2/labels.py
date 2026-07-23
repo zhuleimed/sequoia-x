@@ -273,7 +273,7 @@ def build_training_dataset(
         f"y2 均值={y2.mean():.4f}, "
         f"y3 均值={y3.mean():.4f}"
     )
-    return X, y1, y2, y3, date_list
+    return X, y1, y2, y3, all_dates
 
 
 # ════════════════════════════════════════════════════════════
