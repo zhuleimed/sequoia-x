@@ -1,1 +1,3 @@
-"""model_selection_v2 - 多任务树模型选股系统 V2."""
+"""model_selection_v2 - 逐日回测引擎。"""
+from .config import *  # noqa: F401, F403
+
