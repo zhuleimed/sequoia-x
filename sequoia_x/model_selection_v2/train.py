@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import numpy as np
 from pathlib import Path
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
