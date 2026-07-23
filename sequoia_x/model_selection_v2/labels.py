@@ -244,7 +244,7 @@ def build_training_dataset(
             done_dates.add(ref_date)
             # 每完成一批日期或每2分钟报告一次
             elapsed = time.time() - t0
-            if len(done_dates) > last_report and (len(done_dates) % 10 == 0 or elapsed - t0 > 120):
+            if len(done_dates) > last_report and (len(done_dates) % 10 == 0 or elapsed > 120):
                 last_report = len(done_dates)
                 logger.info(
                     f"  已完成 {len(done_dates)}/{len(dates)} 日期, "

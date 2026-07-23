@@ -41,6 +41,7 @@ def train_vol(
     X: np.ndarray, y: np.ndarray,
     cfg: V2Config | None = None,
     search_optuna: bool = True,
+    best_params: dict | None = None,
 ) -> CatBoostRegressor:
     """训练 CatBoost 波动率回归器。"""
     if cfg is None:
@@ -49,7 +50,9 @@ def train_vol(
     n_samples = X.shape[0]
     X_2d = X.reshape(n_samples, -1)
 
-    if search_optuna:
+    if best_params is not None:
+        pass  # 使用传入参数,跳过搜索和默认值
+    elif search_optuna:
         import optuna
         study = optuna.create_study(
             direction="minimize",

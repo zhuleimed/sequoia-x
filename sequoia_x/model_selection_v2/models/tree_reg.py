@@ -44,6 +44,7 @@ def train_reg(
     X: np.ndarray, y: np.ndarray,
     cfg: V2Config | None = None,
     search_optuna: bool = True,
+    best_params: dict | None = None,
 ) -> lgb.Booster:
     """训练 LightGBM 回归器。"""
     if cfg is None:
@@ -52,7 +53,9 @@ def train_reg(
     n_samples = X.shape[0]
     X_2d = X.reshape(n_samples, -1)
 
-    if search_optuna:
+    if best_params is not None:
+        pass  # 使用传入参数,跳过搜索和默认值
+    elif search_optuna:
         import optuna
         study = optuna.create_study(
             direction="minimize",

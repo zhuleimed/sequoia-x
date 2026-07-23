@@ -46,25 +46,60 @@ def train_all(
     if len(X) == 0:
         logger.error("无训练数据")
         return {}
+    n_total = len(X)
     logger.info(f"训练数据: X={X.shape}, {len(dates)} 个采样日期")
 
-    # 训练 T1
-    logger.info("── 训练 T1: XGBoost 分类器 ──")
-    t1 = time.time()
-    model_t1 = train_cls(X, y1, cfg, search_optuna=search_optuna)
-    logger.info(f"T1 耗时: {time.time()-t1:.0f}s")
+    # ═══════════════════════════════════════════════════
+    #  Optuna 加速：抽样 2 万搜索 → 全量重训
+    # ═══════════════════════════════════════════════════
+    OPTUNA_SAMPLE = 20000
+    if search_optuna and n_total > OPTUNA_SAMPLE:
+        logger.info(f"Phase 1: Optuna 搜索（抽样 {OPTUNA_SAMPLE}/{n_total}）")
+        idx = np.random.RandomState(cfg.random_seed).choice(
+            n_total, OPTUNA_SAMPLE, replace=False)
+        Xs, y1s, y2s, y3s = X[idx], y1[idx], y2[idx], y3[idx]
 
-    # 训练 T2
-    logger.info("── 训练 T2: LightGBM 回归器 ──")
-    t2 = time.time()
-    model_t2 = train_reg(X, y2, cfg, search_optuna=search_optuna)
-    logger.info(f"T2 耗时: {time.time()-t2:.0f}s")
+        # T1: XGBoost
+        m1 = train_cls(Xs, y1s, cfg, search_optuna=True)
+        bp1 = {k: m1.get_params()[k] for k in [
+            "max_depth", "learning_rate", "subsample", "colsample_bytree",
+            "reg_alpha", "reg_lambda", "min_child_weight"] if k in m1.get_params()}
+        logger.info(f"T1 best_params: {bp1}")
 
-    # 训练 T3
-    logger.info("── 训练 T3: CatBoost 回归器 ──")
-    t3 = time.time()
-    model_t3 = train_vol(X, y3, cfg, search_optuna=search_optuna)
-    logger.info(f"T3 耗时: {time.time()-t3:.0f}s")
+        # T2: LightGBM
+        m2 = train_reg(Xs, y2s, cfg, search_optuna=True)
+        bp2 = {k: m2.params.get(k, cfg.lgbm_params.get(k, [0,1])[0]) for k in [
+            "num_leaves", "learning_rate", "subsample", "colsample_bytree",
+            "reg_alpha", "reg_lambda", "min_child_samples"] if k in m2.params}
+        logger.info(f"T2 best_params: {bp2}")
+
+        # T3: CatBoost
+        m3 = train_vol(Xs, y3s, cfg, search_optuna=True)
+        bp3 = {k: m3.get_params()[k] for k in [
+            "depth", "learning_rate", "l2_leaf_reg", "random_strength"]
+               if k in m3.get_params()}
+        logger.info(f"T3 best_params: {bp3}")
+
+        logger.info(f"Phase 2: 全量训练（{n_total} 样本，用最佳参数）")
+        model_t1 = train_cls(X, y1, cfg, search_optuna=False, best_params=bp1)
+        model_t2 = train_reg(X, y2, cfg, search_optuna=False, best_params=bp2)
+        model_t3 = train_vol(X, y3, cfg, search_optuna=False, best_params=bp3)
+    else:
+        # 默认参数快速训练（或数据量小直接 Optuna）
+        logger.info("── 训练 T1: XGBoost 分类器 ──")
+        t1 = time.time()
+        model_t1 = train_cls(X, y1, cfg, search_optuna=search_optuna)
+        logger.info(f"T1 耗时: {time.time()-t1:.0f}s")
+
+        logger.info("── 训练 T2: LightGBM 回归器 ──")
+        t2 = time.time()
+        model_t2 = train_reg(X, y2, cfg, search_optuna=search_optuna)
+        logger.info(f"T2 耗时: {time.time()-t2:.0f}s")
+
+        logger.info("── 训练 T3: CatBoost 回归器 ──")
+        t3 = time.time()
+        model_t3 = train_vol(X, y3, cfg, search_optuna=search_optuna)
+        logger.info(f"T3 耗时: {time.time()-t3:.0f}s")
 
     elapsed = time.time() - t0
     logger.info(f"全部训练完成: {elapsed:.0f}s ({elapsed/60:.1f}min)")

@@ -54,6 +54,7 @@ def train_cls(
     X: np.ndarray, y: np.ndarray,
     cfg: V2Config | None = None,
     search_optuna: bool = True,
+    best_params: dict | None = None,
 ) -> xgb.XGBClassifier:
     """训练 XGBoost 分类器。
 
@@ -61,10 +62,11 @@ def train_cls(
         X: (n_samples, window, n_features)
         y: (n_samples,) 二分类标签
         cfg: 配置
-        search_optuna: True=Optuna搜索超参, False=默认参数快速训练
+        search_optuna: True=Optuna搜索, False=默认参数
+        best_params: 指定参数（跳过搜索和默认值）
 
     Returns:
-        训练好的 XGBoost 模型 + 特征重要性
+        训练好的 XGBoost 模型
     """
     if cfg is None:
         cfg = get_config()
@@ -72,7 +74,9 @@ def train_cls(
     n_samples = X.shape[0]
     X_2d = X.reshape(n_samples, -1)
 
-    if search_optuna:
+    if best_params is not None:
+        pass  # 使用传入参数
+    elif search_optuna:
         import optuna
         study = optuna.create_study(
             direction="minimize",
