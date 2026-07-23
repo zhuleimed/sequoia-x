@@ -418,8 +418,10 @@ class DataSync:
         """
         active = self.get_active_stocks()
         if not active.get("symbols"):
-            logger.warning("sync_stock_list: get_active_stocks 返回空")
-            return {"status": "error", "new_listed": [], "delisted": [], "total": 0}
+            # baostock 偶发返回空（网络波动/服务器瞬时故障），
+            # 不阻断管线——跳过股票列表更新，继续日线同步（Tencent/Sina 不依赖 baostock）
+            logger.warning("sync_stock_list: get_active_stocks 返回空，跳过股票列表更新")
+            return {"status": "ok", "new_listed": [], "delisted": [], "total": 0, "skipped": True}
 
         try:
             with sqlite3.connect(self.db_path) as conn:
