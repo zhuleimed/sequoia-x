@@ -20,9 +20,10 @@ logger = get_logger(__name__)
 def _get_sample_dates(engine: DataEngine, cfg: V2Config) -> list[str]:
     """获取采样日期列表：每月 2 天（月初 5 日 + 月中 15 日）。
 
-    从 stock_daily 表查询 sample_start ~ sample_end 范围内的非周末交易日。
+    自动跳过数据不足的早期日期（需 window+30=150 个历史交易日）。
     """
     import pandas as pd
+    min_history = cfg.window + 30  # 特征构建需要的最少历史天数
     conn = sqlite3.connect(engine.db_path)
     all_dates = pd.read_sql(
         "SELECT DISTINCT date FROM stock_daily WHERE date >= ? AND date <= ? ORDER BY date",
@@ -30,10 +31,22 @@ def _get_sample_dates(engine: DataEngine, cfg: V2Config) -> list[str]:
     )["date"].tolist()
     conn.close()
 
+    if len(all_dates) <= min_history:
+        logger.warning(f"总交易天数({len(all_dates)})不足最小历史需求({min_history})")
+        return []
+
+    # 跳过前 min_history 个交易日（数据不足以构建特征）
+    valid_start_idx = min_history
+    logger.info(
+        f"跳过前 {valid_start_idx} 个交易日（需>{min_history}天历史），"
+        f"首个有效采样日: {all_dates[valid_start_idx]}"
+    )
+
     # 每月取 2 天：第 5 个交易日 和 第 15 个交易日（或最接近的）
+    valid_dates = all_dates[valid_start_idx:]
     monthly = {}
-    for d in all_dates:
-        ym = d[:7]  # YYYY-MM
+    for d in valid_dates:
+        ym = d[:7]
         if ym not in monthly:
             monthly[ym] = []
         monthly[ym].append(d)
@@ -41,11 +54,11 @@ def _get_sample_dates(engine: DataEngine, cfg: V2Config) -> list[str]:
     sample_dates = []
     for ym, dates in sorted(monthly.items()):
         if len(dates) >= 15:
-            sample_dates.append(dates[4])   # 第 5 个交易日
-            sample_dates.append(dates[14])  # 第 15 个交易日
+            sample_dates.append(dates[4])
+            sample_dates.append(dates[14])
         elif len(dates) >= 5:
             sample_dates.append(dates[4])
-            sample_dates.append(dates[-1])  # 最后一天
+            sample_dates.append(dates[-1])
 
     return sample_dates
 
