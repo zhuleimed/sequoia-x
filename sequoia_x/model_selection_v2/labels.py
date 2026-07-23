@@ -149,19 +149,17 @@ def _compute_label_t3(
     return min(vol, 2.0)
 
 
-def _process_date_stocks(args: tuple) -> tuple[str, list, list, list, list]:
-    """Worker：处理一个采样日期的全部股票，返回该日所有有效样本。
+def _process_date_stocks(args: tuple) -> tuple[str, str, int]:
+    """Worker：处理一个采样日期，结果写入临时 .npz 文件，返回 (ref_date, tmp_path, n_samples)。
 
-    仅用 SQLite 读取数据，不初始化 baostock（避免多进程争用）。
+    不通过 multiprocessing pipe 传大数据，避免序列化 OOM/断管。
     """
+    import tempfile
     ref_date, symbols, cfg = args
-    # 轻量 engine：跳过 baostock 登录，仅设 db_path 用于 get_ohlcv (SQLite)
     from sequoia_x.core.config import Settings as _Settings
-    _settings = _Settings()
-    _settings.baostock_enabled = False  # 阻止 baostock 登录
-    engine = DataEngine(_settings)
+    engine = DataEngine(_Settings())
 
-    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
+    X_list, y1_list, y2_list, y3_list = [], [], [], []
     for symbol in symbols:
         try:
             X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
@@ -176,11 +174,16 @@ def _process_date_stocks(args: tuple) -> tuple[str, list, list, list, list]:
             y1_list.append(y1)
             y2_list.append(y2)
             y3_list.append(y3)
-            date_list.append(ref_date)
         except Exception:
             continue
 
-    return ref_date, X_list, y1_list, y2_list, y3_list
+    # 写入临时文件（避免 pipe 传输大数据）
+    tmp = tempfile.NamedTemporaryFile(suffix=".npz", delete=False, prefix="v2data_")
+    np.savez_compressed(tmp, X=np.array(X_list, dtype=np.float32) if X_list else np.array([]),
+                        y1=np.array(y1_list, dtype=np.int32), y2=np.array(y2_list, dtype=np.float32),
+                        y3=np.array(y3_list, dtype=np.float32))
+    tmp.close()
+    return ref_date, tmp.name, len(X_list)
 
 
 def build_training_dataset(
@@ -213,41 +216,54 @@ def build_training_dataset(
 
     t0 = time.time()
 
-    # 多进程并行：每个 worker 处理一个日期（所有股票）
+    # 多进程并行：每个 worker 处理一个日期，结果写入临时 .npz 文件
     tasks = [(d, symbols, cfg) for d in dates]
-    X_list, y1_list, y2_list, y3_list, date_list = [], [], [], [], []
+    all_X, all_y1, all_y2, all_y3, all_dates = [], [], [], [], []
     completed = 0
+    tmp_files: list[str] = []
 
     with Pool(processes=n_workers) as pool:
-        # 使用 imap_unordered 实时报告进度
-        for ref_date, x_chunk, y1_chunk, y2_chunk, y3_chunk in pool.imap_unordered(
+        for ref_date, tmp_path, n_samples in pool.imap_unordered(
             _process_date_stocks, tasks
         ):
-            X_list.extend(x_chunk)
-            y1_list.extend(y1_chunk)
-            y2_list.extend(y2_chunk)
-            y3_list.extend(y3_chunk)
-            date_list.extend([ref_date] * len(x_chunk))
+            if n_samples > 0:
+                data = np.load(tmp_path)
+                all_X.append(data["X"])
+                all_y1.append(data["y1"])
+                all_y2.append(data["y2"])
+                all_y3.append(data["y3"])
+                all_dates.extend([ref_date] * n_samples)
+                data.close()
+            tmp_files.append(tmp_path)
             completed += 1
             if completed % 10 == 0 or completed == 1:
                 elapsed = time.time() - t0
                 logger.info(
                     f"  已完成 {completed}/{len(dates)} 日期, "
-                    f"累计 {len(X_list)} 样本, {elapsed:.0f}s"
+                    f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s"
                 )
 
-    elapsed = time.time() - t0
-    logger.info(f"数据集构建完成: {len(X_list)} 样本, {elapsed:.0f}s")
+    # 清理临时文件
+    import os as _os
+    for f in tmp_files:
+        try:
+            _os.unlink(f)
+        except OSError:
+            pass
 
-    if not X_list:
+    elapsed = time.time() - t0
+    total_samples = sum(len(x) for x in all_X)
+    logger.info(f"数据集构建完成: {total_samples} 样本, {elapsed:.0f}s")
+
+    if total_samples == 0:
         return (np.array([]).reshape(0, cfg.window, 0),
                 np.array([]), np.array([]), np.array([]),
                 [])
 
-    X = np.stack(X_list, axis=0)
-    y1 = np.array(y1_list, dtype=np.int32)
-    y2 = np.array(y2_list, dtype=np.float32)
-    y3 = np.array(y3_list, dtype=np.float32)
+    X = np.concatenate(all_X, axis=0)
+    y1 = np.concatenate(all_y1, axis=0).astype(np.int32)
+    y2 = np.concatenate(all_y2, axis=0).astype(np.float32)
+    y3 = np.concatenate(all_y3, axis=0).astype(np.float32)
 
     logger.info(
         f"X.shape={X.shape}, "
