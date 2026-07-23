@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import json
 import os
 import sys
@@ -126,7 +127,7 @@ def run_phase1(model_t1, model_t2, model_t3) -> None:
         xs, symbols = [], []
         for symbol in base_pool:
             try:
-                X = build_prediction_features(symbol, engine, cfg)
+                X = build_prediction_features(symbol, engine, cfg, ref_date=prev_date)
                 if X is not None:
                     xs.append(X)
                     symbols.append(symbol)
@@ -136,19 +137,20 @@ def run_phase1(model_t1, model_t2, model_t3) -> None:
         if not xs:
             continue
 
-        X_batch = __import__('numpy').vstack(xs)
+        X_batch = np.vstack(xs)
         prob_up = predict_cls(model_t1, X_batch)
         excess_ret = predict_reg(model_t2, X_batch)
         volatility = predict_vol(model_t3, X_batch)
 
         day_preds = []
         for i, sym in enumerate(symbols):
-            if __import__('numpy').isfinite(prob_up[i]):
-                day_preds.append([sym, [
-                    round(float(prob_up[i]), 6),
-                    round(float(excess_ret[i]), 6),
-                    round(float(volatility[i]), 6),
-                ]])
+            if np.isfinite(prob_up[i]):
+                day_preds.append({
+                    "symbol": sym,
+                    "prob_up": round(float(prob_up[i]), 6),
+                    "excess_ret": round(float(excess_ret[i]), 6),
+                    "volatility": round(float(volatility[i]), 6),
+                })
 
         if day_preds:
             cache[prev_date] = day_preds

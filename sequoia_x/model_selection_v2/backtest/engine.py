@@ -101,7 +101,7 @@ class V2BacktestEngine:
         xs, symbols = [], []
         for symbol in pool:
             try:
-                X = build_prediction_features(symbol, self.engine, self.cfg)
+                X = build_prediction_features(symbol, self.engine, self.cfg, ref_date=ref_date)
                 if X is not None:
                     xs.append(X)
                     symbols.append(symbol)

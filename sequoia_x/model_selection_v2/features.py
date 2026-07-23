@@ -333,8 +333,15 @@ def build_batch_features(
 def build_prediction_features(
     symbol: str, engine: DataEngine,
     cfg: V2Config | None = None,
+    ref_date: str | None = None,
 ) -> np.ndarray | None:
-    """为单只股票构建最新预测特征。
+    """为单只股票构建预测特征（严格避免 look-ahead bias）。
+
+    Args:
+        symbol: 股票代码。
+        engine: DataEngine 实例。
+        cfg: 配置。
+        ref_date: 截止日期（仅使用此日期及之前的数据），None=使用全部最新数据。
 
     Returns:
         X: (1, window, n_features)，数据不足返回 None。
@@ -346,11 +353,20 @@ def build_prediction_features(
     if df is None or len(df) < cfg.window + 10:
         return None
 
+    # 严格截止日期过滤（消除 look-ahead bias）
+    if ref_date is not None:
+        df = df[df["date"] <= ref_date].copy()
+        if len(df) < cfg.window + 10:
+            return None
+
     df_index = None
     try:
         df_index = engine.get_ohlcv("000300")
-        if df_index is not None and len(df_index) != len(df):
-            df_index = None
+        if df_index is not None:
+            if ref_date is not None:
+                df_index = df_index[df_index["date"] <= ref_date].copy()
+            if len(df_index) != len(df):
+                df_index = None
     except Exception:
         df_index = None
 
