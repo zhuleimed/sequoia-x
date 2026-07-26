@@ -187,7 +187,7 @@ def build_daily_summary_text(
         lines.append("  ▶ 当前持仓")
         # 按收益率降序排列
         sorted_pos = sorted(positions, key=lambda p: p.get("pnl_pct", 0), reverse=True)
-        for i, pos in enumerate(sorted_pos[:10], 1):
+        for i, pos in enumerate(sorted_pos, 1):
             symbol = pos.get("symbol", "")
             name = _get_name(symbol)
             days = pos.get("hold_days", 0)
@@ -206,8 +206,7 @@ def build_daily_summary_text(
                 f"({pnl_pct:+.2%}) {days}日"
             )
 
-        if len(positions) > 10:
-            lines.append(f"    ... 还有 {len(positions) - 10} 只")
+        pass  # 全部展示，不再截断
 
     lines.append("")
 

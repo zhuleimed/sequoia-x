@@ -287,8 +287,10 @@ class SimEngine:
         if not signals:
             return [], []
 
-        # 检查当前持仓数量（卖出已执行完，此时仓位已释放）
+        # 检查当前持仓（卖出已执行完，此时仓位已释放）
         current_positions = get_all_positions(self.db_path)
+        # 已在持仓中的股票不允许重复买入（防止同一股票多笔仓位）
+        held_symbols = {p["symbol"] for p in current_positions}
         if len(current_positions) >= _MAX_POS:
             logger.info(f"sim 买: 持仓已达上限({_MAX_POS}只)，取消所有买入信号")
             for s in signals:
@@ -304,6 +306,14 @@ class SimEngine:
         for signal in signals[:slots_available]:
             sym = signal["symbol"]
             cancel_reason = None
+
+            # 已在持仓中的股票不允许重复买入
+            if sym in held_symbols:
+                cancel_reason = f"已在持仓中（{sym}）"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.info(f"sim 买 {sym}: 已在持仓中，跳过")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
+                continue
 
             today_data = self._get_today_data(sym, today_str)
             if today_data is None:

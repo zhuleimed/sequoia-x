@@ -186,32 +186,110 @@ def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray
             np.array(y3_list, dtype=np.float32))
 
 
+def _dataset_cache_path(cfg: V2Config, symbols: list[str]) -> tuple[Path, Path]:
+    """生成数据集缓存路径。基于参数哈希确保参数变更后自动重建。
+
+    Returns:
+        (cache_dir, metadata_file)
+    """
+    import hashlib, json
+    from pathlib import Path
+
+    # 缓存键：股票数量+时间范围+窗口（变化即重建）
+    key_data = {
+        "n_stocks": len(symbols),
+        "sample_start": cfg.sample_start,
+        "sample_end": cfg.sample_end,
+        "window": cfg.window,
+    }
+    key_str = json.dumps(key_data, sort_keys=True)
+    key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
+
+    cache_dir = Path("data/cache/v2_dataset") / key_hash
+    return cache_dir, cache_dir / "metadata.json"
+
+
+def _load_cached_dataset(cache_dir: Path, metadata_path: Path):
+    """从缓存加载数据集。不存在则返回 None。"""
+    import json
+    if not metadata_path.exists():
+        return None
+    try:
+        meta = json.loads(metadata_path.read_text())
+        X = np.load(str(cache_dir / "X.npy"), mmap_mode="r")
+        # mmap 返回只读数组，训练时需要可写 → 复制到内存
+        # 但对于 Walk-Forward，X 只需要切分不需要修改 → mmap 即可
+        y1 = np.load(str(cache_dir / "y1.npy"))
+        y2 = np.load(str(cache_dir / "y2.npy"))
+        y3 = np.load(str(cache_dir / "y3.npy"))
+        with open(cache_dir / "dates.json") as f:
+            dates = json.load(f)
+        logger.info(
+            f"从缓存加载数据集: {meta['n_samples']} 样本, "
+            f"X={meta['X_shape']}, 缓存={cache_dir}"
+        )
+        return X, y1, y2, y3, dates
+    except Exception as e:
+        logger.warning(f"缓存加载失败({e})，将重新构建")
+        return None
+
+
+def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates):
+    """保存数据集到缓存目录。"""
+    import json
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.save(str(cache_dir / "X.npy"), X)
+    np.save(str(cache_dir / "y1.npy"), y1)
+    np.save(str(cache_dir / "y2.npy"), y2)
+    np.save(str(cache_dir / "y3.npy"), y3)
+    with open(cache_dir / "dates.json", "w") as f:
+        json.dump(dates, f)
+    meta = {
+        "n_samples": len(X),
+        "X_shape": list(X.shape),
+        "created": str(datetime.now()),
+    }
+    with open(cache_dir / "metadata.json", "w") as f:
+        json.dump(meta, f)
+    logger.info(f"数据集已缓存: {cache_dir} ({X.nbytes / 1e9:.1f}GB)")
+
+
 def build_training_dataset(
     engine: DataEngine, cfg: V2Config | None = None,
     symbols: list[str] | None = None,
     n_workers: int = 8,
+    force_rebuild: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """构建完整训练数据集（多进程并行，小chunk无磁盘中转）。
+    """构建完整训练数据集（多进程并行，支持磁盘缓存）。
 
     将每个日期按 ~200 只股票切分为小任务，worker 直接经管道返回结果。
-    避免大 npz 文件 I/O 和 pipe 阻塞。
+    首次构建后自动缓存到 data/cache/v2_dataset/，后续调用秒级加载。
 
     Args:
         engine: DataEngine 实例（仅用于获取采样日期和股票池）。
         cfg: V2Config 配置。
         symbols: 股票列表，默认从 engine.get_base_stock_pool() 获取。
         n_workers: 并行进程数（默认 8）。
+        force_rebuild: True 强制重建，忽略缓存。
 
     Returns:
         (X, y1, y2, y3, date_labels)
     """
     import time
     from multiprocessing import Pool
+    from pathlib import Path
 
     if cfg is None:
         cfg = get_config()
     if symbols is None:
         symbols = engine.get_base_stock_pool()
+
+    # ── 缓存检查 ──
+    cache_dir, meta_path = _dataset_cache_path(cfg, symbols)
+    if not force_rebuild:
+        cached = _load_cached_dataset(cache_dir, meta_path)
+        if cached is not None:
+            return cached
 
     dates = _get_sample_dates(engine, cfg)
     logger.info(f"采样日期: {len(dates)} 天 ({dates[0]} ~ {dates[-1]}), "
@@ -246,10 +324,13 @@ def build_training_dataset(
             elapsed = time.time() - t0
             if len(done_dates) > last_report and (len(done_dates) % 10 == 0 or elapsed > 120):
                 last_report = len(done_dates)
+                rate = elapsed / len(done_dates) if len(done_dates) > 0 else 0
+                eta = rate * (len(dates) - len(done_dates))
                 logger.info(
                     f"  已完成 {len(done_dates)}/{len(dates)} 日期, "
                     f"{done_chunks}/{len(tasks)} chunks, "
-                    f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s"
+                    f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s, "
+                    f"速率 {rate:.0f}s/日期, 预计剩余 {eta:.0f}s ({eta/60:.0f}min)"
                 )
 
     elapsed = time.time() - t0
@@ -272,6 +353,10 @@ def build_training_dataset(
         f"y2 均值={y2.mean():.4f}, "
         f"y3 均值={y3.mean():.4f}"
     )
+
+    # ── 缓存到磁盘 ──
+    _save_dataset_cache(cache_dir, X, y1, y2, y3, all_dates)
+
     return X, y1, y2, y3, all_dates
 
 

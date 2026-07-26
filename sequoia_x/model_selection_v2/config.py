@@ -59,8 +59,41 @@ class V2Config:
         "random_strength": (0.1, 10.0),
     })
 
+    # ── T4 LSTM-Transformer ──
+    #   模型架构：LSTM → TransformerBlock × N → LSTM → Dense → 回归
+    #   搜索 6 个核心参数，其余固定为经验最优值（与 V1 对齐）：
+    #     lstm_units2  = lstm_units // 2
+    #     ff_dim        = lstm_units * 2
+    #     dense_units   = lstm_units2
+    #     num_heads     = 4（固定）
+    #     optimizer     = "adam"（固定）
+    #     huber_delta   = 0.1（固定，适合±10%以内的超额收益）
+    #     gradient_clip = 1.0（固定）
+    lstm_units: int = 128                # LSTM1 单元数（默认值，Optuna 覆盖）
+    lstm_units2: int = 64               # LSTM2 单元数（= units // 2）
+    lstm_num_heads: int = 4             # MultiHeadAttention 头数
+    lstm_ff_dim: int = 256              # Transformer FFN 隐藏维度（= units * 2）
+    lstm_num_transformers: int = 2      # Transformer 层数
+    lstm_dropout_rate: float = 0.3      # Dropout 比率
+    lstm_dense_units: int = 128         # 中间 Dense 单元数（= lstm_units2）
+    lstm_learning_rate: float = 0.001   # 学习率（默认值，Optuna 覆盖）
+    lstm_l2_reg: float = 1e-4           # L2 正则化强度（默认值，Optuna 覆盖）
+    lstm_huber_delta: float = 0.1       # Huber loss delta（±10% 内 MSE，之外 MAE）
+    lstm_gradient_clip_norm: float = 1.0  # 全局梯度范数裁剪
+    lstm_batch_size: int = 64           # 批次大小（默认值，Optuna 覆盖）
+    lstm_epochs: int = 200              # 全量训练最大轮数
+    lstm_optuna_epochs: int = 100       # Optuna 每 trial 最大轮数
+    lstm_early_stop_patience: int = 25  # 早停耐心
+    lstm_reduce_lr_patience: int = 10   # ReduceLROnPlateau 耐心
+    lstm_min_lr: float = 1e-6           # 最低学习率
+    lstm_optuna_n_trials: int = 18      # Optuna 搜索 trial 数（18: 20h内完成，Hyperband均匀分配）
+    lstm_optuna_timeout: int = 86400    # Optuna 超时 24h（实际 ~6-10h）
+    lstm_tf_intraop_threads: int = 16   # TF 单个 op 内部并行线程数
+    lstm_tf_interop_threads: int = 8    # TF 独立 op 间并行线程数
+    lstm_omp_num_threads: int = 10      # BLAS/MKL 数值计算线程数
+
     # ── 硬件 ──
-    n_jobs: int = 8
+    n_jobs: int = 8              # 树模型内部并行线程（T1+T2+T3 并行时 3×8=24核）
 
     # ── Walk-Forward ──
     purge_gap: int = 22          # 训练/测试间隔（交易日）

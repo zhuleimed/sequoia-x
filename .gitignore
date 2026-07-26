@@ -22,8 +22,14 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Output
+output/
+
+# ML temp
+catboost_info/
+optuna_study.db
+
 # Test
 .pytest_cache/
 hypothesis/
 .hypothesis/
-optuna_study.db

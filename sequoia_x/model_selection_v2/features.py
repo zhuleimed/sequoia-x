@@ -4,8 +4,11 @@
 第 T 日的特征仅使用 T 日及之前已知的数据。
 
 特征分组：
-  价格收益(8) + 均线偏离(6) + 量能(8) + 技术指标(14)
-  + 波动率(4) + 大盘关联(8) + 价格形态(7) + 估值指标(7) = 62 维
+  价格收益(8) + 均线偏离(6) + 量能(8) + 技术指标(11)
+  + 波动率(4) + 大盘关联(8) + 价格形态(7)
+  + 最大回撤(3) + 收益分布(4) + 时间日历(4) + 价格位置(3)
+  + 估值指标(4: peTTM+pbMRQ+分位) = 70 维
+  (padding 到 80)
 """
 from __future__ import annotations
 import numpy as np
@@ -231,8 +234,80 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
     shadow = high - low
     feature_list.append(body / np.maximum(shadow, 1e-10))
 
-    # ── 8. 估值指标特征 (7维) ──
-    for col in ["peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"]:
+    # ── 7b. 最大回撤特征 (3维) ──
+    # 20日滚动最大回撤：从20日高点跌了多少
+    high_20d_roll = pd.Series(high).rolling(20, min_periods=1).max().values
+    drawdown_20d = close / np.maximum(high_20d_roll, 1e-10) - 1.0  # <=0 的值
+    feature_list.append(drawdown_20d)
+    # 60日滚动最大回撤
+    high_60d_roll = pd.Series(high).rolling(60, min_periods=1).max().values
+    drawdown_60d = close / np.maximum(high_60d_roll, 1e-10) - 1.0
+    feature_list.append(drawdown_60d)
+    # 恢复率：从60日最低点恢复了多少（0=还在底部，1=回到顶部）
+    low_60d_roll = pd.Series(low).rolling(60, min_periods=1).min().values
+    recovery = (close - low_60d_roll) / np.maximum(high_60d_roll - low_60d_roll, 1e-10)
+    recovery = np.clip(recovery, 0.0, 1.0)
+    feature_list.append(recovery)
+
+    # ── 7c. 收益分布特征 (4维) ──
+    # 20日收益率偏度：正偏=稳步上涨，负偏=暴涨暴跌
+    ret_skew = pd.Series(ret_1d).rolling(20, min_periods=5).skew().fillna(0.0).values
+    feature_list.append(np.clip(ret_skew, -3.0, 3.0))
+    # 20日收益率峰度（超额峰度）：高=极端行情，低=平稳
+    ret_kurt = pd.Series(ret_1d).rolling(20, min_periods=5).kurt().fillna(0.0).values
+    feature_list.append(np.clip(ret_kurt, -3.0, 10.0))
+    # 20日内上涨天数占比
+    up_days = (ret_1d > 0).astype(float)
+    up_ratio = pd.Series(up_days).rolling(20, min_periods=1).mean().values
+    feature_list.append(up_ratio)
+    # 非对称波动：下跌日波动 / 全样本波动（>1=下跌波动更大）
+    ret_neg = np.where(ret_1d < 0, ret_1d, 0.0)
+    neg_vol = pd.Series(ret_neg).rolling(20, min_periods=5).std().fillna(0.0).values
+    all_vol = pd.Series(ret_1d).rolling(20, min_periods=5).std().fillna(0.0).values
+    asym_vol = neg_vol / np.maximum(all_vol, 1e-6)
+    feature_list.append(np.clip(asym_vol, 0.0, 3.0))
+
+    # ── 7d. 时间日历特征 (4维) ──
+    # 从 date 列提取时间信息
+    if "date" in df.columns:
+        dates_pd = pd.to_datetime(df["date"])
+        weekday = dates_pd.dt.dayofweek.values.astype(float)  # 0=周一
+        day_of_month = dates_pd.dt.day.values.astype(float)
+        month = dates_pd.dt.month.values.astype(float)
+        # 季末标记：3/6/9/12月的最后5个交易日
+        is_quarter_end = np.zeros(n)
+        for qm in [3, 6, 9, 12]:
+            qm_mask = month == qm
+            if qm_mask.sum() > 0:
+                qm_days = day_of_month[qm_mask]
+                threshold = np.sort(qm_days)[-5] if len(qm_days) >= 5 else qm_days[0]
+                is_quarter_end[qm_mask & (day_of_month >= threshold)] = 1.0
+    else:
+        weekday = np.zeros(n)
+        day_of_month = np.zeros(n)
+        month = np.zeros(n)
+        is_quarter_end = np.zeros(n)
+    # sin/cos 编码保证周期性（周一和周五在圆的同一侧）
+    feature_list.append(np.sin(2 * np.pi * weekday / 5.0))
+    feature_list.append(np.cos(2 * np.pi * weekday / 5.0))
+    feature_list.append(day_of_month / 31.0)        # 归一化到 [0,1]
+    feature_list.append(is_quarter_end)              # 0/1 布尔
+
+    # ── 7e. 价格位置特征 (3维) ──
+    # 收盘在今日波幅中的位置（0=最低，1=最高）
+    close_position = (close - low) / np.maximum(high - low, 1e-10)
+    feature_list.append(close_position)
+    # 5日平均绝对跳空缺口：反映近期开盘情绪的强度
+    avg_gap_5d = pd.Series(np.abs(gap)).rolling(5, min_periods=1).mean().values
+    feature_list.append(avg_gap_5d)
+    # 5日平均振幅 vs 20日平均振幅（波动强度变化）
+    range_5d = pd.Series(hl_ratio).rolling(5, min_periods=1).mean().values
+    range_20d = pd.Series(hl_ratio).rolling(20, min_periods=1).mean().values
+    feature_list.append(range_5d / np.maximum(range_20d, 1e-10))
+
+    # ── 8. 估值指标特征 (4维: peTTM + pbMRQ + 各自60日分位) ──
+    # psTTM/pcfNcfTTM 因数据源不稳定已移除，仅保留腾讯实时行情可获取的PE/PB
+    for col in ["peTTM", "pbMRQ"]:
         if col in df.columns:
             val = df[col].values.astype(float)
             val = np.nan_to_num(val, nan=0.0, posinf=0.0, neginf=0.0)
@@ -244,8 +319,8 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
             feature_list.append(rank)
         else:
             feature_list.extend([np.zeros(n), np.zeros(n)])
-    # 如果只有一个估值字段有数据，补齐不足7维
-    while len(feature_list) < 69:  # 目标维数
+    # padding 到目标维度（预留扩展空间）
+    while len(feature_list) < 80:
         feature_list.append(np.zeros(n))
 
     # ── 9. 组装与归一化 ──
