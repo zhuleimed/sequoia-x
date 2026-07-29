@@ -20,11 +20,42 @@ from pathlib import Path
 from typing import Optional
 
 # ── CPU-only + TF 线程配置（必须在 import tensorflow 之前）──
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# TF 线程数必须在 import tensorflow 之前设置，否则 TF 初始化后无法更改。
+# 之前用 setdefault 放在 train_lstm() 内部，TF 已初始化→设置无效→单核运行（29min/epoch）。
+# 修复：在此处直接用 os.environ assignment 覆盖，确保 TF 初始化前生效。
+from sequoia_x.model_selection_v2.config import get_config  # 不依赖 TF，可安全导入
+_cfg = get_config()
+os.environ["OMP_NUM_THREADS"] = str(_cfg.lstm_omp_num_threads)
+os.environ["TF_NUM_INTRAOP_THREADS"] = str(_cfg.lstm_tf_intraop_threads)
+os.environ["TF_NUM_INTEROP_THREADS"] = str(_cfg.lstm_tf_interop_threads)
 
 import numpy as np
 import optuna
 import tensorflow as tf
+
+# ── 显式设置 TF 线程数（env var 已设置，再用 Python API 显式确认，避免 get_* 返回 0 误导）──
+#    TF_NUM_INTRAOP_THREADS / TF_NUM_INTEROP_THREADS 在 TF 初始化时被读取，
+#    但 tf.config.threading.get_*() 只返回通过 Python API 显式设置的值（否则返回 0）。
+#    此处调用 set_* 确保 get_* 诊断日志显示实际值。
+_intra_val = int(os.environ.get("TF_NUM_INTRAOP_THREADS", 16))
+_inter_val = int(os.environ.get("TF_NUM_INTEROP_THREADS", 8))
+_omp_val = int(os.environ.get("OMP_NUM_THREADS", 10))
+tf.config.threading.set_intra_op_parallelism_threads(_intra_val)
+tf.config.threading.set_inter_op_parallelism_threads(_inter_val)
+
+# ── 启动诊断：确认 TF 线程配置已生效 ──
+_log_tf_threads = tf.config.threading.get_intra_op_parallelism_threads()
+_log_tf_inter_op = tf.config.threading.get_inter_op_parallelism_threads()
+_log_cpu_count = os.cpu_count()
+_log_msg = (
+    f"[T4 启动诊断] CPU={_log_cpu_count}核 | "
+    f"TF_INTRA={_log_tf_threads} TF_INTER={_log_tf_inter_op} "
+    f"OMP_NUM_THREADS={_omp_val}"
+)
+# 此诊断信息会在 train_lstm() 首次调用 logger 时通过实际日志确认
+# （模块导入阶段 logger 可能尚未初始化）
 from sklearn.model_selection import TimeSeriesSplit
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.layers import (
@@ -265,10 +296,10 @@ def _build_objective(
     def objective(trial: optuna.Trial) -> float:
         # ── 6 个核心搜索参数 ──
         units = trial.suggest_int("lstm_units", 64, 320, step=32)
-        num_tf = trial.suggest_int("num_transformers", 1, 3)
+        num_tf = trial.suggest_int("num_transformers", 0, 3)
         dropout = trial.suggest_float("dropout_rate", 0.2, 0.5)
         lr = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
-        l2 = trial.suggest_float("l2_reg", 1e-6, 1e-2, log=True)
+        l2 = trial.suggest_float("l2_reg", 1e-8, 1e-3, log=True)
         batch = trial.suggest_categorical("batch_size", [32, 64, 128])
 
         # ── 推导参数 ──
@@ -338,13 +369,15 @@ def _build_objective(
 # ════════════════════════════════════════════════════════════════
 
 class _EpochProgressLogger(tf.keras.callbacks.Callback):
-    """每 N 个 epoch 打印一次训练/验证 loss，追踪最佳 val_loss。"""
+    """每 N 个 epoch 打印训练/验证 loss + 耗时 + CPU 利用率，追踪最佳 val_loss。"""
 
     def __init__(self, log_every: int = 10):
         super().__init__()
         self.log_every = log_every
         self.best_val = float("inf")
         self.best_epoch = 0
+        self._epoch_start = time.time()
+        self._train_start = time.time()
 
     def on_epoch_end(self, epoch: int, logs: dict | None = None):
         logs = logs or {}
@@ -354,11 +387,26 @@ class _EpochProgressLogger(tf.keras.callbacks.Callback):
         if is_best:
             self.best_val = val
             self.best_epoch = epoch
+
+        now = time.time()
+        epoch_sec = now - self._epoch_start
+        total_sec = now - self._train_start
+        self._epoch_start = now
+
         if epoch % self.log_every == 0 or is_best or epoch == 1:
             best_mark = " ★" if is_best else ""
+            # CPU 利用率（本进程累计CPU时间 / 墙钟时间，粗略估计并行度）
+            try:
+                import resource
+                _cpu_time = sum(resource.getrusage(resource.RUSAGE_SELF)[:2])
+                _cpu_ratio = _cpu_time / total_sec if total_sec > 0 else 0
+                _cpu_str = f", CPU≈{_cpu_ratio:.1f}x"
+            except Exception:
+                _cpu_str = ""
             logger.info(
                 f"  T4 Epoch {epoch:3d}/{self.params.get('epochs', '?')}{best_mark} | "
                 f"loss={logs.get('loss', 0):.4f} val={val:.4f} | "
+                f"{epoch_sec:.0f}s/epoch, {total_sec/60:.0f}min total{_cpu_str} | "
                 f"最佳轮={self.best_epoch}({self.best_val:.4f})"
             )
 
@@ -391,77 +439,94 @@ def train_lstm(
     if cfg is None:
         cfg = get_config()
 
-    # ── 配置 TF 线程（CPU-only 多核利用）──
-    os.environ.setdefault("OMP_NUM_THREADS", str(cfg.lstm_omp_num_threads))
-    os.environ.setdefault("TF_NUM_INTRAOP_THREADS", str(cfg.lstm_tf_intraop_threads))
-    os.environ.setdefault("TF_NUM_INTEROP_THREADS", str(cfg.lstm_tf_interop_threads))
+    # ── TF 线程已在模块导入时配置（import tensorflow 之前），此处保留注释说明 ──
+    # OMP_NUM_THREADS / TF_NUM_INTRAOP_THREADS / TF_NUM_INTEROP_THREADS
+    # 已通过 os.environ assigment 在文件顶部设置，此处无需重复。
 
     n_samples = X.shape[0]
     logger.info(f"T4 LSTM 训练开始 | 样本={n_samples}, "
                 f"window={X.shape[1]}, features={X.shape[2]}, "
                 f"y mean={y.mean():.4f} std={y.std():.4f}")
 
+    # ── 铁律一：启动诊断日志，确认配置生效 ──
+    try:
+        _intra_tf = tf.config.threading.get_intra_op_parallelism_threads()
+        _inter_tf = tf.config.threading.get_inter_op_parallelism_threads()
+        _omp_env = os.environ.get("OMP_NUM_THREADS", "?")
+    except Exception:
+        _intra_tf, _inter_tf, _omp_env = "?", "?", "?"
+    logger.info(
+        f"  [诊断] CPU={os.cpu_count()}核 | "
+        f"TF_INTRA={_intra_tf} TF_INTER={_inter_tf} OMP={_omp_env}"
+    )
+
     # ── Phase 1: 超参数搜索（可跳过）──
     if best_params is not None:
         logger.info(f"T4 使用传入最佳参数: {best_params}")
     elif search_optuna:
-        logger.info("T4 Phase 1: Optuna 超参数搜索 "
-                    f"({cfg.lstm_optuna_n_trials} trials, timeout={cfg.lstm_optuna_timeout}s)")
-
-        # 数据量太大时抽样加速搜索（取最近 20000 样本，保持时间顺序）
-        if n_samples > 20000:
-            X_search = X[-20000:]
-            y_search = y[-20000:]
-            logger.info(f"  Optuna 抽样: {n_samples} → {len(X_search)}（取尾部时间切片）")
+        # ── 断点续跑：已有最佳参数则跳过 Optuna 搜索 ──
+        params_path = cfg.model_dir_path / "best_params_t4_lstm.json"
+        if params_path.exists():
+            with open(params_path) as f:
+                best_params = json.load(f)
+            logger.info(f"T4 Phase 1: 跳过（已有最佳参数: {best_params}）")
         else:
-            X_search = X
-            y_search = y
+            logger.info("T4 Phase 1: Optuna 超参数搜索 "
+                        f"({cfg.lstm_optuna_n_trials} trials, timeout={cfg.lstm_optuna_timeout}s)")
 
-        study_db = str(cfg.model_dir_path / "optuna_t4_lstm.db")
-        storage_url = f"sqlite:///{study_db}"
+            # 数据量太大时抽样加速搜索（取最近 20000 样本，保持时间顺序）
+            if n_samples > 20000:
+                X_search = X[-20000:]
+                y_search = y[-20000:]
+                logger.info(f"  Optuna 抽样: {n_samples} → {len(X_search)}（取尾部时间切片）")
+            else:
+                X_search = X
+                y_search = y
 
-        study = optuna.create_study(
-            direction="minimize",
-            # HyperbandPruner：自动决定哪些 trial 值得分配更多 epochs，
-            # 差的早期终止，比 MedianPruner 更高效。
-            pruner=optuna.pruners.HyperbandPruner(
-                min_resource=3,
-                max_resource=cfg.lstm_optuna_epochs,
-                reduction_factor=3,
-            ),
-            storage=storage_url,
-            study_name="t4_lstm_reg",
-            load_if_exists=True,
-        )
+            study_db = str(cfg.model_dir_path / "optuna_t4_lstm.db")
+            storage_url = f"sqlite:///{study_db}"
 
-        objective_func = _build_objective(X_search, y_search, cfg)
-
-        t0 = time.time()
-        for trial_num in range(cfg.lstm_optuna_n_trials):
-            elapsed = time.time() - t0
-            remaining = cfg.lstm_optuna_timeout - elapsed
-            if remaining <= 0:
-                logger.info(f"T4 Optuna 超时 ({cfg.lstm_optuna_timeout}s)，"
-                            f"已停止于 trial {trial_num}")
-                break
-            study.optimize(objective_func, n_trials=1, n_jobs=1,
-                           timeout=remaining, show_progress_bar=False)
-            elapsed_t = time.time() - t0
-            logger.info(
-                f"  [T4 Optuna] Trial {trial_num+1}/{cfg.lstm_optuna_n_trials} | "
-                f"当前值={study.trials[-1].value:.4f} | "
-                f"全局最佳={study.best_value:.4f} | "
-                f"耗时={elapsed_t:.0f}s"
+            study = optuna.create_study(
+                direction="minimize",
+                # HyperbandPruner：自动决定哪些 trial 值得分配更多 epochs，
+                # 差的早期终止，比 MedianPruner 更高效。
+                pruner=optuna.pruners.HyperbandPruner(
+                    min_resource=3,
+                    max_resource=cfg.lstm_optuna_epochs,
+                    reduction_factor=3,
+                ),
+                storage=storage_url,
+                study_name="t4_lstm_reg",
+                load_if_exists=True,
             )
 
-        best_params = dict(study.best_params)
-        logger.info(f"T4 Optuna 最佳: loss={study.best_value:.4f}, params={best_params}")
+            objective_func = _build_objective(X_search, y_search, cfg)
 
-        # 持久化最佳参数
-        params_path = cfg.model_dir_path / "best_params_t4_lstm.json"
-        with open(params_path, "w") as f:
-            json.dump(best_params, f, indent=2, ensure_ascii=False)
-        logger.info(f"T4 最佳参数已保存: {params_path}")
+            t0 = time.time()
+            for trial_num in range(cfg.lstm_optuna_n_trials):
+                elapsed = time.time() - t0
+                remaining = cfg.lstm_optuna_timeout - elapsed
+                if remaining <= 0:
+                    logger.info(f"T4 Optuna 超时 ({cfg.lstm_optuna_timeout}s)，"
+                                f"已停止于 trial {trial_num}")
+                    break
+                study.optimize(objective_func, n_trials=1, n_jobs=1,
+                               timeout=remaining, show_progress_bar=False)
+                elapsed_t = time.time() - t0
+                logger.info(
+                    f"  [T4 Optuna] Trial {trial_num+1}/{cfg.lstm_optuna_n_trials} | "
+                    f"当前值={study.trials[-1].value:.4f} | "
+                    f"全局最佳={study.best_value:.4f} | "
+                    f"耗时={elapsed_t:.0f}s"
+                )
+
+            best_params = dict(study.best_params)
+            logger.info(f"T4 Optuna 最佳: loss={study.best_value:.4f}, params={best_params}")
+
+            # 持久化最佳参数
+            with open(params_path, "w") as f:
+                json.dump(best_params, f, indent=2, ensure_ascii=False)
+            logger.info(f"T4 最佳参数已保存: {params_path}")
     else:
         # 默认参数（无 Optuna 时的 fallback）
         best_params = {
@@ -506,7 +571,6 @@ def train_lstm(
             checkpoint_path,
             custom_objects={"TransformerBlock": TransformerBlock},
         )
-        # 快速验证 loss
         val_loss = model.evaluate(X_val, y_val, verbose=0)[0]
         logger.info(f"  T4 Phase 2: checkpoint 加载完成, val_loss={val_loss:.4f}")
         return model
@@ -576,19 +640,32 @@ def train_lstm(
         f"checkpoint={checkpoint_path}"
     )
 
-    # ── 清理 TF session 并 从 checkpoint 重新加载模型 ──
-    # clear_session() 会销毁 TF 默认图，导致 custom layer（TransformerBlock）
-    # 内部子层（MultiHeadAttention/FFN/LayerNorm）的连接断裂。
-    # 断裂后 predict() 返回的所有 Transformer 层被短路，输出恒为 bias 常数。
-    #
-    # 解决：clear_session 后重新从磁盘 checkpoint 加载模型。
-    # 此时 TransformerBlock.build() 已实现，加载过程会正确恢复子层连接。
-    tf.keras.backend.clear_session()
-    model = tf.keras.models.load_model(
-        checkpoint_path,
-        custom_objects={"TransformerBlock": TransformerBlock},
-    )
+    # ── 铁律一：训练后预测方差验证（防止常数预测 Bug 无声通过）──
+    _n_sanity = min(500, len(X_val))
+    _pred_sanity = model.predict(X_val[:_n_sanity], verbose=0).flatten()
+    _pred_std = float(np.std(_pred_sanity))
+    _pred_mean = float(np.mean(_pred_sanity))
+    if _pred_std < 1e-7:
+        logger.error(
+            f"  ❌ [严重] 模型预测值无方差！std={_pred_std:.2e}, mean={_pred_mean:.6f} — "
+            f"TransformerBlock 子层连接可能断裂，Rank IC 将为 0！"
+        )
+    else:
+        logger.info(
+            f"  ✅ 预测方差验证通过: std={_pred_std:.6f}, "
+            f"mean={_pred_mean:.6f}, range=[{_pred_sanity.min():.6f}, {_pred_sanity.max():.6f}]"
+        )
 
+    # ── 直接返回内存中的模型 ──
+    # 原方案：clear_session() → load_model(checkpoint) 导致 TransformerBlock
+    # 子层连接断裂，predict() 输出恒为常数（Rank IC=0 Bug, 2026-07-27）。
+    #
+    # 修复：EarlyStopping(restore_best_weights=True) 已确保 model.fit()
+    # 返回时模型权重已恢复至最优 epoch，无需从磁盘重载。
+    # ModelCheckpoint 仍保留（断点续跑安全网），但正常路径不走磁盘加载。
+    #
+    # 内存清理：调用方（evaluate.py）在 predict 完成后应 del model + gc，
+    # 避免多 Fold 循环中 TF graph 累积。
     return model
 
 

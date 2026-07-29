@@ -64,15 +64,20 @@ def train_reg(
             study_name="t2_lgbm_reg",
             load_if_exists=True,
         )
-        study.optimize(
-            lambda trial: _objective(trial, X_2d, y, cfg),
-            n_trials=cfg.optuna_n_trials,
-            timeout=cfg.optuna_timeout,
-            n_jobs=1,
-            show_progress_bar=True,
-        )
-        best_params = study.best_params
-        logger.info(f"T2 Optuna best: RMSE={study.best_value:.4f}, params={best_params}")
+        # 断点续跑：已有最优 trial 则跳过搜索
+        if study.best_trial is not None:
+            best_params = study.best_params
+            logger.info(f"T2 Optuna: 跳过（已有 {len(study.trials)} trials, best={study.best_value:.4f}）")
+        else:
+            study.optimize(
+                lambda trial: _objective(trial, X_2d, y, cfg),
+                n_trials=cfg.optuna_n_trials,
+                timeout=cfg.optuna_timeout,
+                n_jobs=1,
+                show_progress_bar=True,
+            )
+            best_params = study.best_params
+            logger.info(f"T2 Optuna best: RMSE={study.best_value:.4f}, params={best_params}")
     else:
         best_params = {
             "num_leaves": 31, "learning_rate": 0.1, "subsample": 0.8,

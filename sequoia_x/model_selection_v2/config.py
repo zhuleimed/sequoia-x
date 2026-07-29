@@ -21,7 +21,7 @@ class V2Config:
 
     # ── 采样 ──
     sample_start: str = "2020-01-01"
-    sample_end: str = "2026-07-20"
+    sample_end: str = "2026-07-28"
     samples_per_month: int = 2    # 每月采样天数（月初+月中）
 
     # ── 训练 ──
@@ -77,7 +77,7 @@ class V2Config:
     lstm_dropout_rate: float = 0.3      # Dropout 比率
     lstm_dense_units: int = 128         # 中间 Dense 单元数（= lstm_units2）
     lstm_learning_rate: float = 0.001   # 学习率（默认值，Optuna 覆盖）
-    lstm_l2_reg: float = 1e-4           # L2 正则化强度（默认值，Optuna 覆盖）
+    lstm_l2_reg: float = 0.0             # L2 正则化强度（2026-07-28 修复: 1e-4→0, L2杀死LSTM input kernel）
     lstm_huber_delta: float = 0.1       # Huber loss delta（±10% 内 MSE，之外 MAE）
     lstm_gradient_clip_norm: float = 1.0  # 全局梯度范数裁剪
     lstm_batch_size: int = 64           # 批次大小（默认值，Optuna 覆盖）

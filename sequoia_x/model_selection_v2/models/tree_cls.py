@@ -85,15 +85,20 @@ def train_cls(
             study_name="t1_xgb_cls",
             load_if_exists=True,
         )
-        study.optimize(
-            lambda trial: _objective(trial, X_2d, y, cfg),
-            n_trials=cfg.optuna_n_trials,
-            timeout=cfg.optuna_timeout,
-            n_jobs=1,
-            show_progress_bar=True,
-        )
-        best_params = study.best_params
-        logger.info(f"T1 Optuna best: AUC={-study.best_value:.4f}, params={best_params}")
+        # 断点续跑：已有最优 trial 则跳过搜索
+        if study.best_trial is not None:
+            best_params = study.best_params
+            logger.info(f"T1 Optuna: 跳过（已有 {len(study.trials)} trials, best={-study.best_value:.4f}）")
+        else:
+            study.optimize(
+                lambda trial: _objective(trial, X_2d, y, cfg),
+                n_trials=cfg.optuna_n_trials,
+                timeout=cfg.optuna_timeout,
+                n_jobs=1,
+                show_progress_bar=True,
+            )
+            best_params = study.best_params
+            logger.info(f"T1 Optuna best: AUC={-study.best_value:.4f}, params={best_params}")
     else:
         best_params = {
             "max_depth": 6, "learning_rate": 0.1, "subsample": 0.8,

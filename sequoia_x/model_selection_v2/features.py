@@ -1,13 +1,14 @@
 """model_selection_v2 - 特征工程模块。
 
-从 stock_daily 表计算 62 维时序特征，严格避免 look-ahead bias：
+从 stock_daily 表计算 78 维时序特征，严格避免 look-ahead bias：
 第 T 日的特征仅使用 T 日及之前已知的数据。
 
 特征分组：
   价格收益(8) + 均线偏离(6) + 量能(8) + 技术指标(11)
-  + 波动率(4) + 大盘关联(8) + 价格形态(7)
-  + 最大回撤(3) + 收益分布(4) + 时间日历(4) + 价格位置(3)
-  + 估值指标(4: peTTM+pbMRQ+分位) = 70 维
+  + 波动率(4) + 大盘关联(8) + 市场状态(8)
+  + 价格形态(7) + 最大回撤(3) + 收益分布(4) + 时间日历(4)
+  + 价格位置(3) + 估值指标(4: peTTM+pbMRQ+分位) = 78 维
+  padding 到 88 维（预留 10 维扩展空间）
   (padding 到 80)
 """
 from __future__ import annotations
@@ -95,7 +96,7 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
         cfg: V2Config 配置
 
     Returns:
-        (n_days, 62) 特征矩阵，全部 Z-score 归一化
+        (n_days, 88) 特征矩阵，全部 Z-score 归一化
     """
     n = len(df)
     close = df["close"].values.astype(float)
@@ -215,6 +216,35 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
         for _ in range(8):
             feature_list.append(np.zeros(n))
 
+    # ── 6b. 市场状态特征 (8维) ──
+    # 描述整体市场环境（牛市/熊市/震荡市/高波动/低波动），
+    # 帮助模型学习「不同市场状态下因子方向不同」的规律。
+    if df_index is not None and len(df_index) == n:
+        # 指数中期涨跌幅
+        idx_ret_20d_raw = pd.Series(idx_close).pct_change(20).fillna(0.0).values
+        idx_ret_60d_raw = pd.Series(idx_close).pct_change(60).fillna(0.0).values
+        feature_list.append(idx_ret_20d_raw)            # 大盘近1月方向
+        feature_list.append(idx_ret_60d_raw)            # 大盘近1季方向
+        # 指数波动率（年化）
+        idx_vol_20d_raw = pd.Series(idx_ret).rolling(20, min_periods=5).std().values * np.sqrt(252)
+        idx_vol_60d_raw = pd.Series(idx_ret).rolling(60, min_periods=10).std().values * np.sqrt(252)
+        feature_list.append(np.clip(idx_vol_20d_raw, 0.0, 1.0))                # 大盘短期波动
+        feature_list.append(idx_vol_20d_raw / np.maximum(idx_vol_60d_raw, 1e-6) - 1.0)  # 波动率加速度
+        # 指数回撤（从高点跌了多少）
+        idx_high_20d_raw = pd.Series(idx_close).rolling(20, min_periods=1).max().values
+        idx_high_60d_raw = pd.Series(idx_close).rolling(60, min_periods=1).max().values
+        feature_list.append(idx_close / np.maximum(idx_high_20d_raw, 1e-10) - 1.0)  # 大盘20日回撤
+        feature_list.append(idx_close / np.maximum(idx_high_60d_raw, 1e-10) - 1.0)  # 大盘60日回撤
+        # 短期均线vs中期均线（趋势方向信号）
+        idx_ma5_new = pd.Series(idx_close).rolling(5, min_periods=1).mean().values
+        feature_list.append(idx_ma5_new / np.maximum(idx_ma20, 1e-10) - 1.0)  # 大盘5日vs20日均线
+        # 指数上涨天数占比（市场广度代理变量）
+        idx_up = (idx_ret > 0).astype(float)
+        feature_list.append(pd.Series(idx_up).rolling(20, min_periods=1).mean().values)  # 近20日上涨占比
+    else:
+        for _ in range(8):
+            feature_list.append(np.zeros(n))
+
     # ── 7. 价格形态特征 (7维) ──
     limit_up = (chg_pct > 0.095).astype(float)
     limit_down = (chg_pct < -0.095).astype(float)
@@ -319,8 +349,8 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
             feature_list.append(rank)
         else:
             feature_list.extend([np.zeros(n), np.zeros(n)])
-    # padding 到目标维度（预留扩展空间）
-    while len(feature_list) < 80:
+    # padding 到目标维度（预留扩展空间，2026-07-29: 80→88 新增市场状态特征）
+    while len(feature_list) < 88:
         feature_list.append(np.zeros(n))
 
     # ── 9. 组装与归一化 ──

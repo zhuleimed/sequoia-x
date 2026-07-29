@@ -195,12 +195,13 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str]) -> tuple[Path, Path]:
     import hashlib, json
     from pathlib import Path
 
-    # 缓存键：股票数量+时间范围+窗口（变化即重建）
+    # 缓存键：股票数量+时间范围+窗口+特征版本（变化即重建）
     key_data = {
         "n_stocks": len(symbols),
         "sample_start": cfg.sample_start,
         "sample_end": cfg.sample_end,
         "window": cfg.window,
+        "feature_version": 2,  # 2026-07-29: v2=88维(新增市场状态特征)
     }
     key_str = json.dumps(key_data, sort_keys=True)
     key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
