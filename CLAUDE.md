@@ -2,9 +2,17 @@
 
 本文件为 004_sequoia-x 项目的 Claude Code 工作指南。父级规则见 `../CLAUDE.md`。
 
-## 当前状态（2026-07-29）
+## 当前状态（2026-07-30）
 
-**V2 Walk-Forward 评估完成**（6 Fold 主进程），**月度 WF + 88维验证 + T2 月度进行中**。
+**所有模型验证已完成**。**综合回测计划已固化在 `BACKTEST_PLAN.md`**（72 组对比），待编写主程序执行。
+
+## ⚠️ 首次读取指引
+
+如果你是新启动的 Claude 会话，**请务必先阅读以下文件**:
+
+1. **`BACKTEST_PLAN.md`** ← 最重要！项目全景 + 回测计划，约 19,000 字符
+2. **`CLAUDE.md`**（本文件）← 快速参考
+3. **记忆文件目录** `memory/` ← 历史决策和教训
 
 ## 关键发现（2026-07-29）
 
@@ -101,11 +109,10 @@
 
 | 路径 | 用途 |
 |------|------|
+| `BACKTEST_PLAN.md` | **综合回测计划书（最重要）** |
 | `data/sequoia_v2.db` | 主 SQLite 数据库 |
-| `data/cache/v2_dataset/` | 数据集磁盘缓存（v1=5.2GB/80维, v2=5.7GB/88维） |
+| `data/cache/v2_dataset/` | 数据集磁盘缓存（80维/88维） |
 | `data/models/v2_selection/` | 模型文件 + Walk-Forward 结果 |
-| `data/models/v2_selection/optuna/` | 树模型 Optuna 搜索记录 |
-| `data/models/v2_selection/optuna_t4_lstm.db` | T4 Optuna 搜索记录 |
 | `logs/` | 运行日志 |
-| `output/backtest_v2/` | V2 回测输出 |
-| `scripts/` | 测试/验证脚本（test_*.py） |
+| `scripts/` | 测试/验证/回测脚本 |
+| `memory/` | 项目记忆文件 |
