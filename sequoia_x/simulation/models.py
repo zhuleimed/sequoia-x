@@ -157,7 +157,12 @@ def insert_buy_signal(db_path: str, symbol: str, strategy_from: str,
 
 
 def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
-    """批量写入买入信号。
+    """批量写入买入信号（自动去重）。
+
+    sim_buy_signals 表没有 UNIQUE 约束（历史原因），`except IntegrityError`
+    永远不触发，去重必须显式查询：同 symbol + 同 buy_date + 同 status='pending'
+    的信号不重复插入。否则多次运行 main.py（如手动重跑）会累积重复信号，
+    导致次日模拟盘更新重复买入触发 sim_positions 的 UNIQUE(symbol, buy_date) 冲突。
 
     Args:
         signals: [{"symbol": "600519", "strategy_from": "...", "llm_score": ...}]
@@ -169,15 +174,20 @@ def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
     with sqlite3.connect(db_path) as conn:
         count = 0
         for s in signals:
-            try:
-                conn.execute(
-                    "INSERT INTO sim_buy_signals (symbol, strategy_from, llm_score, buy_date, status) "
-                    "VALUES (?, ?, ?, ?, 'pending')",
-                    (s["symbol"], s.get("strategy_from", ""), s.get("llm_score"), today_str),
-                )
-                count += 1
-            except sqlite3.IntegrityError:
+            # 显式去重：同 symbol + 同 buy_date + pending 已存在则跳过
+            dup = conn.execute(
+                "SELECT 1 FROM sim_buy_signals "
+                "WHERE symbol=? AND buy_date=? AND status='pending' LIMIT 1",
+                (s["symbol"], today_str),
+            ).fetchone()
+            if dup:
                 continue
+            conn.execute(
+                "INSERT INTO sim_buy_signals (symbol, strategy_from, llm_score, buy_date, status) "
+                "VALUES (?, ?, ?, ?, 'pending')",
+                (s["symbol"], s.get("strategy_from", ""), s.get("llm_score"), today_str),
+            )
+            count += 1
         conn.commit()
     return count
 

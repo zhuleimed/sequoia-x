@@ -23,7 +23,6 @@ from sequoia_x.core.config import get_settings
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
 from sequoia_x.data.sync import DataSync
-from sequoia_x.notify.wxpusher import WxPusherNotifier
 from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
 from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
@@ -325,8 +324,6 @@ def main() -> None:
             PrivatePlacementStrategy(engine=engine, settings=settings, stock_pool=base_pool),
         ]
 
-        notifier = WxPusherNotifier(settings)
-
         # 收集各策略选股结果
         strategies_results: dict[str, list[str]] = {}
 
@@ -377,10 +374,12 @@ def main() -> None:
                         logger.warning(f"保存模拟盘信号失败: {sim_e}")
             except Exception as e:
                 logger.warning(f"LLM 分析异常: {e}")
-                _push_fallback_results(notifier, strategies_results)
+                _push_fallback_results(settings, strategies_results, reason=str(e))
         elif not args.skip_llm and not settings.deepseek_api_key:
             logger.info("未配置 DeepSeek API Key，跳过 LLM 分析")
-            _push_fallback_results(notifier, strategies_results)
+            _push_fallback_results(
+                settings, strategies_results, reason="未配置 DeepSeek API Key"
+            )
 
     except Exception:
         try:
@@ -417,23 +416,65 @@ def _push_ai_report(settings, report: str) -> None:
             content_type=1,
         )
         if result.get("code") == 1000:
-            logger.info("AI 分析报告推送成功")
+            # 记录 messageId，便于核对微信端是否收到（wxpusher 受理≠必然送达）
+            msg_id = ""
+            try:
+                data = result.get("data") or []
+                if data:
+                    msg_id = str(data[0].get("id", ""))
+            except (AttributeError, IndexError, TypeError):
+                pass
+            logger.info(f"AI 分析报告推送成功（messageId={msg_id}）")
         else:
             logger.warning(f"AI 报告推送失败: {result}")
     except Exception as e:
         logger.warning(f"AI 报告推送异常: {e}")
 
 
-def _push_fallback_results(notifier, strategies_results: dict[str, list[str]]) -> None:
-    """LLM 不可用时的降级推送：直接推送策略原始结果。"""
+def _push_fallback_results(
+    settings, strategies_results: dict[str, list[str]], reason: str = ""
+) -> None:
+    """LLM 不可用时的降级推送：推送一条明确标注降级的策略汇总。
+
+    不再逐策略推送"选股播报"（多条消息易与 AI 综合研判混淆），
+    改为单条消息说明降级原因 + 各策略选股汇总，用户可明确区分。
+    """
+    from datetime import date
+
+    from wxpusher import WxPusher
+
     from sequoia_x.core.logger import get_logger
 
     logger = get_logger(__name__)
-    logger.info("LLM 不可用，降级为策略原始结果推送")
+    logger.info(f"LLM 不可用（{reason}），降级推送策略选股汇总")
 
+    today_str = date.today().strftime("%m-%d")
+    lines = [
+        f"⚠️ Sequoia-X AI 研判不可用 | {today_str}",
+        "",
+        f"LLM 分析失败，降级为策略选股结果汇总：",
+        f"原因: {reason or '未知'}",
+        "",
+    ]
     for name, symbols in strategies_results.items():
         if symbols:
-            notifier.send(symbols=symbols, strategy_name=name, webhook_key="default")
+            lines.append(f"▸ {name}（{len(symbols)} 只）: {' '.join(symbols)}")
+    lines.append("")
+    lines.append("（次日模拟盘将按 T+1 以开盘价执行买入信号）")
+
+    try:
+        result = WxPusher.send_message(
+            content="\n".join(lines),
+            token=settings.wxpusher_token,
+            topic_ids=settings.wxpusher_topic_ids,
+            content_type=1,
+        )
+        if result.get("code") == 1000:
+            logger.info("降级推送成功")
+        else:
+            logger.warning(f"降级推送失败: {result}")
+    except Exception as e:
+        logger.warning(f"降级推送异常: {e}")
 
 
 def _push_data_alert(

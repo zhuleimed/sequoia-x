@@ -374,14 +374,26 @@ class SimEngine:
                 commission = max(cost * COMMISSION_RATE, 0.0)
                 total_cost = cost + commission
 
-            insert_position(self.db_path, symbol=sym,
-                strategy_from=signal.get("strategy_from", ""),
-                buy_date=today_str, buy_price=round(buy_price, 4),
-                shares=max_shares, total_cost=round(total_cost, 2),
-                signal_id=signal["id"])
+            try:
+                insert_position(self.db_path, symbol=sym,
+                    strategy_from=signal.get("strategy_from", ""),
+                    buy_date=today_str, buy_price=round(buy_price, 4),
+                    shares=max_shares, total_cost=round(total_cost, 2),
+                    signal_id=signal["id"])
+            except sqlite3.IntegrityError as e:
+                # 兜底：同一股票同一天已开仓（如重复信号残留），取消本信号而非崩溃
+                cancel_reason = f"重复开仓冲突（{e}）"
+                mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
+                logger.warning(f"sim 买 {sym}: {cancel_reason}")
+                cancelled.append({"symbol": sym, "reason": cancel_reason})
+                continue
             mark_signal_executed(self.db_path, signal["id"],
                                  round(buy_price, 4), max_shares)
             cash_balance -= total_cost
+            # 关键：同批次信号中可能重复出现同一股票（如多次运行 main.py 产生重复信号），
+            # 已买入的必须加入 held_symbols，后续重复信号走"已在持仓中"取消分支，
+            # 否则 insert_position 触发 UNIQUE(symbol, buy_date) 冲突导致整个模拟盘更新崩溃
+            held_symbols.add(sym)
             bought.append({"symbol": sym, "shares": max_shares,
                            "price": round(buy_price, 4), "cost": round(total_cost, 2)})
             logger.info(f"sim 买: {sym} {max_shares}股 @ {buy_price:.4f}")

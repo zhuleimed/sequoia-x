@@ -181,7 +181,7 @@ def main() -> None:
     # ── Step5: 荐股推送 ──
     push_recommendation(target_month, pred_info)
 
-    # ── Step6: V2 上月度汇总报告推送（对应 V1 月末月度报告）──
+    # ── Step6: V2 + LLM 模拟盘月度汇总报告推送（对应 V1 月末月度报告）──
     try:
         from sequoia_x.simulation.reporter import build_monthly_report_text, push_daily_summary
         settings = get_settings()
@@ -190,14 +190,26 @@ def main() -> None:
         prev_m = m - 1
         if prev_m <= 0:
             prev_m, y = 12, y - 1
-        text = build_monthly_report_text(y, prev_m, SIM_V2_DB)
-        if text:
-            push_daily_summary(settings, f"【V2 模拟盘月度报告 {y}-{prev_m:02d}】\n{text}")
-            logger.info(f"V2 月度报告已推送（{y}-{prev_m:02d}）")
+
+        # 合并两个模拟盘的月度报告：
+        #   V2  模拟盘 → sim_v2.db（独立库）
+        #   LLM 模拟盘 → settings.db_path（sequoia_v2.db 的 sim_* 表）
+        v2_text = build_monthly_report_text(y, prev_m, SIM_V2_DB)
+        llm_text = build_monthly_report_text(y, prev_m, settings.db_path)
+
+        if not v2_text and not llm_text:
+            logger.info("V2/LLM 月度报告均为空，跳过")
         else:
-            logger.info("V2 月度报告为空（账户无数据），跳过")
+            report = [f"【V2 + LLM 模拟盘月度报告 {y}-{prev_m:02d}】", ""]
+            report.append("═══ V2 模拟盘 ═══")
+            report.append(v2_text or "（本月无模拟盘交易数据）")
+            report.append("")
+            report.append("═══ LLM 模拟盘 ═══")
+            report.append(llm_text or "（本月无模拟盘交易数据）")
+            push_daily_summary(settings, "\n".join(report))
+            logger.info(f"V2+LLM 月度报告已推送（{y}-{prev_m:02d}）")
     except Exception as e:
-        logger.warning(f"V2 月度报告推送失败: {e}")
+        logger.warning(f"V2+LLM 月度报告推送失败: {e}")
 
     logger.info(f"V2 月度重训完成 | 耗时见日志 | 信号待下个交易日执行")
 
