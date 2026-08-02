@@ -2,17 +2,34 @@
 
 本文件为 004_sequoia-x 项目的 Claude Code 工作指南。父级规则见 `../CLAUDE.md`。
 
-## 当前状态（2026-07-30）
+## 当前状态（2026-08-01 晚 21:20 更新）
 
-**所有模型验证已完成**。**综合回测计划已固化在 `BACKTEST_PLAN.md`**（72 组对比），待编写主程序执行。
+**数据已扩展到 2020-01 起（1594 交易日）**，缓存已重建（80维=`62cf234c5440`，88维=`13132147f8e8`，40 万样本）。
+
+**进行中的工作（60 个月扩展回测流水线，预计今晚全部完成）**：
+1. 🟢 T2/T1/T3 预测缓存构建（**24 进程并行**，PID 见 ps，v7 日志 `logs/pred_cache_t2t1t3_20260801_v7.log`；预计 **~00:00-00:30** 完成 36 个月）
+2. 🟢 T4 71 个月并行训练（`launch_t4_parallel.sh`，**12 并发**，已完成 48/71，预计 **~23:00-23:30** 完成）
+3. ⏳ 完成后：`bash scripts/launch_t4_parallel.sh --merge` 合并 t4 → 60 个月回测 → **逐月 T2/T4 Rank IC 分析**（见 BACKTEST_PLAN §25 优化方案）
+
+**⚠️ 今晚关键修复（勿回退）**：
+- **KMP_AFFINITY 锁核**（CLAUDE.md 铁律 + BACKTEST_PLAN §26）：T4/build 均需 `env -u KMP_AFFINITY` + 脚本内 `pop("KMP_AFFINITY")` + OMP 硬设 1（build 已修复，`build_prediction_cache.py` 顶部）
+- **T4/build 并行时序**：T4 worker 缓存检查已放宽（不在缓存存 `.t4_tmp` 快照），merge 只更新 t4 字段
+- 并发配置：build 24 worker（n_jobs=1）、T4 12 worker（TF 2/1 + OMP=2）
+
+**已废弃**：`pipeline_t4_auto_start.sh` 监督脚本已 kill（T4 已并行启动，不再需要）；旧 11 个月（2025-08~2026-06）已在 20:33 build 重启时自动重建。
+
+**后台任务查询**：`ps -eo pid,etime,pcpu,args | grep -E "build_prediction_cache|t4_monthly"`；
+**T4 状态**：`bash scripts/launch_t4_parallel.sh --status`
 
 ## ⚠️ 首次读取指引
 
 如果你是新启动的 Claude 会话，**请务必先阅读以下文件**:
 
-1. **`BACKTEST_PLAN.md`** ← 最重要！项目全景 + 回测计划，约 19,000 字符
+1. **`V2_OPERATION_GUIDE.md`** ← **V2 框架完整指南（V3.0，~2.8 万字）**！背景/验证/训练/回测/模拟盘/教训/操作全流程，后续只需读此文档
+2. **`BACKTEST_PLAN.md`** ← 项目全景 + 回测计划 + 数据扩展记录（§24），约 1,530 行
 2. **`CLAUDE.md`**（本文件）← 快速参考
-3. **记忆文件目录** `memory/` ← 历史决策和教训
+3. **记忆文件目录** `memory/` ← 历史决策和教训（含最终回测结果、铁律、进程管理规则）
+4. **本节"当前状态"** ← 正在进行的 60 个月扩展回测流水线
 
 ## 关键发现（2026-07-29）
 
@@ -59,6 +76,11 @@
 | `lstm_tf_interop_threads` | 8 | TF op 间并行 |
 | `lstm_omp_num_threads` | 10 | BLAS/MKL 线程 |
 | `sample_end` | 2026-07-28 | 数据截止日期 |
+
+## 重要：Python 环境（铁律六，2026-08-02）
+
+**所有运行（验证/训练/回测/模拟盘/分析/绘图）必须用生产环境 py312**：
+`/home/zhulei/anaconda3/envs/zhulei_py312/bin/python`（**禁止裸 `python3`**——base 环境的 numpy/scipy 版本差异导致回测结果漂移 25%，详见 BACKTEST_PLAN §4.4 铁律六）。
 
 ## 重要：环境变量问题
 
@@ -109,6 +131,7 @@
 
 | 路径 | 用途 |
 |------|------|
+| `V2_OPERATION_GUIDE.md` | **V2 框架完整指南（V3.0，2.8 万字，首选）** |
 | `BACKTEST_PLAN.md` | **综合回测计划书（最重要）** |
 | `data/sequoia_v2.db` | 主 SQLite 数据库 |
 | `data/cache/v2_dataset/` | 数据集磁盘缓存（80维/88维） |

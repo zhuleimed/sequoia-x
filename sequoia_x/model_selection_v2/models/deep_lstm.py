@@ -23,13 +23,13 @@ from typing import Optional
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 # TF 线程数必须在 import tensorflow 之前设置，否则 TF 初始化后无法更改。
-# 之前用 setdefault 放在 train_lstm() 内部，TF 已初始化→设置无效→单核运行（29min/epoch）。
-# 修复：在此处直接用 os.environ assignment 覆盖，确保 TF 初始化前生效。
+# 使用 setdefault：调用方可在 import 前通过 os.environ 设置更小的值（如并行场景），
+# 未设置时 fallback 到 config 默认值。
 from sequoia_x.model_selection_v2.config import get_config  # 不依赖 TF，可安全导入
 _cfg = get_config()
-os.environ["OMP_NUM_THREADS"] = str(_cfg.lstm_omp_num_threads)
-os.environ["TF_NUM_INTRAOP_THREADS"] = str(_cfg.lstm_tf_intraop_threads)
-os.environ["TF_NUM_INTEROP_THREADS"] = str(_cfg.lstm_tf_interop_threads)
+os.environ.setdefault("OMP_NUM_THREADS", str(_cfg.lstm_omp_num_threads))
+os.environ.setdefault("TF_NUM_INTRAOP_THREADS", str(_cfg.lstm_tf_intraop_threads))
+os.environ.setdefault("TF_NUM_INTEROP_THREADS", str(_cfg.lstm_tf_interop_threads))
 
 import numpy as np
 import optuna
@@ -461,11 +461,12 @@ def train_lstm(
     )
 
     # ── Phase 1: 超参数搜索（可跳过）──
+    params_path = cfg.model_dir_path / "best_params_t4_lstm.json"
+
     if best_params is not None:
         logger.info(f"T4 使用传入最佳参数: {best_params}")
     elif search_optuna:
         # ── 断点续跑：已有最佳参数则跳过 Optuna 搜索 ──
-        params_path = cfg.model_dir_path / "best_params_t4_lstm.json"
         if params_path.exists():
             with open(params_path) as f:
                 best_params = json.load(f)
@@ -528,16 +529,21 @@ def train_lstm(
                 json.dump(best_params, f, indent=2, ensure_ascii=False)
             logger.info(f"T4 最佳参数已保存: {params_path}")
     else:
-        # 默认参数（无 Optuna 时的 fallback）
-        best_params = {
-            "lstm_units": cfg.lstm_units,
-            "num_transformers": cfg.lstm_num_transformers,
-            "dropout_rate": cfg.lstm_dropout_rate,
-            "learning_rate": cfg.lstm_learning_rate,
-            "l2_reg": cfg.lstm_l2_reg,
-            "batch_size": cfg.lstm_batch_size,
-        }
-        logger.info(f"T4 使用默认参数: {best_params}")
+        # search_optuna=False：优先加载已保存的最佳参数，fallback 到配置默认值
+        if params_path.exists():
+            with open(params_path) as f:
+                best_params = json.load(f)
+            logger.info(f"T4 使用已保存最佳参数: {best_params}")
+        else:
+            best_params = {
+                "lstm_units": cfg.lstm_units,
+                "num_transformers": cfg.lstm_num_transformers,
+                "dropout_rate": cfg.lstm_dropout_rate,
+                "learning_rate": cfg.lstm_learning_rate,
+                "l2_reg": cfg.lstm_l2_reg,
+                "batch_size": cfg.lstm_batch_size,
+            }
+            logger.info(f"T4 使用配置默认参数: {best_params}")
 
     # ── Phase 2: 全量训练（支持断点续跑）──
     checkpoint_path = str(cfg.model_dir_path / f"t4_checkpoint_{model_id}.keras")

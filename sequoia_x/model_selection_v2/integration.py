@@ -56,7 +56,7 @@ def rank_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray) -> np.ndarray:
 
 def dynamic_weight_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray,
                            ic_t2: float, ic_t4: float) -> np.ndarray:
-    """动态 IC 加权融合（备选方案）。
+    """动态 IC 加权融合（值加权版本，用于信号强度加权）。
 
     Args:
         pred_t2, pred_t4: 两个模型的原始预测值。
@@ -72,6 +72,55 @@ def dynamic_weight_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray,
         w_t2 = abs(ic_t2) / total_ic
         w_t4 = abs(ic_t4) / total_ic
     return w_t2 * np.array(pred_t2) + w_t4 * np.array(pred_t4)
+
+
+def rank_weighted_fusion(
+    pred_t2: np.ndarray,
+    pred_t4: np.ndarray,
+    ic_t2: float,
+    ic_t4: float,
+    min_weight: float = 0.25,
+    max_weight: float = 0.75,
+) -> np.ndarray:
+    """动态 IC 加权 Rank 融合——解决 T4 在温和市场稀释 T2 信号的问题。
+
+    核心思想：近期 IC 高的模型获得更大的排名权重。
+    - 2025 年 T2 IC > T4 IC → T2 权重更大 → 接近纯 T2 的收益
+    - 2026 年 T2 崩溃月 T4 IC 更优 → T4 权重更大 → 保留防守能力
+
+    Args:
+        pred_t2, pred_t4: 两个模型的预测值，shape (n_stocks,)
+        ic_t2, ic_t4: 近期平均 Rank IC（如近 3 月）
+        min_weight: 单模型最低权重（即使 IC=0 也保留一定发言权）
+        max_weight: 单模型最高权重（防止完全忽略另一个模型）
+
+    Returns:
+        加权平均排名，shape (n_stocks,)，值越小越好
+    """
+    n = len(pred_t2)
+    if n < 2:
+        return np.zeros(n) if n == 0 else np.array([1.0])
+
+    # 排名：值越大排名越靠前（1=最好）
+    rank_t2 = rankdata(-pred_t2, method="average")
+    rank_t4 = rankdata(-pred_t4, method="average")
+
+    # 用 clipping 后的 IC 计算权重
+    # 负 IC 的模型权重不应超过 0.5（最多平权，不给超额权重）
+    ic2_eff = max(ic_t2, 0.01)
+    ic4_eff = max(ic_t4, 0.01)
+    total_ic = ic2_eff + ic4_eff
+
+    w_t2 = ic2_eff / total_ic
+    w_t4 = ic4_eff / total_ic
+
+    # Clamp 到安全范围
+    w_t2 = np.clip(w_t2, min_weight, max_weight)
+    w_t4 = 1.0 - w_t2
+
+    # 加权平均排名
+    weighted_rank = w_t2 * rank_t2 + w_t4 * rank_t4
+    return weighted_rank
 
 
 class IntegratedSignal:

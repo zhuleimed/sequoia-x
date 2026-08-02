@@ -66,23 +66,28 @@ class MarketState:
     def detect(self, month: str) -> dict:
         """检测指定月份前一月末的市场状态。
 
+        6 级市场状态（BACKTEST_PLAN §9.5）：
+          极端熊市(0.3) > 高波动(0.5) > 熊市(0.5) > 偏弱(0.7) > 结构分化(0.7) > 牛市/震荡(1.0)
+
         Args:
             month: "2026-05" 格式的月份。
 
         Returns:
             {
                 "month": str,
-                "is_extreme": bool,       # 是否极端市场
-                "is_bear": bool,          # 是否熊市
+                "state": str,             # 市场状态标签
+                "is_extreme": bool,       # 是否极端（向后兼容）
+                "is_bear": bool,          # 是否熊市（向后兼容）
                 "market_return_20d": float,
                 "market_vol_20d": float,
                 "market_drawdown_20d": float,
                 "direction_score": int,   # 1-5, 5=强牛
-                "advised_exposure": float, # 建议仓位比例 (0.0-1.0)
+                "advised_exposure": float, # 建议仓位比例 (0.3/0.5/0.7/1.0)
             }
         """
         result = {
             "month": month,
+            "state": "震荡",
             "is_extreme": False,
             "is_bear": False,
             "market_return_20d": 0.0,
@@ -95,9 +100,18 @@ class MarketState:
         if self._idx_data is None or self._idx_data.empty:
             return result
 
-        # 找到月份前的最后一个交易日
-        # 取该月之前的数据
-        df = self._idx_data[self._idx_data["date"] <= month + "-31"]
+        # 找到月份前的最后一个交易日（上月最后一天）
+        # 修复前视偏差：不能用 month+"-31"（包含了当月数据）
+        from calendar import monthrange
+        ym_y, ym_m = int(month[:4]), int(month[5:7])
+        pm = ym_m - 1
+        py = ym_y
+        if pm <= 0:
+            pm += 12
+            py -= 1
+        last_day = monthrange(py, pm)[1]
+        prev_month_end = f"{py}-{pm:02d}-{last_day}"
+        df = self._idx_data[self._idx_data["date"] <= prev_month_end]
         if len(df) < self.SHORT_WINDOW:
             return result
 
@@ -121,34 +135,73 @@ class MarketState:
         rolling_high = pd.Series(closes[-self.SHORT_WINDOW:]).cummax().values
         result["market_drawdown_20d"] = float(closes[-1] / rolling_high[-1] - 1)
 
-        # 判断极端市场
-        if abs(result["market_drawdown_20d"]) > abs(self.EXTREME_DRAWDOWN):
-            result["is_extreme"] = True
-        if normal_vol > 0 and result["market_vol_20d"] / normal_vol > self.EXTREME_VOL_RATIO:
-            result["is_extreme"] = True
+        # 计算 60 日涨跌幅、60 日回撤（新增，用于细化状态）
+        ret_60d = float(closes[-1] / closes[-self.MID_WINDOW] - 1) if len(closes) >= self.MID_WINDOW else 0.0
+        if len(closes) >= self.MID_WINDOW:
+            rolling_high_60 = pd.Series(closes[-self.MID_WINDOW:]).cummax().values
+            dd_60d = float(closes[-1] / rolling_high_60[-1] - 1)
+        else:
+            dd_60d = result["market_drawdown_20d"]
 
-        # 判断牛熊 (基于20日涨跌和均线)
+        # 均线关系
         ma5 = np.mean(closes[-5:])
         ma20 = np.mean(closes[-self.SHORT_WINDOW:])
-        if result["market_return_20d"] < -0.05:
-            result["is_bear"] = True
-            result["direction_score"] = 1 if result["market_return_20d"] < -0.10 else 2
-        elif ma5 > ma20 * (1 + self.BULL_MA_CROSS):
-            result["direction_score"] = 5
-        elif result["market_return_20d"] > 0.03:
-            result["direction_score"] = 4
+        ma60 = np.mean(closes[-self.MID_WINDOW:]) if len(closes) >= self.MID_WINDOW else ma20
+        ma5_vs_ma20 = ma5 / ma20 - 1 if ma20 > 0 else 0.0
+        ma20_vs_ma60 = ma20 / ma60 - 1 if ma60 > 0 else 0.0
 
-        # 建议仓位
-        if result["is_extreme"]:
-            result["advised_exposure"] = 0.5  # 极端市场: 半仓
-        elif result["is_bear"]:
-            result["advised_exposure"] = 0.7  # 熊市: 七成仓
-        # 牛市: 满仓 (默认1.0)
+        # 市场广度（上涨天数占比）
+        up_ratio = float(np.mean(recent_ret > 0)) if len(recent_ret) > 0 else 0.5
+
+        # ── 6 级市场状态判断（BACKTEST_PLAN §9.5）──
+        ret_20d = result["market_return_20d"]
+        vol_20d = result["market_vol_20d"]
+        dd_20d = result["market_drawdown_20d"]
+
+        if abs(dd_20d) > 0.10:
+            # 大盘20日跌超10%
+            result["state"] = "极端熊市"
+            result["is_extreme"] = True
+            result["is_bear"] = True
+            result["direction_score"] = 1
+            result["advised_exposure"] = 0.3
+        elif normal_vol > 0 and vol_20d > normal_vol * 2.0:
+            # 波动率翻倍（恐慌）
+            result["state"] = "高波动"
+            result["is_extreme"] = True
+            result["is_bear"] = True
+            result["direction_score"] = 2
+            result["advised_exposure"] = 0.5
+        elif ret_20d < -0.05:
+            # 大盘跌超5%
+            result["state"] = "熊市"
+            result["is_bear"] = True
+            result["direction_score"] = 2
+            result["advised_exposure"] = 0.5
+        elif ret_20d < -0.03:
+            # 大盘小跌
+            result["state"] = "偏弱"
+            result["direction_score"] = 2
+            result["advised_exposure"] = 0.7
+        elif up_ratio < 0.35:
+            # 不足35%股票上涨（二八分化）
+            result["state"] = "结构分化"
+            result["direction_score"] = 2
+            result["advised_exposure"] = 0.7
+        elif ret_20d > 0.03 and ma5 > ma20:
+            # 大盘涨+均线多头
+            result["state"] = "牛市"
+            result["direction_score"] = 5
+            result["advised_exposure"] = 1.0
+        else:
+            result["state"] = "震荡"
+            result["direction_score"] = 3
+            result["advised_exposure"] = 1.0
 
         logger.debug(
-            f"[{month}] 市场状态: ret20d={result['market_return_20d']:+.2%} "
-            f"vol20d={result['market_vol_20d']:.2%} dd20d={result['market_drawdown_20d']:+.2%} "
-            f"极端={result['is_extreme']} 熊市={result['is_bear']} 仓位={result['advised_exposure']:.0%}"
+            f"[{month}] 市场状态={result['state']}: ret20d={ret_20d:+.2%} "
+            f"vol20d={vol_20d:.2%} dd20d={dd_20d:+.2%} "
+            f"up_ratio={up_ratio:.0%} 仓位={result['advised_exposure']:.0%}"
         )
         return result
 
@@ -162,7 +215,7 @@ class RiskManager:
       3. 正常+T1不可用 → 全市场选股
     """
 
-    def __init__(self, t1_auc_threshold: float = 0.58):
+    def __init__(self, t1_auc_threshold: float = 0.52):
         """
         Args:
             t1_auc_threshold: T1近期AUC阈值，超过此值才启用方向过滤。

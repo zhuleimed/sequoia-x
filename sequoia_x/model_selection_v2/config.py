@@ -73,10 +73,10 @@ class V2Config:
     lstm_units2: int = 64               # LSTM2 单元数（= units // 2）
     lstm_num_heads: int = 4             # MultiHeadAttention 头数
     lstm_ff_dim: int = 256              # Transformer FFN 隐藏维度（= units * 2）
-    lstm_num_transformers: int = 2      # Transformer 层数
-    lstm_dropout_rate: float = 0.3      # Dropout 比率
+    lstm_num_transformers: int = 0      # Transformer 层数（2026-07-28 修复: 2→0, Transformer 稀释 LSTM 信号）
+    lstm_dropout_rate: float = 0.285    # Dropout 比率（2026-07-28: Optuna 最优值）
     lstm_dense_units: int = 128         # 中间 Dense 单元数（= lstm_units2）
-    lstm_learning_rate: float = 0.001   # 学习率（默认值，Optuna 覆盖）
+    lstm_learning_rate: float = 0.0096  # 学习率（2026-07-28: Optuna 最优值）
     lstm_l2_reg: float = 0.0             # L2 正则化强度（2026-07-28 修复: 1e-4→0, L2杀死LSTM input kernel）
     lstm_huber_delta: float = 0.1       # Huber loss delta（±10% 内 MSE，之外 MAE）
     lstm_gradient_clip_norm: float = 1.0  # 全局梯度范数裁剪

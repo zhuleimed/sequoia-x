@@ -103,6 +103,16 @@ STEPS: list[dict] = [
         "required": False,
         "timeout": 600,  # 10min（主要是数据库操作）
     },
+    # ── 3.4. V2 模拟盘日常操作（LLM 模拟盘之后，独立 sim_v2.db，完全隔离）──
+    {
+        "id": "v2_simulation",
+        "name": "V2模拟盘操作",
+        "cmd": ["scripts/v2_simulation_daily.py"],
+        "cwd": str(PROJECT_DIR),
+        "python": PY312,
+        "required": False,
+        "timeout": 900,  # 15min（买卖执行+估值+日报推送）
+    },
     # ── 3.5. 策略汇总推送（可选，必须在模拟盘更新之后） ──
     {
         "id": "strategy_summary",

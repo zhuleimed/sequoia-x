@@ -91,10 +91,11 @@ class SimEngine:
         db_path: 数据库路径。
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, db_path: str | None = None) -> None:
         self.settings = settings
         self.engine = DataEngine(settings)
-        self.db_path = settings.db_path
+        # V2 独立模拟盘：db_path 可自定义（sim_v2.db），与 LLM 模拟盘完全隔离
+        self.db_path = db_path or settings.db_path
         init_sim_tables(self.db_path)
 
     # ════════════════════════════════════════════════════════

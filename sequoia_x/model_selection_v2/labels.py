@@ -154,7 +154,7 @@ def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray
 
     不写磁盘，不初始化完整 DataEngine，仅用 SQLite 读取。
     """
-    ref_date, symbols_chunk, cfg = args
+    ref_date, symbols_chunk, cfg, include_market_state = args
     from sequoia_x.core.config import Settings as _Settings
     engine = DataEngine.__new__(DataEngine)
     engine.db_path = _Settings().db_path
@@ -162,7 +162,7 @@ def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray
     X_list, y1_list, y2_list, y3_list = [], [], [], []
     for symbol in symbols_chunk:
         try:
-            X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
+            X_i, _ = build_stock_features(symbol, ref_date, engine, cfg, include_market_state)
             if X_i is None:
                 continue
             y1 = _compute_label_t1(symbol, ref_date, engine, cfg)
@@ -186,7 +186,7 @@ def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray
             np.array(y3_list, dtype=np.float32))
 
 
-def _dataset_cache_path(cfg: V2Config, symbols: list[str]) -> tuple[Path, Path]:
+def _dataset_cache_path(cfg: V2Config, symbols: list[str], include_market_state: bool = True) -> tuple[Path, Path]:
     """生成数据集缓存路径。基于参数哈希确保参数变更后自动重建。
 
     Returns:
@@ -202,6 +202,7 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str]) -> tuple[Path, Path]:
         "sample_end": cfg.sample_end,
         "window": cfg.window,
         "feature_version": 2,  # 2026-07-29: v2=88维(新增市场状态特征)
+        "market_state": include_market_state,  # T4=80维(False), T2/T1/T3=88维(True)
     }
     key_str = json.dumps(key_data, sort_keys=True)
     key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
@@ -260,6 +261,7 @@ def build_training_dataset(
     symbols: list[str] | None = None,
     n_workers: int = 8,
     force_rebuild: bool = False,
+    include_market_state: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """构建完整训练数据集（多进程并行，支持磁盘缓存）。
 
@@ -286,7 +288,7 @@ def build_training_dataset(
         symbols = engine.get_base_stock_pool()
 
     # ── 缓存检查 ──
-    cache_dir, meta_path = _dataset_cache_path(cfg, symbols)
+    cache_dir, meta_path = _dataset_cache_path(cfg, symbols, include_market_state)
     if not force_rebuild:
         cached = _load_cached_dataset(cache_dir, meta_path)
         if cached is not None:
@@ -301,7 +303,7 @@ def build_training_dataset(
     tasks = []
     for d in dates:
         for i in range(0, len(symbols), CHUNK):
-            tasks.append((d, symbols[i:i+CHUNK], cfg))
+            tasks.append((d, symbols[i:i+CHUNK], cfg, include_market_state))
 
     total_chunks = len(dates) * ((len(symbols) + CHUNK - 1) // CHUNK)
     logger.info(f"  共 {len(tasks)} 个小任务（{CHUNK}只/块）")

@@ -131,6 +131,9 @@ class TencentSource:
             )
             for col in ["open", "close", "high", "low", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+            # Tencent fqkline API 返回的成交量单位是「手」(lots/100shares)，
+            # 统一转为「股」(shares) 以与 baostock/Sina 保持一致。
+            df["volume"] = df["volume"] * 100
             df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
             return df
         except Exception as e:
