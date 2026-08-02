@@ -84,7 +84,7 @@ def main() -> None:
                 result.get("bought", []),
                 result.get("sold", []),
                 cancelled=result.get("cancelled"),
-                pending_sells=result.get("pending_sells"),
+                pending_sells=result.get("marked_sell"),
             )
             header = f"【V2 模型模拟盘日报 {today}】\n"
             push_daily_summary(settings, header + text)
