@@ -126,9 +126,10 @@ y2 = clip(stock_ret - idx_ret, -0.5, +0.5)
 `sync.py::_fill_valuation_gaps` 中 Phase 3a(TDX) → Phase 3b(baostock) 双保险。
 baostock 代码完整保留，TDX 不可用时自动切换。
 
-**⚠️ volume 单位混用教训（未完全修复）**：Tencent fqkline 返回**手**（lots），baostock/Sina 返回**股**（shares）。
-实测约 10% 股票（~500 只）在历史回填时混入"手"（ratio≈1x），其余为"股"（ratio≈100x）。
-已修复源头（`_tencent_kline` 加 `volume * 100` 转换），**存量未修复**（特征 Z-score 归一化消除量级差异，对回测影响有限）。
+**⚠️ volume 单位教训（2026-08-02 实测已统一）**：Tencent fqkline 返回**手**（lots），baostock/Sina 返回**股**（shares）。
+已修复源头（`_tencent_kline` 加 `volume * 100` 转换，手→股）。
+**存量实测**：全量扫描 4956 只（前/后段比值）+ 100 只三段抽查，**0 只确证混入**——
+当前数据库成交量单位统一为"股"，无需修复存量（此前记载的 ~500 只系中间状态，已纠正）。
 
 ### 3.2 数据规模（2026-08-02 现状）
 
@@ -778,7 +779,7 @@ rankdata ties 处理/浮点顺序 → 排名细微差异 → 选股不同 → �
 - **缓存陈旧**：数据集缓存 key 不含采样日数 → 数据更新后不自动过期 → 需手动 force_rebuild
 - **状态栏转义**：python -c 字符串替换把 `'\n'` 写坏（SyntaxError 两犯）——改 .py 用 Edit 工具 + py_compile
 - **kill 与启动同命令**：pgrep 匹配自身命令行误杀（多次 exit 144）——kill 与启动分开
-- **volume 单位混用**：Tencent 手 vs baostock 股（~500 只存量未修复）
+- **volume 单位教训**：Tencent 手 vs baostock 股——源头已转换 + 存量实测统一（全量 4956 只仅 1 只疑似且为正常放量）
 - **上下文浪费**：1M 上下文需控制输出（大输出限行、大文件分页）
 
 ---
