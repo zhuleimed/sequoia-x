@@ -102,9 +102,8 @@ def _format_strategy_line(
         f"累计{total_return:+.2%}",
         f"持仓{pos_count}只",
         f"资产{total_value:,.0f}",
+        f"交易{trade_count}笔",  # 始终显示（0 笔也显示，如 V2 首日无平仓）
     ]
-    if trade_count > 0:
-        summary_parts.append(f"交易{trade_count}笔")
     detail = " | ".join(summary_parts)
     return f"{emoji} {name}  {detail}"
 
