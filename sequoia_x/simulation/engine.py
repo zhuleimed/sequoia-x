@@ -661,11 +661,14 @@ class SimEngine:
     def _get_today_data(self, symbol: str, today_str: str) -> Optional[dict]:
         """获取某只股票今日的开盘价、前收盘价、成交量。
 
-        从 stock_daily 表查询：
+        从主库（settings.db_path）的 stock_daily 表查询：
           - 今日行（date = today_str）：获取 open, volume
           - 前一日行（date < today_str 的最新行）：获取 close（作为前收盘价）
+
+        注意：行情数据在全市场主库（sequoia_v2.db），模拟盘独立库（如 sim_v2.db）
+        只有 sim_* 表，必须用 settings.db_path 查行情。
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.settings.db_path) as conn:
             # 今日数据
             row = conn.execute(
                 "SELECT open, close, volume FROM stock_daily WHERE symbol=? AND date=?",
@@ -696,9 +699,12 @@ class SimEngine:
         return dict(row) if row else None
 
     def _get_index_df(self, today_str: str) -> Optional[pd.DataFrame]:
-        """获取上证指数日线数据（用于相对强弱比较）。"""
+        """获取上证指数日线数据（用于相对强弱比较）。
+
+        指数数据在主库（settings.db_path）的 index_daily 表。
+        """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.settings.db_path) as conn:
                 df = pd.read_sql(
                     "SELECT date, close FROM index_daily WHERE symbol=? "
                     "ORDER BY date",

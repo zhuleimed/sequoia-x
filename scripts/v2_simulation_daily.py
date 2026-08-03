@@ -43,8 +43,14 @@ SIM_V2_DB = str(PROJECT_DIR / "data" / "sim_v2.db")
 
 
 def is_last_trading_day_of_month(settings) -> bool:
-    """判断今天是否为月末最后交易日（查主库 stock_daily，用于重训定时提示）。"""
+    """判断今天是否为月末最后交易日（查主库 stock_daily，用于重训定时提示）。
+
+    注意：数据只同步到今天，MAX(date) 恒等于 today，不能单独作为月末依据；
+    必须叠加"今天已是当月下旬（≥25 日）"条件，否则月初（如 8-3）会误判。
+    """
     today = datetime.now().strftime("%Y-%m-%d")
+    if int(today[8:10]) < 25:
+        return False
     conn = sqlite3.connect(settings.db_path)  # stock_daily 在主库
     try:
         row = conn.execute(
