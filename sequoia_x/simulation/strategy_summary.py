@@ -30,6 +30,7 @@ logger = get_logger(__name__)
 
 PROJECT_DIR: Path = Path(__file__).resolve().parent.parent.parent
 LLM_DB: str = str(PROJECT_DIR / "data" / "sequoia_v2.db")
+V2_DB: str = str(PROJECT_DIR / "data" / "sim_v2.db")
 LSTM_DB: str = str(PROJECT_DIR / "data" / "sim_lstm.db")
 
 
@@ -120,7 +121,12 @@ def build_strategy_summary_text() -> str:
     llm_positions = _get_position_count(LLM_DB)
     llm_trades = _get_closed_trades_count(LLM_DB)
 
-    # LSTM 策略
+    # V2 策略（sim_v2.db 独立模拟盘）
+    v2_account = _get_account_summary(V2_DB)
+    v2_positions = _get_position_count(V2_DB)
+    v2_trades = _get_closed_trades_count(V2_DB)
+
+    # LSTM 策略（V1，已归档 2026-08-02，保留显示）
     lstm_account = _get_account_summary(LSTM_DB)
     lstm_positions = _get_position_count(LSTM_DB)
     lstm_trades = _get_closed_trades_count(LSTM_DB)
@@ -132,23 +138,26 @@ def build_strategy_summary_text() -> str:
             "1. LLM", "LLM选股", llm_account, llm_positions, llm_trades
         ),
         _format_strategy_line(
-            "2. LSTM", "LSTM-Transformer选股",
+            "2. V2", "V2模型选股", v2_account, v2_positions, v2_trades
+        ),
+        _format_strategy_line(
+            "3. LSTM", "LSTM-Transformer选股",
             lstm_account, lstm_positions, lstm_trades,
         ),
         "",
     ]
 
-    # 如果都有数据，加两策略对比
-    if llm_account is not None and lstm_account is not None:
+    # LLM vs V2 主力策略对比
+    if llm_account is not None and v2_account is not None:
         llm_ret = llm_account.get("total_return", 0.0)
-        lstm_ret = lstm_account.get("total_return", 0.0)
-        diff = llm_ret - lstm_ret
+        v2_ret = v2_account.get("total_return", 0.0)
+        diff = llm_ret - v2_ret
         if diff > 0.01:
-            lines.append(f"LLM 领先 LSTM {diff:+.2%}")
+            lines.append(f"LLM 领先 V2 {diff:+.2%}")
         elif diff < -0.01:
-            lines.append(f"LSTM 领先 LLM {abs(diff):+.2%}")
+            lines.append(f"V2 领先 LLM {abs(diff):+.2%}")
         else:
-            lines.append("两策略累计收益接近")
+            lines.append("LLM 与 V2 累计收益接近")
         lines.append("")
 
     return "\n".join(lines)
