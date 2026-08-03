@@ -1,15 +1,16 @@
-"""多策略汇总报告：LLM 策略 vs LSTM-Transformer 策略。
+"""多策略汇总报告：LLM 策略 vs V2 策略。
 
 每日推送对比摘要到微信，格式：
 
-📊 Sequoia-X 策略汇总 | 07-20
+Sequoia-X 策略汇总 | 07-20
 ════════════════════════════════════════
-❶ LLM选股  累计+X.X%  持仓X只
-❷ LSTM-Transformer选股  累计+X.X%  持仓X只
+1. LLM LLM选股  累计+X.X%  持仓X只
+2. V2 V2模型选股  累计+X.X%  持仓X只
 
 数据来源：
   - data/sequoia_v2.db  — LLM 策略模拟盘
-  - data/sim_lstm.db     — LSTM 策略模拟盘
+  - data/sim_v2.db      — V2 策略模拟盘
+（V1 LSTM 模拟盘已废止 2026-08-02，不再纳入）
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ logger = get_logger(__name__)
 PROJECT_DIR: Path = Path(__file__).resolve().parent.parent.parent
 LLM_DB: str = str(PROJECT_DIR / "data" / "sequoia_v2.db")
 V2_DB: str = str(PROJECT_DIR / "data" / "sim_v2.db")
-LSTM_DB: str = str(PROJECT_DIR / "data" / "sim_lstm.db")
+# LSTM_DB（V1 已废止 2026-08-02，不再纳入汇总）
 
 
 # ════════════════════════════════════════════════════════════
@@ -126,11 +127,6 @@ def build_strategy_summary_text() -> str:
     v2_positions = _get_position_count(V2_DB)
     v2_trades = _get_closed_trades_count(V2_DB)
 
-    # LSTM 策略（V1，已归档 2026-08-02，保留显示）
-    lstm_account = _get_account_summary(LSTM_DB)
-    lstm_positions = _get_position_count(LSTM_DB)
-    lstm_trades = _get_closed_trades_count(LSTM_DB)
-
     lines = [
         f"Sequoia-X 策略汇总 | {today_str}",
         "=" * 40,
@@ -139,10 +135,6 @@ def build_strategy_summary_text() -> str:
         ),
         _format_strategy_line(
             "2. V2", "V2模型选股", v2_account, v2_positions, v2_trades
-        ),
-        _format_strategy_line(
-            "3. LSTM", "LSTM-Transformer选股",
-            lstm_account, lstm_positions, lstm_trades,
         ),
         "",
     ]
