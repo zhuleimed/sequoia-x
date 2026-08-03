@@ -74,7 +74,13 @@ def main() -> None:
     logger.info("=" * 60)
 
     # ── 1. V2 模拟盘日操作（T+1 模型，与 LLM 模拟盘同引擎）──
-    sim = SimEngine(settings, db_path=SIM_V2_DB)
+    # V2 规则：持仓上限 10 只 × 每只 10 万（与回测 M4+TOP_N=10 一致，100万满仓）
+    sim = SimEngine(
+        settings,
+        db_path=SIM_V2_DB,
+        max_positions=10,
+        per_stock_budget=100_000,
+    )
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
     logger.info(f"V2 模拟盘更新完成: {result}")
 
@@ -91,6 +97,7 @@ def main() -> None:
                 result.get("sold", []),
                 cancelled=result.get("cancelled"),
                 pending_sells=result.get("marked_sell"),
+                max_positions=10,
             )
             header = f"【V2 模型模拟盘日报 {today}】\n"
             push_daily_summary(settings, header + text)

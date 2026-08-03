@@ -91,11 +91,20 @@ class SimEngine:
         db_path: 数据库路径。
     """
 
-    def __init__(self, settings: Settings, db_path: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db_path: str | None = None,
+        max_positions: int | None = None,
+        per_stock_budget: float | None = None,
+    ) -> None:
         self.settings = settings
         self.engine = DataEngine(settings)
         # V2 独立模拟盘：db_path 可自定义（sim_v2.db），与 LLM 模拟盘完全隔离
         self.db_path = db_path or settings.db_path
+        # 持仓参数可实例级覆盖（V2=10只×10万，LLM 默认 20只×5万 不变）
+        self.max_positions = max_positions or MAX_POSITIONS
+        self.per_stock_budget = per_stock_budget or PER_STOCK_BUDGET
         init_sim_tables(self.db_path)
 
     # ════════════════════════════════════════════════════════
@@ -280,9 +289,9 @@ class SimEngine:
         Returns:
             [{"symbol": "600519", "shares": 300, "price": 150.00, ...}, ...]
         """
-        # 运行时读取配置（支持 LSTM 等策略动态覆盖）
-        from sequoia_x.simulation.config import MAX_POSITIONS as _MAX_POS
-        from sequoia_x.simulation.config import PER_STOCK_BUDGET as _PER_BUDGET
+        # 使用实例级持仓参数（LLM 默认 20只×5万，V2 覆盖为 10只×10万）
+        _MAX_POS = self.max_positions
+        _PER_BUDGET = self.per_stock_budget
 
         signals = get_pending_signals(self.db_path)
         if not signals:
@@ -632,6 +641,7 @@ class SimEngine:
                 sold=results.get("sold", []),
                 cancelled=results.get("cancelled", []),
                 pending_sells=results.get("marked_sell", []),
+                max_positions=self.max_positions,
             )
             if text:
                 from wxpusher import WxPusher

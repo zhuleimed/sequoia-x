@@ -104,6 +104,7 @@ def build_daily_summary_text(
     sold: list[dict],
     cancelled: Optional[list[dict]] = None,
     pending_sells: Optional[list[dict]] = None,
+    max_positions: int = 20,
 ) -> str:
     """生成每日模拟盘组合日报。
 
@@ -114,6 +115,7 @@ def build_daily_summary_text(
         sold: 今日卖出列表。
         cancelled: 今日被取消的买入信号及原因。
         pending_sells: 标记为待卖出的持仓（明日开盘执行）。
+        max_positions: 持仓上限（LLM=20，V2=10），仅影响日报显示。
 
     Returns:
         格式化的日报文本，或空字符串（当日无交易时）。
@@ -137,7 +139,7 @@ def build_daily_summary_text(
         lines.append(f"    总资产: {total_value:>10,.2f}")
         lines.append(f"    累计收益: {total_return:>+8.2%}")
         lines.append(f"    现金: {cash:>10,.2f}  |  持仓市值: {stock_value:>10,.2f}")
-        lines.append(f"    持仓数量: {pos_count}/{20}")
+        lines.append(f"    持仓数量: {pos_count}/{max_positions}")
         lines.append("")
     else:
         lines.append("  ▶ 账户概况")
