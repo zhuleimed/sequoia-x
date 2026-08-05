@@ -122,26 +122,32 @@ def select_stocks(target_month: str) -> tuple[list[str], dict]:
 
 
 def push_recommendation(target_month: str, pred_info: dict) -> None:
-    """V2 荐股报告推送（wxpusher）。"""
+    """V2 荐股报告推送（wxpusher，直接 send_message，不依赖已废弃的选股播报格式）。"""
     try:
-        from sequoia_x.notify.wxpusher import WxPusherNotifier
+        from wxpusher import WxPusher
+
+        from sequoia_x.data.engine import DataEngine
+
         settings = get_settings()
-        notifier = WxPusherNotifier(
-            token=settings.wxpusher_token, topic_ids=settings.wxpusher_topic_ids,
-        )
         lines = [f"【V2 模型月度荐股 {target_month}】"]
         lines.append(f"股票池: {pred_info['n_pool']} 只 | "
                      f"T2 头部均值: {pred_info['t2_mean_top']:+.2%} | "
                      f"T4 头部均值: {pred_info['t4_mean_top']:+.2%}")
         lines.append("买入候选（T+1 开盘执行）:")
-        from sequoia_x.core.config import get_settings as _gs
-        from sequoia_x.data.engine import DataEngine
-        eng = DataEngine(_gs())
+        eng = DataEngine(settings)
         for i, sym in enumerate(pred_info["buy_list"], 1):
             name = eng.get_stock_name(sym)
             lines.append(f"  {i}. {sym} {name}")
-        notifier.send("\n".join(lines))
-        logger.info("V2 荐股已推送")
+        result = WxPusher.send_message(
+            content="\n".join(lines),
+            token=settings.wxpusher_token,
+            topic_ids=settings.wxpusher_topic_ids,
+            content_type=1,
+        )
+        if result.get("code") == 1000:
+            logger.info("V2 荐股已推送")
+        else:
+            logger.warning(f"V2 荐股推送失败: {result}")
     except Exception as e:
         logger.warning(f"V2 荐股推送失败: {e}")
 

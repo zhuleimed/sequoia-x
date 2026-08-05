@@ -73,16 +73,21 @@ class WxPusherNotifier:
         webhook_key: str = "default",
     ) -> None:
         """
-        将选股结果格式化为纯文本消息并通过 WxPusher 推送。
+        已废弃（2026-08-05）：'选股播报'（子策略选股列表）不再推送。
 
-        WxPusher 根据 topic_ids 路由消息，webhook_key 保留仅用于保持接口兼容性。
+        用户明确不需要各子策略的选股列表推送；main.py 的 LLM 降级推送
+        已改为单条"⚠️ AI 研判不可用"通知。任何调用本方法都会被拒绝，
+        如需推送文本请直接用 WxPusher.send_message。
 
         Args:
             symbols: 选股结果代码列表。
             strategy_name: 策略名称，用于消息标题。
-            webhook_key: 保留参数，未使用（WxPusher 按 topic 路由）。
+            webhook_key: 保留参数。
         """
-        message = self._build_message(symbols, strategy_name)
+        logger.error(
+            f"选股播报推送已废弃（{strategy_name}）：子策略选股列表不再推送"
+        )
+        return
 
         try:
             result = WxPusher.send_message(

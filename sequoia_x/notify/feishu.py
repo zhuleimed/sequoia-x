@@ -93,21 +93,20 @@ class FeishuNotifier:
         webhook_key: str = "default",
     ) -> None:
         """
-        将选股结果格式化为飞书卡片消息并 POST 至对应 Webhook。
+        已废弃（2026-08-05）：'选股播报'（子策略选股列表）不再推送。
 
-        根据 webhook_key 从 Settings 中查找专属 URL；
-        若未配置，则 fallback 到 feishu_webhook_url。
+        与 WxPusherNotifier.send 同步废弃——用户明确不需要子策略列表推送。
+        任何调用本方法都会被拒绝。
 
         Args:
             symbols: 选股结果代码列表。
             strategy_name: 策略名称，用于卡片标题。
-            webhook_key: 策略标识，用于路由到对应飞书机器人。
-
-        Raises:
-            不抛出异常，HTTP 失败时记录 ERROR 日志。
+            webhook_key: 策略标识。
         """
-        url = self.settings.get_webhook_url(webhook_key)
-        payload = self._build_card(symbols, strategy_name)
+        logger.error(
+            f"选股播报推送已废弃（{strategy_name}）：子策略选股列表不再推送"
+        )
+        return
 
         try:
             resp = requests.post(
