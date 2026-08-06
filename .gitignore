@@ -33,3 +33,6 @@ optuna_study.db
 .pytest_cache/
 hypothesis/
 .hypothesis/
+
+# V3 实验中间结果（断点续跑标记，不入库）
+.tmp/

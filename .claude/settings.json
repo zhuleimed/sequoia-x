@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x && /home/zhulei/anaconda3/envs/zhulei_py312/bin/python scripts/save_research_state.py --print"
+          }
+        ]
+      }
+    ]
+  }
+}
