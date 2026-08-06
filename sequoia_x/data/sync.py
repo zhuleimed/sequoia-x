@@ -665,7 +665,11 @@ class DataSync:
         symbols_list: list[str] = list(symbol_starts.keys())
         # ── 三轨制：源健康追踪 + 动态优先级 ──
         # 三个数据源平级独立，按健康度排序尝试
-        SOURCE_NAMES = ["tencent", "sina", "baostock"]
+        # 2026-08-03: baostock 排第一（2026-06-20 起异常一个多月，08-03 实测恢复且速度最快 29ms/请求）
+        #   - 全字段（OHLCV+4估值+换手率 turn），前复权口径正确（Tencent 除权后历史价不调整，产生断层）
+        #   - ⚠️ baostock 为 TCP 长连接（端口 10070），不允许多进程同时拉取 → 本函数必须单进程串行
+        #   - 异常时自动降级：连续失败 5 次 → 排到最后；每 50 只试探恢复一级
+        SOURCE_NAMES = ["baostock", "tencent", "sina"]
         source_failures: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
         source_successes: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
         FAILOVER_THRESHOLD = 5           # 连续失败 N 次 → 降级到最后
@@ -1452,11 +1456,13 @@ class DataSync:
         return count
 
     def _fill_valuation_gaps(self, days: int = 5) -> dict:
-        """回填估值字段（TDX/mootdx 主力，baostock 后备）。
+        """回填估值字段（baostock 主力，TDX 后备）。
 
-        2026-07-24: 切换 TDX 为主力估值源。
-        比 baostock 快 50 倍(0.04s vs 2s)，稳定性 100%。
-        baostock 代码保留作为后备，TDX 不可用时自动切换。
+        2026-08-03 优化（估值失真事故后，全量修复见 scripts/backfill_valuation_full.py）:
+          1. 优先级反转: baostock 优先（返回当日真实历史估值，亏损股为负值）
+             → TDX 后备（财务快照推算，仅补 peTTM/pbMRQ，ps/pcf 不动）
+          2. 缺失判定含 =0（0 视为缺失；负值是亏损股真实语义，不补）
+          3. baostock 按股票一次拉全区间批量更新（原逐条查询，提速 ~1500 倍）
         """
         today_str: str = date.today().strftime("%Y-%m-%d")
         start_date: str = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -1465,8 +1471,8 @@ class DataSync:
         null_rows = self._db_conn.execute(
             "SELECT symbol, date, close FROM stock_daily "
             "WHERE date >= ? AND date <= ? "
-            "AND (peTTM IS NULL OR pbMRQ IS NULL OR psTTM IS NULL "
-            "     OR pcfNcfTTM IS NULL) "
+            "AND (peTTM IS NULL OR peTTM = 0 OR pbMRQ IS NULL OR pbMRQ = 0 "
+            "     OR psTTM IS NULL OR psTTM = 0 OR pcfNcfTTM IS NULL OR pcfNcfTTM = 0) "
             "ORDER BY symbol, date",
             (start_date, today_str)
         ).fetchall()
@@ -1479,128 +1485,136 @@ class DataSync:
         t0 = time.time()
         logger.info(f"_fill_valuation_gaps: 发现 {len(null_rows)} 条缺失记录")
 
-        # ── Phase 3a: TDX/mootdx 估值回填（主力，高速稳定）──
-        tdx_filled = 0
-        tdx_failed = 0
-        tdx_available = False
+        # ── Phase 3a: baostock 估值回填（主力，真实历史值）──
+        bs_filled = 0
+        bs_available = False
         try:
-            tdx = TDXSource()
-            # 快速探测 TDX 是否可用
-            test_val = tdx.get_valuation('000001')
-            if test_val is not None:
-                tdx_available = True
-                logger.info("_fill_valuation_gaps: TDX/mootdx 可用，开始回填")
+            import baostock as bs
+            if self._bs_login():
+                bs_available = True
+                logger.info("_fill_valuation_gaps: baostock 可用，开始回填")
 
-                # 按股票分组，每只股票只查一次 finance（估值同一日期共享）
-                symbols = list(set(row[0] for row in null_rows))
-                tdx_cache: dict[str, dict] = {}
-                for i, sym in enumerate(symbols):
-                    val = tdx.get_valuation(sym)
-                    if val is not None:
-                        tdx_cache[sym] = val
-                    if (i + 1) % 100 == 0:
-                        logger.info(
-                            f"  TDX 进度: {i+1}/{len(symbols)} 只 "
-                            f"(成功={len(tdx_cache)}, {time.time()-t0:.0f}s)"
-                        )
-
-                # 用缓存批量更新数据库（结合数据库中的收盘价计算 PE/PB/PS/PCF）
+                # 按股票分组：每股一次拉全区间（原逐条查询，提速 ~1500 倍）
+                by_symbol: dict[str, list] = {}
                 for sym, dt, price in null_rows:
-                    if sym in tdx_cache:
-                        v = tdx_cache[sym]
-                        price_f = float(price) if price else 0.0
-                        # 从 TDX 财务数据 + 数据库收盘价计算四项估值
-                        eps = v.get('_eps', 0)
-                        bvps = v.get('_bvps', 0)
-                        sps = v.get('_revenue', 0) / v.get('_total_shares', 1) if v.get('_total_shares', 0) > 0 else 0
-                        cfps = v.get('_cashflow', 0) / v.get('_total_shares', 1) if v.get('_total_shares', 0) > 0 else 0
-                        pe = round(price_f / eps, 2) if eps > 0 and price_f > 0 else 0.0
-                        pb = round(price_f / bvps, 2) if bvps > 0 and price_f > 0 else 0.0
-                        ps = round(price_f / sps, 2) if sps > 0 and price_f > 0 else 0.0
-                        pcf = round(price_f / cfps, 2) if cfps > 0 and price_f > 0 else 0.0
-                        try:
-                            self._db_conn.execute(
-                                "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=? "
-                                "WHERE symbol=? AND date=?",
-                                (pe, pb, ps, pcf, sym, dt)
-                            )
-                            tdx_filled += 1
-                        except Exception:
-                            tdx_filled += 1  # 有异常也算尝试了
-                    else:
-                        tdx_failed += 1
+                    by_symbol.setdefault(sym, []).append(dt)
 
+                requests_since_login = 0
+                for i, (sym, dates) in enumerate(by_symbol.items()):
+                    # baostock 连接上限管理（同 sync_daily 模式，1200 次请求重新登录）
+                    if requests_since_login >= 1200 and i > 0:
+                        self._bs_logout()
+                        if not self._bs_login():
+                            raise RuntimeError("baostock 重新登录失败")
+                        requests_since_login = 0
+                    try:
+                        bs_code = self.engine._to_baostock_code(sym)
+                        rs = bs.query_history_k_data_plus(
+                            bs_code,
+                            "date,peTTM,pbMRQ,psTTM,pcfNcfTTM",
+                            start_date=dates[0], end_date=dates[-1],
+                            frequency="d", adjustflag="2",
+                        )
+                        requests_since_login += 1
+                        if rs.error_code == "0":
+                            data = self._bs_get_data(rs)
+                            if data is not None and not data.empty:
+                                # 批量更新该股缺失窗口内的行；空字符串 → None（仍缺失，下轮再补）
+                                update_rows = []
+                                for _, row in data.iterrows():
+                                    dt = str(row.get("date"))
+                                    vals = []
+                                    for f in ("peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"):
+                                        v = row.get(f)
+                                        s = str(v).strip() if v is not None else ""
+                                        vals.append(float(s) if s and s.lower() != "nan" else None)
+                                    update_rows.append((*vals, sym, dt))
+                                if update_rows:
+                                    self._db_conn.executemany(
+                                        "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=? "
+                                        "WHERE symbol=? AND date=?",
+                                        update_rows,
+                                    )
+                                    bs_filled += len(update_rows)
+                    except Exception:
+                        pass  # 单只失败跳过，其余继续（断点式容忍）
                 self._db_conn.commit()
-                tdx.close()
+                self._bs_logout()
                 elapsed = time.time() - t0
                 logger.info(
-                    f"_fill_valuation_gaps TDX: 完成 {tdx_filled} 条, "
-                    f"失败 {tdx_failed} 条, 耗时 {elapsed:.0f}s"
+                    f"_fill_valuation_gaps baostock: 完成 {bs_filled} 条, "
+                    f"耗时 {elapsed:.0f}s"
                 )
             else:
-                logger.warning("_fill_valuation_gaps: TDX 探测失败，切换 baostock")
+                logger.warning("_fill_valuation_gaps: baostock 登录失败，切换 TDX 后备")
         except Exception as e:
-            logger.warning(f"_fill_valuation_gaps: TDX 异常({e})，切换 baostock")
+            logger.warning(f"_fill_valuation_gaps: baostock 异常({e})，切换 TDX 后备")
 
-        # ── Phase 3b: baostock 后备（TDX 不可用或部分失败时）──
-        baostock_filled = 0
-        if not tdx_available or tdx_failed > 0:
+        # ── Phase 3b: TDX 后备（baostock 不可用时，仅补 peTTM/pbMRQ）──
+        tdx_filled = 0
+        if not bs_available:
             try:
-                import baostock as bs
-                if self._bs_login():
-                    # 重新查询仍然缺失的记录
-                    remaining = self._db_conn.execute(
-                        "SELECT symbol, date FROM stock_daily "
-                        "WHERE date >= ? AND date <= ? "
-                        "AND (peTTM IS NULL OR peTTM = 0 OR pbMRQ IS NULL OR pbMRQ = 0 "
-                        "     OR psTTM IS NULL OR psTTM = 0 OR pcfNcfTTM IS NULL OR pcfNcfTTM = 0) "
-                        "ORDER BY symbol, date",
-                        (start_date, today_str)
-                    ).fetchall()
+                tdx = TDXSource()
+                # 快速探测 TDX 是否可用
+                test_val = tdx.get_valuation('000001')
+                if test_val is not None:
+                    logger.info("_fill_valuation_gaps: TDX 后备回填（仅 peTTM/pbMRQ）")
 
-                    if remaining:
-                        logger.info(
-                            f"_fill_valuation_gaps: baostock 后备回填 {len(remaining)} 条"
-                        )
-                        for sym, dt in remaining:
+                    # 按股票分组，每只股票只查一次 finance
+                    symbols = list(set(row[0] for row in null_rows))
+                    tdx_cache: dict[str, dict] = {}
+                    for i, sym in enumerate(symbols):
+                        val = tdx.get_valuation(sym)
+                        if val is not None:
+                            tdx_cache[sym] = val
+                        if (i + 1) % 100 == 0:
+                            logger.info(
+                                f"  TDX 进度: {i+1}/{len(symbols)} 只 "
+                                f"(成功={len(tdx_cache)}, {time.time()-t0:.0f}s)"
+                            )
+
+                    # 只更新 peTTM/pbMRQ（ps/pcf 不动——推算值会覆盖 baostock 真实值）
+                    for sym, dt, price in null_rows:
+                        if sym in tdx_cache:
+                            v = tdx_cache[sym]
+                            price_f = float(price) if price else 0.0
+                            eps = v.get('_eps', 0)
+                            bvps = v.get('_bvps', 0)
+                            pe = round(price_f / eps, 2) if eps > 0 and price_f > 0 else 0.0
+                            pb = round(price_f / bvps, 2) if bvps > 0 and price_f > 0 else 0.0
                             try:
-                                bs_code = self.engine._to_baostock_code(sym)
-                                rs = bs.query_history_k_data_plus(
-                                    bs_code,
-                                    "peTTM,pbMRQ,psTTM,pcfNcfTTM",
-                                    start_date=dt, end_date=dt,
-                                    frequency="d", adjustflag="2",
+                                self._db_conn.execute(
+                                    "UPDATE stock_daily SET peTTM=?, pbMRQ=? "
+                                    "WHERE symbol=? AND date=?",
+                                    (pe, pb, sym, dt)
                                 )
-                                if rs.error_code == "0":
-                                    data = self._bs_get_data(rs)
-                                    if data is not None and not data.empty:
-                                        row = data.iloc[0]
-                                        self._db_conn.execute(
-                                            "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=? "
-                                            "WHERE symbol=? AND date=?",
-                                            (row.get("peTTM"), row.get("pbMRQ"),
-                                             row.get("psTTM"), row.get("pcfNcfTTM"),
-                                             sym, dt)
-                                        )
-                                        baostock_filled += 1
+                                tdx_filled += 1
                             except Exception:
-                                pass
-                        self._db_conn.commit()
-                    self._bs_logout()
+                                tdx_filled += 1  # 有异常也算尝试了
+
+                    self._db_conn.commit()
+                    tdx.close()
+                    elapsed = time.time() - t0
+                    logger.info(
+                        f"_fill_valuation_gaps TDX 后备: 完成 {tdx_filled} 条, "
+                        f"耗时 {elapsed:.0f}s"
+                    )
+                else:
+                    logger.warning("_fill_valuation_gaps: TDX 探测失败，估值保持原值")
             except Exception as e:
-                logger.warning(f"_fill_valuation_gaps: baostock 后备也失败: {e}")
+                logger.warning(f"_fill_valuation_gaps: TDX 后备异常: {e}")
 
         self._close_db()
-        total_filled = tdx_filled + baostock_filled
+        total_filled = bs_filled + tdx_filled
         total_null = len(null_rows)
         total_failed = total_null - total_filled if total_null > total_filled else 0
         logger.info(
             f"_fill_valuation_gaps: 总计 {total_filled} 条 "
-            f"(TDX={tdx_filled}, baostock={baostock_filled}), "
+            f"(baostock={bs_filled}, TDX={tdx_filled}), "
             f"失败={total_failed}"
         )
         return {"status": "ok", "filled": total_filled, "failed": total_failed,
-                "tdx_filled": tdx_filled, "baostock_filled": baostock_filled}
+                "baostock_filled": bs_filled, "tdx_filled": tdx_filled}
 
     def sync_index_daily(self, force: bool = False) -> dict:
         """同步 6 大指数日线数据到 index_daily 表。

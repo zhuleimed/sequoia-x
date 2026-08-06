@@ -339,11 +339,12 @@ class TestFillValuationSession:
 
         def query_side_effect(bs_code, fields, start_date, end_date, frequency, adjustflag):
             # 对 query_trade_dates 的调用返回正常
-            if "date" in fields and "peTTM" not in fields:
+            if "peTTM" not in fields:
                 return make_bs_result([], error_code="0")
+            # 2026-08-03 重构：估值查询改为带 date 字段（每股一次拉全区间）
             return make_bs_result([
-                ["10.0", "1.0", "2.0", "5.0"],
-            ], fields=["peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"])
+                [test_date, "10.0", "1.0", "2.0", "5.0"],
+            ], fields=["date", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM"])
         mock_query.side_effect = query_side_effect
 
         with tempfile.TemporaryDirectory() as tmp_dir:
