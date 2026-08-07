@@ -110,9 +110,10 @@ class V2Config:
 
     # ── 特征 ──
     # 2026-08-07: 88+33=121 维扩展特征拼接（fund_flow/finance/holders/consensus/news/xdxr/forecast）
-    #   默认 False = 现有 88 维行为不变；8 月首次月度重训前置 True 启用
+    #   True=启用（8 月首次月度重训起, 2026-08-07 定稿: 月末自动链按此重建 121 维缓存）
+    #   数据不全时自动回退 88 维（4 层机制, 见 V3 文档 §19.2）——不会因启用而中断月度流程
     #   仅作用于树模型链路（T2/T1/T3, include_market_state=True）；T4 LSTM 保持 80 维不拼
-    extra_features: bool = False
+    extra_features: bool = True
     feature_ma_periods: tuple = (5, 10, 20, 60, 120)
     feature_rsi_period: int = 14
     feature_atr_period: int = 14
