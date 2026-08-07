@@ -154,6 +154,33 @@
 - **Optuna 复用**: 树模型 Study 跨 Fold 共享（`load_if_exists=True`），skip 优化
 - **T4 best_params**: `best_params_t4_lstm.json` 存在则跳过 Optuna Phase 1
 
+## 扩展维度数据工程（2026-08-07 起）
+
+**架构**：交易日照旧（OHLCV 日频同步不变）；扩展维度（资金流/财务/股东/研报/新闻/分红）**仅在 V2 月度重训前补齐**（`v2_monthly_retrain.py` Step0，每月 1 日 00:00）。
+
+**代码归属（用户明确要求）**：020_TDX 为探索验证项目；**一切拉取/清洗/重训相关生产代码必须在本项目**。同步规则见 `V3研究方向与实验研究记录.md §16`。
+
+**生产代码位置**：
+- 采集器：`scripts/collect_extra_features.py`（全市场 5206 只，断点续跑 + failed 清单 + refresh-days）
+- DDE 资金流自算：`scripts/dde_calculator.py`（mootdx 逐笔，实盘当日资金流）
+- mootdx 客户端：`scripts/mootdx_client.py`（**必须指定服务器**，内置列表已失效）
+- 特征工程（规划）：`sequoia_x/features_extra/`（88 维 → 88+N）
+- 数据落盘：`data/extra_features/{subset}/{code}.parquet` + failed 清单 + manifest.json
+- 股票列表：`scripts/all_a_codes.txt`（全市场沪深 A 股，与池子规则解耦）
+
+**数据源**：
+| 数据 | 主源 | 特点 |
+|------|------|------|
+| fund_flow | 东财 push2his **直连**（间隔≥1s 限流）| 120 天五档；主力=大单+超大单 |
+| finance | 同花顺 akshare | 102 期全历史（1998 起），混合列已清洗 |
+| holders/reports/news | 东财各子域**直连**（datacenter-web/reportapi/search-api）| 限频靠重试+failed 清单补偿；reportapi 间歇封禁→串行 |
+| xdxr | mootdx（通达信直连）| 全历史分红，独立数据面 |
+| forecast | baostock | 业绩预告事件（类型/增幅/发布日），单进程强制 |
+| news_cls（备源） | 财联社 api3.cls.cn | 快讯流+关联股票，签名无盐，rn≤5，并入月末拉取 |
+| 实盘资金流 | mootdx 逐笔 DDE 自算 | 复刻东财口径，摆脱东财依赖 |
+
+**mootdx 服务器修复**：内置 HQ_HOSTS K线已失效 → 指定 `('180.153.18.170', 7709)`；TDXSource 已修复（`tencent_source.py`，含 offset=5 bug）。
+
 ## 目录速查
 
 | 路径 | 用途 |

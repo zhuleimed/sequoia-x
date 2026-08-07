@@ -56,9 +56,10 @@ STOCK_POOL_PATH = PROJECT_ROOT / "output/backtest_v2/.stock_pool.json"
 
 TRAIN_MONTHS = 12
 FEAT_WORKERS = 8
-# ⚠️ 2026-08-06 单月验证调整：workers 8 → 16（V3 文档 §8.6 记录）
-#   实测单 worker 仅 2.1 核（TF 2/1 + OMP=2）→ 16 × 2.1 = 34 核 ≤ 36 安全；
-#   训练内存实测 ~2-3GB/worker → 16 × 3 = 48GB 远低于 187GB
+# ⚠️ 2026-08-07 方案 B 实测失败后回退（V3 文档 §8.7 记录）：
+#   方案 B（12 workers × TF intra 4）实测：每 worker 仅 1.32→1.47 核（+11%），
+#   但 workers 16→12 使总吞吐反降（21核→18核）——LSTM 瓶颈在单线程小算子，
+#   intra 线程提升无效。回退方案 A：16 workers × TF intra 2（总吞吐 21 核最优）
 N_POOL_WORKERS = 16
 
 # 训练超参（V2 定稿 + 方向三设计）
@@ -193,7 +194,7 @@ def _configure_tf():
     if _TF_CONFIGURED:
         return
     import tensorflow as tf
-    tf.config.threading.set_intra_op_parallelism_threads(2)
+    tf.config.threading.set_intra_op_parallelism_threads(2)   # 方案 A 定稿（方案 B 实测无效）
     tf.config.threading.set_inter_op_parallelism_threads(1)
     _TF_CONFIGURED = True
 
@@ -211,7 +212,7 @@ def _rankic_month_worker(args: tuple) -> tuple:
     _os.environ["OPENBLAS_NUM_THREADS"] = "1"
     _os.environ["MKL_NUM_THREADS"] = "1"
     # TF 线程：环境变量（TF import 时读取）+ 一次性 API 设置（防常驻 worker 二次调用崩溃）
-    _os.environ["TF_NUM_INTRAOP_THREADS"] = "2"
+    _os.environ["TF_NUM_INTRAOP_THREADS"] = "2"   # 方案 A 定稿（方案 B 实测无效）
     _os.environ["TF_NUM_INTEROP_THREADS"] = "1"
     _configure_tf()
     print(f"[Worker {month}] 启动诊断: CPU核={_os.cpu_count()} TF=2/1 OMP=2 KMP清除", flush=True)

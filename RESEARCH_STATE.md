@@ -1,6 +1,6 @@
 # 研究状态快照（RESEARCH_STATE）
 
-> 自动生成: 2026-08-07 07:30:01 | 生成器: scripts/save_research_state.py | 铁律七
+> 自动生成: 2026-08-07 16:21:35 | 生成器: scripts/save_research_state.py | 铁律七
 > 本文件是研究状态的**单一事实源**——会话启动/恢复时优先读取，1 分钟重建全部状态。
 > 详细过程记录见 `V3研究方向与实验研究记录.md`；教训/规则见 memory/。
 
@@ -10,17 +10,17 @@
 |------|------|------|---------|---------|
 | 方向一 LGBMRanker | 已完成 | 70/70 个月 | 70 个月明细 | (无日志) |
 | 方向二 DLinear | 已完成 | 70/70 个月 | 70 个月明细 | (无日志) |
-| 方向三 RankIC-LSTM | 运行中 | 17/70 个月 | 无报告 | (无日志) |
+| 方向三 RankIC-LSTM | 已完成 | 70/70 个月 | 70 个月明细 | (无日志) |
 | 方向四 Kronos | 未启动/调研完成 | — | — | — |
 | 方向五 PatchTST | 未启动/调研完成 | — | — | — |
 
 ## 二、运行进程
 
-experiment_rankic、supervisor
+无相关进程（实验/监督/管线均未运行）
 
 ## 三、监督链状态
 
-监督日志尾部: 单月验证有效: n=2978 rankic_std=0.3717 huber_std=0.0544 | [supervisor] 全量实验已在运行，跳过启动 2026年 08月 07日 星期五 07:06:15 CST | [supervisor] 等待中... 已完成 17/70 (2026年 08月 07日 星期五 07:15:15 CST) | [supervisor] 等待中... 已完成 17/70 (2026年 08月 07日 星期五 07:25:15 CST)
+监督日志尾部: 已保存: /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/output/backtest_v2/expe | [supervisor] ✅ 分析完成 2026年 08月 07日 星期五 15:38:08 CST — 结果见 /public/home/hpc/zhulei/superman/quant/code | [supervisor] ═══ 监督链结束 2026年 08月 07日 星期五 15:38:08 CST ═══
 
 ## 四、待办（详见 V3 文档 §14）
 

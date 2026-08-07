@@ -48,6 +48,45 @@ def get_target_month() -> str:
     return datetime.now().strftime("%Y-%m")
 
 
+def _check_extra_coverage() -> None:
+    """扩展维度覆盖率检查: 某类 <90% 时日志告警 + wxpusher 推送（不阻断重训）。"""
+    import json
+    import os
+    extra_dir = PROJECT_DIR / "data/extra_features"
+    manifest_path = extra_dir / "manifest.json"
+    if not manifest_path.exists():
+        logger.warning("Step0: 无 manifest.json, 跳过覆盖率检查")
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        summary = manifest.get("subsets", {})
+        total = 5206
+        low = []
+        for subset, stat in summary.items():
+            ok = stat.get("success", 0)
+            cov = ok / total * 100
+            if cov < 90:
+                low.append(f"{subset}={cov:.0f}%")
+                logger.warning(f"Step0: {subset} 覆盖率仅 {cov:.0f}% ({ok}/{total})")
+        if low:
+            try:
+                from wxpusher import WxPusher
+                settings = get_settings()
+                WxPusher.send_message(
+                    content=f"⚠️ 扩展维度覆盖率不足: {', '.join(low)}（V2重训 Step0）",
+                    token=settings.wxpusher_token,
+                    topic_ids=settings.wxpusher_topic_ids,
+                    content_type=1,
+                )
+                logger.info(f"Step0: 覆盖率告警已推送: {low}")
+            except Exception as e:
+                logger.warning(f"Step0: 告警推送失败: {e}")
+        else:
+            logger.info("Step0: 扩展维度覆盖率全部达标(≥90%)")
+    except Exception as e:
+        logger.warning(f"Step0: 覆盖率检查异常: {e}")
+
+
 def build_prediction_cache(target_month: str) -> bool:
     """T2/T1/T3 预测缓存构建（增量，断点续跑）。"""
     logger.info(f"Step1: T2/T1/T3 预测缓存构建（{target_month}）...")
@@ -157,6 +196,21 @@ def main() -> None:
     logger.info("=" * 60)
     logger.info(f"V2 月度重训启动 | 目标月={target_month} | {datetime.now()}")
     logger.info("=" * 60)
+
+    # ── Step0: 辅助维度增量刷新（资金流向/财务/股东/研报/新闻/分红, 见 collect_extra_features.py）──
+    #    月末 19:00 已全量刷新（month_end_pull.py, 24-48h 缓冲）; 1 号只补缺失+failed 清单
+    #    完成后做覆盖率检查: <90% 告警推送（当月特征质量可见, 不阻断重训）
+    try:
+        subprocess.run(
+            [PYTHON, str(PROJECT_DIR / "scripts/collect_extra_features.py"),
+             "--codes", str(PROJECT_DIR / "scripts/all_a_codes.txt"),
+             "--refresh-days", "40"],
+            check=False, timeout=3600,
+        )
+        logger.info("Step0: 辅助维度刷新完成")
+        _check_extra_coverage()
+    except Exception as e:
+        logger.warning(f"Step0: 辅助维度刷新异常(不阻断重训): {e}")
 
     # ── Step1: T2/T1/T3 缓存构建（增量，断点续跑）──
     if not build_prediction_cache(target_month):

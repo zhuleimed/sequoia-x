@@ -406,10 +406,16 @@ class TDXSource:
 
     @property
     def client(self):
-        """延迟初始化 mootdx 客户端。"""
+        """延迟初始化 mootdx 客户端。
+
+        2026-08-07 修复: mootdx 内置 HQ_HOSTS（银河系）K线已失效（仅 finance 可用），
+        必须手动指定实测可达的行情服务器，否则 bars() 静默返回空。
+        """
         if self._client is None:
             from mootdx.quotes import Quotes
-            self._client = Quotes.factory(market='std')
+            self._client = Quotes.factory(market='std',
+                                          server=('180.153.18.170', 7709),  # 上海电信主站Z1
+                                          timeout=10)
         return self._client
 
     def get_valuation(self, symbol: str) -> dict | None:
@@ -457,7 +463,7 @@ class TDXSource:
 
             # 尝试从最新 K 线获取价格计算 PE/PB/PS/PCF
             try:
-                kline = self.client.bars(symbol=symbol, frequency=9, offset=0, start=0)
+                kline = self.client.bars(symbol=symbol, frequency=9, offset=5, start=0)
                 if kline is not None and len(kline) > 0:
                     price = float(kline.iloc[-1]['close'])
                     if eps > 0:
