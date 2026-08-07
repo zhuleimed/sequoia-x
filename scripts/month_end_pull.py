@@ -56,18 +56,27 @@ def _notify(title: str, body: str) -> None:
 
 
 def _extra_coverage_ok() -> tuple[bool, str]:
-    """覆盖率检查: 7 类 parquet 文件数 / 5206 ≥ 90%（文件计数, 含存量+本次; 非 manifest 单次计数）。"""
+    """覆盖率检查（2026-08-07 修正: 区分关键面/语义可缺失面）。
+
+    关键面 fund_flow/finance/holders（每只股票理应都有）: ≥90% 才允许重建 121 维;
+    语义可缺失面 consensus/news/xdxr/forecast（缺失合法, 特征层 fillna(0)）:
+    只报告实际覆盖率, 不阻断——如 consensus 实测 ~64%（A 股约 36% 无研报覆盖,
+    要求 ≥90% 会永久降级 88 维, 与设计矛盾）。
+    """
     total = 5206
-    low = []
-    for subset in ("fund_flow", "finance", "holders", "consensus", "news", "xdxr", "forecast"):
+    KEY = ("fund_flow", "finance", "holders")
+    SOFT = ("consensus", "news", "xdxr", "forecast")
+
+    def cov(subset: str) -> float:
         d = PROJECT_DIR / "data/extra_features" / subset
         n = len(list(d.glob("*.parquet"))) if d.exists() else 0
-        cov = n / total * 100
-        if cov < 90:
-            low.append(f"{subset}={cov:.0f}%({n})")
+        return n / total * 100
+
+    low = [f"{s}={cov(s):.0f}%" for s in KEY if cov(s) < 90]
+    soft = [f"{s}={cov(s):.0f}%" for s in SOFT]
     if low:
-        return False, "覆盖率不足: " + ", ".join(low)
-    return True, "7 类全部 ≥90%"
+        return False, "关键面不足: " + ", ".join(low)
+    return True, "关键面全部 ≥90% (" + ", ".join(soft) + ")"
 
 
 def _verify_caches() -> tuple[bool, str]:
