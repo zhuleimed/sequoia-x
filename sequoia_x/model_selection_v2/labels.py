@@ -17,6 +17,25 @@ from sequoia_x.model_selection_v2.features import build_stock_features
 logger = get_logger(__name__)
 
 
+def resolve_sample_end(cfg: V2Config, db_path: str = "data/sequoia_v2.db") -> str:
+    """采样截止日 = max(config 写死值, 数据库最后交易日)（2026-08-07 月末自动链）。
+
+    月末缓存重建（8/31）与 9/1 重训必须用相同 sample_end 否则缓存 hash 失配。
+    config.sample_end 是写死的旧值（2026-07-28）→ 运行时按 DB 最后交易日自动扩展,
+    两侧口径一致（都用"已入库的最后交易日"）。
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path)
+        last = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()[0]
+        conn.close()
+        if last and last > cfg.sample_end:
+            return last
+    except Exception:
+        pass
+    return cfg.sample_end
+
+
 def _get_sample_dates(engine: DataEngine, cfg: V2Config) -> list[str]:
     """获取采样日期列表：每月 2 天（月初 5 日 + 月中 15 日）。
 

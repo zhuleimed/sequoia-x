@@ -626,6 +626,12 @@ def build_cache(
     if include_extra:
         logger.info("🔧 扩展特征已启用: 88+33=121 维（训练缓存+预测特征一致）")
 
+    # 0b. sample_end 动态化（2026-08-07 月末自动链）: 与缓存重建同口径（DB 最后交易日),
+    #     否则 hash 含写死的 sample_end → 9/1 重训与 8/31 重建 hash 失配
+    from sequoia_x.model_selection_v2.labels import resolve_sample_end
+    cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
+    logger.info(f"采样截止日（动态）: {cfg.sample_end}")
+
     # 1. 一次 baostock 获取标准股票池（写入文件供 worker 读取）
     stock_pool_path = output_path.parent / ".stock_pool.json"
     if stock_pool_path.exists():

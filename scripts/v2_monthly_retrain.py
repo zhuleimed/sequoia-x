@@ -87,6 +87,77 @@ def _check_extra_coverage() -> None:
         logger.warning(f"Step0: 覆盖率检查异常: {e}")
 
 
+def _notify(title: str, body: str) -> None:
+    """wxpusher 微信推送（失败告警, 不阻断流程）。"""
+    try:
+        from wxpusher import WxPusher
+        settings = get_settings()
+        WxPusher.send_message(content=f"{title}\n{body}", token=settings.wxpusher_token,
+                              topic_ids=settings.wxpusher_topic_ids, content_type=1)
+        logger.info(f"告警已推送: {title}")
+    except Exception as e:
+        logger.warning(f"告警推送失败: {e}")
+
+
+def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
+    """等待月末自动链的训练缓存就绪（2026-08-07: 8/31 19:00 拉取+重建 2-6h,
+    9/1 00:00 重训启动时可能尚未完成 → 每 5min 轮询, 最长 12h 后失败告警）。
+
+    判定: 树模型缓存(121/88 按 config) metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。
+    """
+    import json as _json
+    import time
+
+    from sequoia_x.model_selection_v2.config import get_config
+    from sequoia_x.model_selection_v2.labels import _dataset_cache_path, resolve_sample_end
+
+    cfg = get_config()
+    cfg.sample_end = resolve_sample_end(cfg)  # DB 最后交易日（与月末重建同口径）
+    last_date = cfg.sample_end
+    pool_path = PROJECT_DIR / "output/backtest_v2/.stock_pool.json"
+    if not pool_path.exists():
+        _notify("❌ V2 重训: .stock_pool.json 缺失",
+                "月末自动链未正常运行（应写入股票池）。请检查 logs/month_end_pull_*.log")
+        return False
+    symbols = _json.loads(pool_path.read_text())
+    include_extra = bool(getattr(cfg, "extra_features", False))
+    cache_dir, _ = _dataset_cache_path(cfg, symbols, include_market_state=True,
+                                       include_extra=include_extra)
+    want_dim = 121 if include_extra else 88
+
+    deadline = time.time() + max_wait_h * 3600
+    waited = 0
+    while True:
+        # 就绪判定
+        reason = None
+        meta_path = cache_dir / "metadata.json"
+        if meta_path.exists():
+            try:
+                m = _json.loads(meta_path.read_text())
+                if m["X_shape"][2] == want_dim:
+                    dates = _json.loads((cache_dir / "dates.json").read_text())
+                    if dates and dates[-1] >= last_date:
+                        logger.info(f"缓存就绪: {cache_dir.name} {m['X_shape']} 止于 {dates[-1]}")
+                        return True
+                    reason = f"采样日未覆盖 {last_date}（止于 {dates[-1] if dates else '空'}）"
+                else:
+                    reason = f"维度错误 {m['X_shape'][2]}≠{want_dim}"
+            except Exception as e:
+                reason = f"缓存元数据异常: {e}"
+        else:
+            reason = f"缓存缺失 {cache_dir.name}（月末自动链重建中, 预计 2-6h）"
+
+        if time.time() > deadline:
+            _notify("❌ V2 重训等待缓存超时",
+                    f"等待 {max_wait_h:.0f}h 未就绪: {reason}\n请检查 logs/month_end_pull_*.log（月末自动链）")
+            logger.error(f"缓存等待超时: {reason}")
+            return False
+        if waited % 30 == 0 or waited == 0:
+            logger.info(f"缓存未就绪（{waited}min）, 每 5min 重试, 最长 {max_wait_h:.0f}h: {reason}")
+        time.sleep(300)
+        waited += 5
+
+
 def build_prediction_cache(target_month: str) -> bool:
     """T2/T1/T3 预测缓存构建（增量，断点续跑）。"""
     logger.info(f"Step1: T2/T1/T3 预测缓存构建（{target_month}）...")
@@ -212,13 +283,22 @@ def main() -> None:
     except Exception as e:
         logger.warning(f"Step0: 辅助维度刷新异常(不阻断重训): {e}")
 
+    # ── Step0.5: 等待月末自动链训练缓存就绪（2026-08-07）──
+    #    8/31 19:00 拉取 + 重建 2-6h, 9/1 00:00 启动时可能未完成 → 轮询等待（最长 12h）
+    if not wait_for_cache_ready(target_month):
+        _notify("❌ V2 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
+        sys.exit(1)
+    logger.info("训练缓存就绪，继续重训")
+
     # ── Step1: T2/T1/T3 缓存构建（增量，断点续跑）──
     if not build_prediction_cache(target_month):
+        _notify("❌ V2 重训 Step1 失败", "T2/T1/T3 预测缓存构建失败, 请查 logs/v2_retrain_*.log")
         logger.error("T2/T1/T3 构建失败，重训终止")
         sys.exit(1)
 
     # ── Step2: T4 训练（追加 T4 预测到缓存）──
     if not train_t4(target_month):
+        _notify("❌ V2 重训 Step2 失败", "T4 LSTM 训练失败, 请查 logs/v2_retrain_*.log")
         logger.error("T4 训练失败，重训终止（可重跑续跑）")
         sys.exit(1)
 

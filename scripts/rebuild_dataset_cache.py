@@ -7,10 +7,18 @@
 用法：
   python scripts/rebuild_dataset_cache.py              # 并行重建 80+88 维
   python scripts/rebuild_dataset_cache.py --only-88     # 仅 88 维（T2/T1/T3）
+  python scripts/rebuild_dataset_cache.py --only-80     # 仅 80 维（T4 LSTM）
+
+2026-08-07 月末自动链改造：
+  - sample_end 运行时按 DB 最后交易日动态扩展（resolve_sample_end），config 写死值不再过时
+  - include_extra 从 cfg.extra_features 读取（True → 88 维重建为 121 维; 80 维 T4 不拼）
+  - symbols 复用 output/backtest_v2/.stock_pool.json（与 build_prediction_cache 口径一致,
+    保证缓存 hash 两侧相同——否则池子来源不同导致 n_stocks 失配）
 """
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -21,27 +29,49 @@ sys.path.insert(0, str(PROJECT_DIR))
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine
 from sequoia_x.model_selection_v2.config import get_config
-from sequoia_x.model_selection_v2.labels import build_training_dataset
+from sequoia_x.model_selection_v2.labels import build_training_dataset, resolve_sample_end
+
+POOL_PATH = PROJECT_DIR / "output/backtest_v2/.stock_pool.json"
+
+
+def _load_symbols(engine: DataEngine) -> list[str]:
+    """股票池: 优先复用 .stock_pool.json（与 build_prediction_cache 同源 → hash 一致）。"""
+    if POOL_PATH.exists():
+        symbols = json.loads(POOL_PATH.read_text())
+        print(f"股票池（.stock_pool.json）: {len(symbols)} 只")
+        return symbols
+    symbols = engine.get_base_stock_pool()
+    POOL_PATH.write_text(json.dumps(symbols))
+    print(f"股票池（baostock 重新获取）: {len(symbols)} 只")
+    return symbols
 
 
 def rebuild(include_market_state: bool, n_workers: int) -> None:
     """重建单个维度缓存。"""
     cfg = get_config()
     engine = DataEngine(Settings())
-    dim = "88维" if include_market_state else "80维"
-    print(f"开始重建 {dim} 缓存 (workers={n_workers})...")
+    # 采样截止日动态化: 与 build_prediction_cache 同口径（DB 最后交易日）
+    cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
+    include_extra = bool(getattr(cfg, "extra_features", False))
+    dim = "121维" if (include_market_state and include_extra) else \
+          ("88维" if include_market_state else "80维")
+    print(f"开始重建 {dim} 缓存 (sample_end={cfg.sample_end}, extra={include_extra}, "
+          f"workers={n_workers})...")
+    symbols = _load_symbols(engine)
     X, y1, y2, y3, dates = build_training_dataset(
-        engine, cfg, n_workers=n_workers,
+        engine, cfg, symbols=symbols, n_workers=n_workers,
         force_rebuild=True, include_market_state=include_market_state,
+        include_extra=include_extra if include_market_state else False,
     )
     n_dates = len(set(dates))
-    print(f"✅ {dim} 缓存完成: X={X.shape}, 采样日={n_dates}")
+    print(f"✅ {dim} 缓存完成: X={X.shape}, 采样日={n_dates} "
+          f"({dates[0] if dates else '-'} ~ {dates[-1] if dates else '-'})")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="数据集缓存重建")
-    parser.add_argument("--only-88", action="store_true", help="仅重建 88 维")
-    parser.add_argument("--only-80", action="store_true", help="仅重建 80 维")
+    parser.add_argument("--only-88", action="store_true", help="仅重建 88/121 维（树模型）")
+    parser.add_argument("--only-80", action="store_true", help="仅重建 80 维（T4 LSTM）")
     parser.add_argument("--workers", type=int, default=12, help="每进程 worker 数")
     args = parser.parse_args()
 
