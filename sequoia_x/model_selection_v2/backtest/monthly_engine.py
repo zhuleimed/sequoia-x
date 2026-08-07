@@ -110,12 +110,12 @@ def _build_features_chunk(args: tuple) -> tuple:
     """在子进程中构建特征块（模块级函数，pickle 可序列化）。
 
     Args:
-        args: (symbols_chunk, ref_date, db_path, cfg) 的元组。
+        args: (symbols_chunk, ref_date, db_path, cfg, include_extra) 的元组。
 
     Returns:
         (X_chunk, symbols_chunk): 特征数组和有效股票列表。
     """
-    symbols_chunk, ref_date, db_path, cfg = args
+    symbols_chunk, ref_date, db_path, cfg, include_extra = args
     from sequoia_x.core.config import Settings
     from sequoia_x.data.engine import DataEngine
     from sequoia_x.model_selection_v2.features import build_batch_features
@@ -127,6 +127,7 @@ def _build_features_chunk(args: tuple) -> tuple:
 
     X, valid_symbols = build_batch_features(
         list(symbols_chunk), ref_date, local_engine, cfg,
+        include_extra=include_extra,
     )
     return X, list(valid_symbols)
 

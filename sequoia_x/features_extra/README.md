@@ -1,5 +1,10 @@
 # features_extra — 扩展维度特征模块（2026-08-07 实现完成）
 
+**88+33=121 维拼接已实现（2026-08-07 16:45）**：`cfg.extra_features=True` 启用（V2Config，
+默认 False=88 维行为不变）。接入点：`model_selection_v2/features.py`（_extract_per_day_features
+加 extra_matrix 参数）+ `labels.py`（缓存 hash 含 extra_features）+ `scripts/build_prediction_cache.py`
+（训练缓存目录动态化 + 预测特征拼接 + incomplete 过滤）。8 月首次月度重训前启用。
+
 **归属规则（用户明确要求）**：020_TDX 为探索验证项目，**一切生产代码以 sequoia-x 为准**。
 
 ## 已实现
@@ -46,6 +51,5 @@ scan_incomplete(codes, get_close)         → {code: incomplete}   # 批量, 训
 
 验证(实测): 600519→False | fund_flow缺失→True | consensus无覆盖→False
 
-## 规划（未实现, 后续迭代）
+## 规划（后续迭代）
 - sentiment.py: news 词表情绪（第二档）
-- 与 88 维拼接: features.py 加 extra_features 参数

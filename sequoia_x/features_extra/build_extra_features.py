@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +33,13 @@ EXTRA_DIR = PROJECT_DIR / "data/extra_features"
 #  读取辅助
 # ════════════════════════════════════════════════════════════
 
+@lru_cache(maxsize=2048)
 def _load(subset: str, code: str) -> pd.DataFrame | None:
-    """读取单只股票的原始数据 parquet"""
+    """读取单只股票的原始数据 parquet（lru_cache: 训练缓存构建时同股票被反复调用）。
+
+    缓存的是原始 DataFrame——调用方（各特征函数）必须 .copy() 后再修改，
+    防止污染缓存（fund_flow/news 等函数会改列/索引）。
+    """
     fp = EXTRA_DIR / subset / f"{code}.parquet"
     if not fp.exists():
         return None
@@ -90,6 +96,7 @@ def _fund_flow_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
         return pd.DataFrame(index=dates, columns=[f"ff_{c}" for c in
                              ["main_ratio", "main_ratio_5d", "main_inflow_days_5",
                               "main_amt_20d", "main_momentum", "xbig_ratio_5d"]], dtype=float)
+    df = df.copy()  # lru_cache: 防污染缓存
     df["日期"] = pd.to_datetime(df["日期"])
     df = df.set_index("日期").sort_index()
     s = df["主力净流入-净占比"].astype(float) / 100.0  # % → 小数
@@ -105,8 +112,19 @@ def _fund_flow_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     return out
 
 
+def _finance_get(df: pd.DataFrame, col: str) -> pd.Series:
+    """财务列容错读取: 列缺失 → 0（金融股无毛利率/净利率等列, 同花顺按行业返回不同列集）"""
+    if col in df.columns:
+        return df[col].astype(str).str.replace("%", "", regex=False)
+    return pd.Series("0", index=df.index)
+
+
 def _finance_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
-    """财务摘要(季频, 披露日对齐): ROE/毛利率/净利率/负债率/增速/现金流质量"""
+    """财务摘要(季频, 披露日对齐): ROE/毛利率/净利率/负债率/增速/现金流质量
+
+    2026-08-07 修复: 金融股(银行/保险/券商)无毛利率等列 → 逐列容错(_finance_get),
+    缺失列填 0, 保证输出恒 10 列（固定列契约, 拼接维度一致）。
+    """
     df = _load("finance", code)
     if df is None or len(df) == 0:
         return pd.DataFrame(index=dates, columns=[f"fin_{c}" for c in
@@ -115,15 +133,15 @@ def _finance_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
                             dtype=float)
     ev = pd.DataFrame({
         "avail": [str(_disclose_date(r)) for r in df["报告期"]],
-        "roe": df["净资产收益率"].astype(str).str.replace("%", "", regex=False),
-        "gp_margin": df["销售毛利率"].astype(str).str.replace("%", "", regex=False),
-        "np_margin": df["销售净利率"].astype(str).str.replace("%", "", regex=False),
-        "debt_ratio": df["资产负债率"].astype(str).str.replace("%", "", regex=False),
-        "rev_yoy": df["营业总收入同比增长率"].astype(str).str.replace("%", "", regex=False),
-        "profit_yoy": df["净利润同比增长率"].astype(str).str.replace("%", "", regex=False),
-        "eps": df["基本每股收益"].astype(str),
-        "bps": df["每股净资产"].astype(str),
-        "ocf": df["每股经营现金流"].astype(str),
+        "roe": _finance_get(df, "净资产收益率"),
+        "gp_margin": _finance_get(df, "销售毛利率"),
+        "np_margin": _finance_get(df, "销售净利率"),
+        "debt_ratio": _finance_get(df, "资产负债率"),
+        "rev_yoy": _finance_get(df, "营业总收入同比增长率"),
+        "profit_yoy": _finance_get(df, "净利润同比增长率"),
+        "eps": _finance_get(df, "基本每股收益"),
+        "bps": _finance_get(df, "每股净资产"),
+        "ocf": _finance_get(df, "每股经营现金流"),
     })
     for c in ["roe", "gp_margin", "np_margin", "debt_ratio", "rev_yoy", "profit_yoy", "eps", "bps", "ocf"]:
         ev[c] = pd.to_numeric(ev[c], errors="coerce") / (100.0 if "ratio" in c or "margin" in c or c == "debt_ratio" else 1.0)
@@ -193,6 +211,7 @@ def _news_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     cols = ["nw_cnt_5d", "nw_cnt_20d", "nw_src_div"]
     if df is None or len(df) == 0:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    df = df.copy()  # lru_cache: 防污染缓存
     df["发布时间"] = pd.to_datetime(df["发布时间"], errors="coerce")
     df = df.dropna(subset=["发布时间"])
     if len(df) == 0:
@@ -276,6 +295,25 @@ FEATURE_GROUPS = {
     "xdxr": _xdxr_features,
     "forecast": _forecast_features,
 }
+
+# 各组固定列名模板（异常兜底时全 0 填充, 保证输出恒 33 列 → 拼接维度一致）
+_EMPTY_COLS = {
+    "fund_flow": ["ff_main_ratio", "ff_main_ratio_5d", "ff_main_inflow_days_5",
+                  "ff_main_amt_20d", "ff_main_momentum", "ff_xbig_ratio_5d"],
+    "finance": ["fin_roe", "fin_gp_margin", "fin_np_margin", "fin_debt_ratio",
+                "fin_rev_yoy", "fin_profit_yoy", "fin_profit_yoy_chg",
+                "fin_cf_quality", "fin_eps", "fin_bps"],
+    "holders": ["hd_num_chg", "hd_avg_mcap"],
+    "consensus": ["cs_buy_ratio", "cs_org_num", "cs_pred_pe", "cs_aim_dev", "cs_aim_spread"],
+    "news": ["nw_cnt_5d", "nw_cnt_20d", "nw_src_div"],
+    "xdxr": ["xd_yield", "xd_div_cnt_3y", "xd_song_cnt_3y"],
+    "forecast": ["fc_type_12m", "fc_max_chg_12m", "fc_cnt_12m", "fc_freshness"],
+}
+
+
+def _zero_features(group: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """单数据面异常/缺失 → 全 0 列（保持固定列数契约, 覆盖率 0 → 关键面缺失由 incomplete 判定）"""
+    return pd.DataFrame(0.0, index=dates, columns=_EMPTY_COLS[group])
 
 # ════════════════════════════════════════════════════════════
 #  缺口处置（数据完整性标记）
@@ -366,8 +404,9 @@ def build_extra_features(dates: pd.DatetimeIndex, close: pd.Series,
                 part = fn(code, dates)
             parts.append(part)
         except Exception:
-            # 单数据面失败不影响整体(记录为全零列)
-            continue
+            # 单数据面失败 → 全 0 列（2026-08-07: 保持固定 33 列契约,
+            # 不跳过——跳过会导致拼接维度错位; 缺失由 coverage/incomplete 机制处置）
+            parts.append(_zero_features(g, dates))
     if parts:
         features = pd.concat(parts, axis=1)
     else:

@@ -68,16 +68,31 @@ def get_test_months(start_month: str, end_month: str) -> list[str]:
     return months
 
 
-def load_full_dataset(cfg: V2Config, engine: DataEngine):
-    """直接加载已知缓存（绕过 build_training_dataset 避免 baostock 和哈希不匹配）。"""
+def load_full_dataset(cfg: V2Config, engine: DataEngine, cache_dir=None):
+    """直接加载已知缓存（绕过 build_training_dataset 避免 baostock 和哈希不匹配）。
+
+    Args:
+        cache_dir: 缓存目录（build_cache 按 cfg.extra_features 计算, 2026-08-07 动态化）。
+                   None=默认 88 维缓存 13132147f8e8。
+    """
     import json as _json
     from pathlib import Path as _Path
 
     # 使用已知的缓存目录（由之前的 build_training_dataset 创建）
-    CACHE_DIR = "data/cache/v2_dataset/13132147f8e8"
-    cache_path = _Path(CACHE_DIR)
+    # 2026-08-07: extra_features=True 时由调用方传入 121 维缓存目录（hash 不同）
+    if cache_dir is None:
+        cache_dir = Path("data/cache/v2_dataset/13132147f8e8")
+    cache_path = _Path(cache_dir)
 
-    logger.info("从缓存直接加载全量数据集...")
+    # 缓存存在性检查（2026-08-07: 目录由 hash 动态计算, 股票池/特征开关变化可能失配）
+    # 缺失时给出清晰指引而非 np.load 文件错误（8月重训前需先重建缓存）
+    if not (cache_path / "metadata.json").exists():
+        raise FileNotFoundError(
+            f"训练数据集缓存不存在: {cache_path}\n"
+            f"请先运行 python scripts/rebuild_dataset_cache.py --only-88 重建"
+            f"（extra_features=True 时需在 config.py 开启后再重建）")
+
+    logger.info(f"从缓存直接加载全量数据集: {cache_path}...")
     t0 = time.time()
 
     X = np.load(str(cache_path / "X.npy"), mmap_mode="r")
@@ -146,8 +161,12 @@ def predict_full_pool(
     cfg: V2Config | None = None,
     db_path: str = "data/sequoia_v2.db",
     max_pool_size: int = 0,
+    include_extra: bool = False,
 ) -> dict:
     """对全股票池批量预测。
+
+    Args:
+        include_extra: True 时拼接 33 维扩展特征(121维), 关键面缺失股票不产生信号。
 
     Returns:
         {"symbols": [...], "t2": [...], "t1": [...], "t3": [...], "t4": [...]}
@@ -172,7 +191,8 @@ def predict_full_pool(
     use_parallel = n_workers >= 2 and n_total >= 200
 
     logger.info(f"  构建特征: {n_total} 只 (ref={ref_date})"
-                f"{', ' + str(n_workers) + '进程并行' if use_parallel else ''}...")
+                f"{', ' + str(n_workers) + '进程并行' if use_parallel else ''}..."
+                f"{' [88+33=121维扩展特征]' if include_extra else ''}")
     t_feat = time.time()
 
     if use_parallel:
@@ -181,7 +201,7 @@ def predict_full_pool(
             _build_features_chunk
 
         chunks = np.array_split(list(pool), n_workers)
-        task_args = [(list(c), ref_date, db_path, cfg) for c in chunks]
+        task_args = [(list(c), ref_date, db_path, cfg, include_extra) for c in chunks]
 
         with Pool(n_workers) as p:
             chunk_results = p.map(_build_features_chunk, task_args)
@@ -194,7 +214,8 @@ def predict_full_pool(
         X_pred = np.concatenate(X_list) if X_list else np.array([])
         valid_symbols = sym_list
     else:
-        X_pred, valid_symbols = build_batch_features(pool, ref_date, DataEngine(Settings()), cfg)
+        X_pred, valid_symbols = build_batch_features(
+            pool, ref_date, DataEngine(Settings()), cfg, include_extra=include_extra)
 
     logger.info(f"  特征完成: {len(valid_symbols)}/{n_total} 有效 ({time.time()-t_feat:.0f}s)")
 
@@ -249,16 +270,28 @@ def _build_one_features(args: tuple):
     """单只股票特征构建（Step5 并行化用，模块级供 Pool 调用）。
 
     Args:
-        args: (symbol, df, idx_df, cfg)
+        args: (symbol, df, idx_df, cfg, include_extra)
     Returns:
-        (symbol, X_i) 或 None（数据不足）。
+        (symbol, X_i) 或 None（数据不足/扩展维度关键面缺失）。
     """
     from sequoia_x.model_selection_v2.features import _extract_per_day_features
-    sym, df, idx_df, cfg = args
+    sym, df, idx_df, cfg, include_extra = args
     if df is None or len(df) < cfg.window + 10:
         return None
+    # 扩展维度特征（可选, 2026-08-07）: 关键面缺失 → 不产生信号
+    extra_matrix = None
+    if include_extra:
+        from sequoia_x.features_extra.build_extra_features import build_extra_with_flag
+        import pandas as pd
+        dates = pd.DatetimeIndex(pd.to_datetime(df["date"]))
+        close = pd.Series(df["close"].values.astype(float), index=dates, name="close")
+        extra, incomplete, _ = build_extra_with_flag(dates, close, sym)
+        if incomplete:
+            return None
+        extra_matrix = extra.values.astype(np.float32)
     per_day = _extract_per_day_features(
         df, idx_df if idx_df is not None and len(idx_df) else None, cfg,
+        extra_matrix=extra_matrix,
     )
     if len(per_day) < cfg.window:
         return None
@@ -269,12 +302,12 @@ def _process_month_worker(args: tuple) -> tuple:
     """处理单个月份的训练+预测（模块级函数，供 multiprocessing 使用）。
 
     Args:
-        args: (month, db_path, cfg_dict, max_pool_size, skip_t4)
+        args: (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
 
     Returns:
         (month, predictions_dict) 或 (month, None) 若失败。
     """
-    month, db_path, cfg_dict, max_pool_size, skip_t4 = args
+    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra = args
 
     import json as _json
     import sqlite3
@@ -292,13 +325,12 @@ def _process_month_worker(args: tuple) -> tuple:
     _os.environ['OPENBLAS_NUM_THREADS'] = '1'
     _os.environ['MKL_NUM_THREADS'] = '1'
     _os.environ['NUMEXPR_NUM_THREADS'] = '1'
-    print(f"[Worker {month}] 启动诊断: CPU核={_cpu_count} OMP=1 KMP清除 CWD={_cwd}", flush=True)
+    print(f"[Worker {month}] 启动诊断: CPU核={_cpu_count} OMP=1 KMP清除 CWD={_cwd}"
+          f"{' extra=121维' if include_extra else ''}", flush=True)
 
     # ── 加载 mmap 数据（使用绝对路径，子进程 CWD 可能不同）──
-    # 确定项目根目录：从脚本路径推导
-    _script_dir = _Path(__file__).resolve().parent.parent  # scripts/.. → project root
-    CACHE_DIR = _script_dir / "data/cache/v2_dataset/13132147f8e8"
-    cache_path = CACHE_DIR
+    # 缓存目录由父进程按 cfg.extra_features 计算（2026-08-07: 121维走新 hash 目录）
+    cache_path = _Path(cache_dir)
     X = np.load(str(cache_path / "X.npy"), mmap_mode="r")
     y1 = np.load(str(cache_path / "y1.npy"), mmap_mode="r")
     y2 = np.load(str(cache_path / "y2.npy"), mmap_mode="r")
@@ -363,6 +395,7 @@ def _process_month_worker(args: tuple) -> tuple:
     cfg = V2Config()
     for k, v in cfg_dict.items():
         setattr(cfg, k, v)
+    cfg.extra_features = include_extra  # 特征拼接开关（父进程 cfg_dict 同值）
 
     # ── 训练 T2 ──
     print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr)})...", flush=True)
@@ -425,7 +458,7 @@ def _process_month_worker(args: tuple) -> tuple:
     #    multiprocessing.Pool 的 worker 是 daemon，禁止再创建子进程
     #    （build 的 Pool(1) worker 内开 Pool(8) 会报 "daemonic processes..."）
     from concurrent.futures import ProcessPoolExecutor
-    tasks = [(sym, ohlcv_cache.get(sym), idx_df, cfg) for sym in pool]
+    tasks = [(sym, ohlcv_cache.get(sym), idx_df, cfg, include_extra) for sym in pool]
     with ProcessPoolExecutor(max_workers=FEAT_WORKERS) as _ex:
         _results = list(_ex.map(_build_one_features, tasks, chunksize=100))
     X_list = [r[1] for r in _results if r is not None]
@@ -472,7 +505,8 @@ def _process_month_worker(args: tuple) -> tuple:
 
 
 def _process_and_save(month: str, db_path: str, cfg_dict: dict,
-                       max_pool_size: int, skip_t4: bool) -> None:
+                       max_pool_size: int, skip_t4: bool,
+                       cache_dir: str, include_extra: bool) -> None:
     """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。"""
     import json as _json, traceback
     from pathlib import Path as _Path
@@ -483,7 +517,7 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
     tmp_file = tmp_dir / f"month_{month}.json"
 
     try:
-        args = (month, db_path, cfg_dict, max_pool_size, skip_t4)
+        args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
         _, preds = _process_month_worker(args)
         if preds is not None:
             with open(tmp_file, "w") as f:
@@ -587,10 +621,12 @@ def build_cache(
     if output_path is None:
         output_path = OUTPUT_PATH
 
-    # 1. 加载 mmap 数据
-    X, y1, y2, y3, dates = load_full_dataset(cfg, engine)
-    dates_arr = np.array(dates)
-    # 一次 baostock 获取标准股票池（写入文件供 worker 读取）
+    # 0. 特征拼接开关（2026-08-07: cfg.extra_features=True → 88+33=121 维）
+    include_extra = bool(getattr(cfg, "extra_features", False))
+    if include_extra:
+        logger.info("🔧 扩展特征已启用: 88+33=121 维（训练缓存+预测特征一致）")
+
+    # 1. 一次 baostock 获取标准股票池（写入文件供 worker 读取）
     stock_pool_path = output_path.parent / ".stock_pool.json"
     if stock_pool_path.exists():
         stock_pool = json.loads(stock_pool_path.read_text())
@@ -604,6 +640,17 @@ def build_cache(
             stock_pool = _filter_stock_pool(engine.get_local_symbols(), engine.db_path)
             logger.warning(f"baostock 失败，本地过滤: {len(stock_pool)} 只")
 
+    # 1b. 训练数据集缓存目录（按 include_extra 哈希; 121 维走新目录）
+    from sequoia_x.model_selection_v2.labels import _dataset_cache_path
+    cache_dir, _ = _dataset_cache_path(cfg, stock_pool, include_market_state=True,
+                                       include_extra=include_extra)
+    cache_dir = str(cache_dir)
+    logger.info(f"训练缓存目录: {cache_dir}")
+
+    # 2. 加载 mmap 数据
+    X, y1, y2, y3, dates = load_full_dataset(cfg, engine, cache_dir)
+    dates_arr = np.array(dates)
+
     # 2. 断点续跑
     cache = {}
     if output_path.exists():
@@ -616,6 +663,7 @@ def build_cache(
     db_path = engine.db_path
     cfg_dict = {
         "window": cfg.window, "n_jobs": 1, "random_seed": cfg.random_seed,
+        "extra_features": include_extra,
     }
 
     total_start = time.time()
@@ -631,7 +679,7 @@ def build_cache(
     logger.info(f"并行构建: {len(pending_months)} 个月, {n_workers} 进程")
 
     task_args = [
-        (month, db_path, cfg_dict, max_pool_size, skip_t4)
+        (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
         for month in pending_months
     ]
 

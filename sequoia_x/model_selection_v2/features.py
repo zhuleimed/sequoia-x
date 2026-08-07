@@ -87,7 +87,8 @@ def _compute_bollinger(close: np.ndarray, period: int = 20
 
 def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
                                cfg: V2Config,
-                               include_market_state: bool = True) -> np.ndarray:
+                               include_market_state: bool = True,
+                               extra_matrix: np.ndarray | None = None) -> np.ndarray:
     """从日线 DataFrame 逐日提取特征向量。
 
     Args:
@@ -97,9 +98,11 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
         cfg: V2Config 配置
         include_market_state: True=88维(含8维市场状态), False=80维(T4 LSTM用)。
                               树模型需要显式市场特征，LSTM能自学时序中的市场模式。
+        extra_matrix: 扩展维度特征 (n_days, 33)（可选, 2026-08-07 88+33=121维拼接）。
+                      由调用方 build_extra_with_flag 生成, 与 88 维同流程归一化。
 
     Returns:
-        (n_days, 80) 或 (n_days, 88) 特征矩阵，全部 Z-score 归一化
+        (n_days, 80) 或 (n_days, 88) 或 (n_days, 121) 特征矩阵，全部 Z-score 归一化
     """
     n = len(df)
     close = df["close"].values.astype(float)
@@ -250,8 +253,10 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
             for _ in range(8):
                 feature_list.append(np.zeros(n))
 
-    # 确定目标维度
+    # 确定目标维度（extra_matrix 提供时追加扩展特征列数: 88+33=121）
     target_dim = 88 if include_market_state else 80
+    if extra_matrix is not None:
+        target_dim += extra_matrix.shape[1]
 
     # ── 7. 价格形态特征 (7维) ──
     limit_up = (chg_pct > 0.095).astype(float)
@@ -357,7 +362,15 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
             feature_list.append(rank)
         else:
             feature_list.extend([np.zeros(n), np.zeros(n)])
-    # padding 到目标维度（80维=无市场状态, 88维=含市场状态）
+    # ── 8b. 扩展维度特征 (33维, 可选; 2026-08-07 88+33=121维拼接) ──
+    # 拼接在 88 维之后 → 前 88 列与现有 88 维缓存完全一致（模型可对比/迁移）
+    # extra_matrix 与 88 维特征同流程 Z-score 归一化（缺失 fillna(0) 的特征
+    # 在归一化后仍以 0 附近分布, 与 88 维既有处理一致）
+    if extra_matrix is not None:
+        for i in range(extra_matrix.shape[1]):
+            feature_list.append(extra_matrix[:, i].astype(np.float32))
+
+    # padding 到目标维度（80维=无市场状态, 88维=含市场状态, 121维=含扩展特征）
     while len(feature_list) < target_dim:
         feature_list.append(np.zeros(n))
 
@@ -379,12 +392,35 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
 #  公开接口
 # ════════════════════════════════════════════════════════════
 
+def _build_extra_matrix(df: pd.DataFrame, symbol: str,
+                        cfg: V2Config) -> tuple[np.ndarray | None, bool]:
+    """构建扩展维度特征矩阵 + 数据完整性标记。
+
+    Args:
+        df: 已按 ref_date 截断的 OHLCV DataFrame
+        symbol: 股票代码（用于读取 data/extra_features/ 下的 parquet）
+    Returns:
+        (extra_matrix, incomplete): extra_matrix (n_days, 33) 或 None;
+        incomplete=True → 关键数据面(fund_flow/finance/holders)缺失, 训练/预测应剔除
+    """
+    from sequoia_x.features_extra.build_extra_features import build_extra_with_flag
+    dates = pd.DatetimeIndex(pd.to_datetime(df["date"]))
+    close = pd.Series(df["close"].values.astype(float), index=dates, name="close")
+    extra, incomplete, _ = build_extra_with_flag(dates, close, symbol)
+    return extra.values.astype(np.float32), incomplete
+
+
 def build_stock_features(
     symbol: str, ref_date: str, engine: DataEngine,
     cfg: V2Config | None = None,
     include_market_state: bool = True,
+    include_extra: bool = False,
 ) -> tuple[np.ndarray | None, None]:
     """为单只股票构建预测用特征（不含标签，标签由 labels.py 构建）。
+
+    Args:
+        include_extra: True 时拼接 33 维扩展特征(88+33=121, 需 cfg.extra_features 配套)。
+                       关键数据面缺失的股票返回 (None, None) 剔除。
 
     Returns:
         (X, None): X 形状 (window, n_features)，数据不足返回 (None, None)。
@@ -400,6 +436,13 @@ def build_stock_features(
     if len(df) < cfg.window + 30:
         return None, None
 
+    # 扩展维度特征（可选）: 关键面缺失 → incomplete → 剔除该股票
+    extra_matrix = None
+    if include_extra:
+        extra_matrix, incomplete = _build_extra_matrix(df, symbol, cfg)
+        if incomplete:
+            return None, None
+
     df_index = None
     try:
         df_index = engine.get_ohlcv("000300")
@@ -410,7 +453,8 @@ def build_stock_features(
     except Exception:
         df_index = None
 
-    per_day = _extract_per_day_features(df, df_index, cfg, include_market_state)
+    per_day = _extract_per_day_features(df, df_index, cfg, include_market_state,
+                                        extra_matrix=extra_matrix)
     if len(per_day) < cfg.window:
         return None, None
 
@@ -421,8 +465,12 @@ def build_stock_features(
 def build_batch_features(
     symbols: list[str], ref_date: str, engine: DataEngine,
     cfg: V2Config | None = None,
+    include_extra: bool = False,
 ) -> tuple[np.ndarray, list]:
     """批量构建特征矩阵（不含标签）。
+
+    Args:
+        include_extra: True 时拼接 33 维扩展特征(121维), 关键面缺失股票过滤。
 
     Returns:
         (X, valid_symbols): X 形状 (n_valid, window, n_features)。
@@ -432,7 +480,8 @@ def build_batch_features(
 
     X_list, sym_list = [], []
     for symbol in symbols:
-        X_i, _ = build_stock_features(symbol, ref_date, engine, cfg)
+        X_i, _ = build_stock_features(symbol, ref_date, engine, cfg,
+                                      include_extra=include_extra)
         if X_i is not None:
             X_list.append(X_i)
             sym_list.append(symbol)
@@ -449,6 +498,7 @@ def build_prediction_features(
     cfg: V2Config | None = None,
     ref_date: str | None = None,
     include_market_state: bool = True,
+    include_extra: bool = False,
 ) -> np.ndarray | None:
     """为单只股票构建预测特征（严格避免 look-ahead bias）。
 
@@ -457,6 +507,7 @@ def build_prediction_features(
         engine: DataEngine 实例。
         cfg: 配置。
         ref_date: 截止日期（仅使用此日期及之前的数据），None=使用全部最新数据。
+        include_extra: True 时拼接 33 维扩展特征(121维), 关键面缺失返回 None。
 
     Returns:
         X: (1, window, n_features)，数据不足返回 None。
@@ -474,6 +525,13 @@ def build_prediction_features(
         if len(df) < cfg.window + 10:
             return None
 
+    # 扩展维度特征（可选）: 关键面缺失 → incomplete → 无信号
+    extra_matrix = None
+    if include_extra:
+        extra_matrix, incomplete = _build_extra_matrix(df, symbol, cfg)
+        if incomplete:
+            return None
+
     df_index = None
     try:
         df_index = engine.get_ohlcv("000300")
@@ -485,7 +543,8 @@ def build_prediction_features(
     except Exception:
         df_index = None
 
-    per_day = _extract_per_day_features(df, df_index, cfg, include_market_state)
+    per_day = _extract_per_day_features(df, df_index, cfg, include_market_state,
+                                        extra_matrix=extra_matrix)
     if len(per_day) < cfg.window:
         return None
 

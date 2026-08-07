@@ -109,6 +109,10 @@ class V2Config:
     min_buy_prob: float = 0.55   # T1 买入概率阈值
 
     # ── 特征 ──
+    # 2026-08-07: 88+33=121 维扩展特征拼接（fund_flow/finance/holders/consensus/news/xdxr/forecast）
+    #   默认 False = 现有 88 维行为不变；8 月首次月度重训前置 True 启用
+    #   仅作用于树模型链路（T2/T1/T3, include_market_state=True）；T4 LSTM 保持 80 维不拼
+    extra_features: bool = False
     feature_ma_periods: tuple = (5, 10, 20, 60, 120)
     feature_rsi_period: int = 14
     feature_atr_period: int = 14
