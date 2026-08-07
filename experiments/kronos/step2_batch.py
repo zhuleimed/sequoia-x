@@ -51,7 +51,7 @@ def main() -> None:
     n_ok = 0
     for code in codes:
         try:
-            r = S.predict_one(code, args.ref)
+            r = S.predict_one(code, args.ref, SAMPLES)
             if r is not None:
                 with open(args.out, "a", encoding="utf-8") as f:
                     f.write(json.dumps(r) + "\n")

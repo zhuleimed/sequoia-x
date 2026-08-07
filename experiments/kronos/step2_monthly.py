@@ -72,16 +72,27 @@ def worker_init():
     _PREDICTOR = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
 
 
-def predict_one(code: str, ref_date: str) -> dict | None:
-    """单股推理: 输入 ≤ref_date 最近 120+20 天 → exp_ret。"""
+def predict_one(code: str, ref_date: str, samples: int = 10) -> dict | None:
+    """单股推理: 输入 ≤ref_date 最近 120 天 → 预测未来 20 交易日 → exp_ret。
+
+    ⚠️ 2026-08-08 修复（假 IC 根因）: y_timestamp 必须为 ref_date 之后的交易日——
+    Kronos 用它定义预测区间的时间特征。此前误用 df 的 120:140 行（历史日期）→
+    预测的是"过去价格", exp_ret 除以当前 close 完全错位, 单月 Rank IC +0.4899 为
+    假信号（已证伪）。未来日期仅作时间戳（日历特征）, 不含价格 → 无 look-ahead。
+    ⚠️ 同批修复: sample_count 参数化（此前硬编码 30, --samples 未生效）。
+    """
     global _PREDICTOR
     conn = sqlite3.connect(DB)
     df = pd.read_sql(
         "SELECT date, open, high, low, close, volume, amount FROM stock_daily "
         "WHERE symbol=? AND date<=? ORDER BY date DESC LIMIT ?",
-        conn, params=[code, ref_date, LOOKBACK + PRED_LEN + 20])
+        conn, params=[code, ref_date, LOOKBACK + 20])
+    # y_timestamp: ref_date 后的 20 个交易日（未来日期, 仅时间特征, 无价格泄漏）
+    future_dates = [r[0] for r in conn.execute(
+        "SELECT DISTINCT date FROM stock_daily WHERE date>? ORDER BY date LIMIT ?",
+        (ref_date, PRED_LEN)).fetchall()]
     conn.close()
-    if df is None or len(df) < LOOKBACK + 10:
+    if df is None or len(df) < LOOKBACK + 10 or len(future_dates) < PRED_LEN:
         return None
     df = df.iloc[::-1].reset_index(drop=True)
 
@@ -91,11 +102,11 @@ def predict_one(code: str, ref_date: str) -> dict | None:
         x_df["volume"] * x_df[["open", "high", "low", "close"]].mean(axis=1))
     x_df = x_df.ffill().bfill()
     x_ts = pd.to_datetime(df["date"].iloc[:LOOKBACK])
-    y_ts = pd.to_datetime(df["date"].iloc[LOOKBACK:LOOKBACK + PRED_LEN])
+    y_ts = pd.to_datetime(pd.Series(future_dates))
 
     pred_df = _PREDICTOR.predict(
         df=x_df, x_timestamp=x_ts, y_timestamp=y_ts,
-        pred_len=PRED_LEN, T=0.2, top_p=0.9, sample_count=30, verbose=False)
+        pred_len=PRED_LEN, T=0.2, top_p=0.9, sample_count=samples, verbose=False)
     pred_close = float(np.median(pred_df["close"].values))
     close = float(df["close"].iloc[-1])
     if close <= 0:
