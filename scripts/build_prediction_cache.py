@@ -621,12 +621,7 @@ def build_cache(
     if output_path is None:
         output_path = OUTPUT_PATH
 
-    # 0. 特征拼接开关（2026-08-07: cfg.extra_features=True → 88+33=121 维）
-    include_extra = bool(getattr(cfg, "extra_features", False))
-    if include_extra:
-        logger.info("🔧 扩展特征已启用: 88+33=121 维（训练缓存+预测特征一致）")
-
-    # 0b. sample_end 动态化（2026-08-07 月末自动链）: 与缓存重建同口径（DB 最后交易日),
+    # 0. sample_end 动态化（2026-08-07 月末自动链）: 与缓存重建同口径（DB 最后交易日),
     #     否则 hash 含写死的 sample_end → 9/1 重训与 8/31 重建 hash 失配
     from sequoia_x.model_selection_v2.labels import resolve_sample_end
     cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
@@ -646,8 +641,31 @@ def build_cache(
             stock_pool = _filter_stock_pool(engine.get_local_symbols(), engine.db_path)
             logger.warning(f"baostock 失败，本地过滤: {len(stock_pool)} 只")
 
-    # 1b. 训练数据集缓存目录（按 include_extra 哈希; 121 维走新目录）
+    # 1a. 特征拼接开关（2026-08-07）: cfg.extra_features=True → 88+33=121 维
+    #     自动降级（回退机制）: 配置要 121 维但缓存未就绪（月末自动链未完成/数据不全回退）
+    #     → 自动回退 88 维兜底, 不中断月度流程（微信告知）
     from sequoia_x.model_selection_v2.labels import _dataset_cache_path
+    include_extra = bool(getattr(cfg, "extra_features", False))
+    if include_extra:
+        d121, _ = _dataset_cache_path(cfg, stock_pool, include_market_state=True,
+                                      include_extra=True)
+        if not (d121 / "metadata.json").exists():
+            include_extra = False
+            logger.warning("⚠️ 121 维训练缓存未就绪 → 自动回退 88 维（预测特征同步 88 维）")
+            try:
+                from wxpusher import WxPusher
+                from sequoia_x.core.config import get_settings
+                _s = get_settings()
+                WxPusher.send_message(
+                    content=f"⚠️ V2 重训自动回退 88 维\n121 维缓存未就绪（{d121.name} 缺失）, "
+                            f"本次按 88 维重训（扩展维度数据不全的保底机制）",
+                    token=_s.wxpusher_token, topic_ids=_s.wxpusher_topic_ids, content_type=1)
+            except Exception:
+                pass
+        else:
+            logger.info("🔧 扩展特征已启用: 88+33=121 维（训练缓存+预测特征一致）")
+
+    # 1b. 训练数据集缓存目录（按 include_extra 哈希; 121 维走新目录）
     cache_dir, _ = _dataset_cache_path(cfg, stock_pool, include_market_state=True,
                                        include_extra=include_extra)
     cache_dir = str(cache_dir)

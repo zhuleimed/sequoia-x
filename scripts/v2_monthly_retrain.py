@@ -120,32 +120,45 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
                 "月末自动链未正常运行（应写入股票池）。请检查 logs/month_end_pull_*.log")
         return False
     symbols = _json.loads(pool_path.read_text())
-    include_extra = bool(getattr(cfg, "extra_features", False))
-    cache_dir, _ = _dataset_cache_path(cfg, symbols, include_market_state=True,
-                                       include_extra=include_extra)
-    want_dim = 121 if include_extra else 88
+    want_extra = bool(getattr(cfg, "extra_features", False))
+
+    def _check_ready(include_extra: bool) -> tuple[bool, str]:
+        """单缓存就绪判定: metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。"""
+        cache_dir, _ = _dataset_cache_path(cfg, symbols, include_market_state=True,
+                                           include_extra=include_extra)
+        want_dim = 121 if include_extra else 88
+        meta_path = cache_dir / "metadata.json"
+        if not meta_path.exists():
+            return False, f"缓存缺失 {cache_dir.name}"
+        try:
+            m = _json.loads(meta_path.read_text())
+            if m["X_shape"][2] != want_dim:
+                return False, f"维度错误 {m['X_shape'][2]}≠{want_dim}"
+            dates = _json.loads((cache_dir / "dates.json").read_text())
+            if not dates or dates[-1] < last_date:
+                return False, f"采样日未覆盖 {last_date}（止于 {dates[-1] if dates else '空'}）"
+            return True, f"{cache_dir.name} {m['X_shape']} 止于 {dates[-1]}"
+        except Exception as e:
+            return False, f"缓存元数据异常: {e}"
 
     deadline = time.time() + max_wait_h * 3600
     waited = 0
     while True:
-        # 就绪判定
-        reason = None
-        meta_path = cache_dir / "metadata.json"
-        if meta_path.exists():
-            try:
-                m = _json.loads(meta_path.read_text())
-                if m["X_shape"][2] == want_dim:
-                    dates = _json.loads((cache_dir / "dates.json").read_text())
-                    if dates and dates[-1] >= last_date:
-                        logger.info(f"缓存就绪: {cache_dir.name} {m['X_shape']} 止于 {dates[-1]}")
-                        return True
-                    reason = f"采样日未覆盖 {last_date}（止于 {dates[-1] if dates else '空'}）"
-                else:
-                    reason = f"维度错误 {m['X_shape'][2]}≠{want_dim}"
-            except Exception as e:
-                reason = f"缓存元数据异常: {e}"
+        # 就绪判定: 优先 121（配置目标）; 121 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
+        ok, msg = _check_ready(want_extra)
+        if not ok and want_extra:
+            ok88, msg88 = _check_ready(False)
+            if ok88:
+                _notify("⚠️ V2 重训自动回退 88 维",
+                        "121 维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
+                logger.warning(f"121 维未就绪, 接受 88 维降级: {msg88}")
+                return True
+            reason = f"{msg}; 88 维: {msg88}"
+        elif not ok:
+            reason = msg
         else:
-            reason = f"缓存缺失 {cache_dir.name}（月末自动链重建中, 预计 2-6h）"
+            logger.info(f"缓存就绪: {msg}")
+            return True
 
         if time.time() > deadline:
             _notify("❌ V2 重训等待缓存超时",

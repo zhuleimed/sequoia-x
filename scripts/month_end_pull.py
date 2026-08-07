@@ -104,27 +104,33 @@ def auto_rebuild_and_verify(today: date) -> bool:
     """
     print(f"[{today}] ═══ 自动链开始 ═══")
 
-    # 1. 覆盖率检查（坏数据不入缓存）
+    # 1. 覆盖率检查（2026-08-07 回退机制: 数据不全不再中止, 降级 88 维重建保底）
     print(f"[{today}] ① 覆盖率检查...")
     ok, msg = _extra_coverage_ok()
+    degraded = False
     if not ok:
-        _notify("⚠️ 月末自动链中止: " + msg,
-                "9/1 00:00 重训将轮询等待缓存就绪（12h 后失败告警）。请查看 logs/month_end_pull_*.log")
-        print(f"[{today}] ❌ {msg}")
-        return False
-    print(f"[{today}] ✅ {msg}")
+        degraded = True
+        _notify("⚠️ 扩展维度数据不全: " + msg,
+                "自动回退 88 维重建缓存, 9/1 重训将按 88 维执行（保底机制, 月度流程不中断）")
+        print(f"[{today}] ⚠️ {msg} → 降级 88 维重建")
+    else:
+        print(f"[{today}] ✅ {msg}")
 
-    # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读）
-    print(f"[{today}] ② 重建训练数据集缓存（预计 2-6h, 期间 9/1 重训轮询等待）...")
-    r = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py")],
-                       cwd=str(PROJECT_DIR), timeout=10 * 3600)
+    # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读;
+    #    数据不全时 --no-extra 强制 88 维）
+    dim = "88 维(降级)" if degraded else "121/88 维"
+    print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 9/1 重训轮询等待）...")
+    cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py")]
+    if degraded:
+        cmd.append("--no-extra")
+    r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
     if r.returncode != 0:
         _notify("❌ 月末缓存重建失败", "9/1 重训将轮询等待后失败; 请查看 logs/month_end_pull_*.log 排查")
         print(f"[{today}] ❌ 缓存重建失败 exit={r.returncode}")
         return False
     print(f"[{today}] ✅ 缓存重建完成")
 
-    # 3. 自检（维度 + 采样日覆盖）
+    # 3. 自检（维度 + 采样日覆盖; 降级时预期 88 维）
     ok, msg = _verify_caches()
     if not ok:
         _notify("❌ 月末缓存自检失败", msg)
@@ -132,7 +138,8 @@ def auto_rebuild_and_verify(today: date) -> bool:
         return False
     print(f"[{today}] ✅ 自检: {msg}")
 
-    # 4. 单月干跑验证（临时输出, 不污染生产 prediction_cache.json）
+    # 4. 单月干跑验证（临时输出, 不污染生产 prediction_cache.json;
+    #    降级模式 build_prediction_cache 自动检测 121 缓存缺失 → 88 维链路）
     month = today.strftime("%Y-%m")
     print(f"[{today}] ④ 单月干跑验证（{month}, build_prediction_cache, 约 30-60min）...")
     dry = PROJECT_DIR / "output/backtest_v2/.dryrun_cache.json"
@@ -142,14 +149,19 @@ def auto_rebuild_and_verify(today: date) -> bool:
          "--output", str(dry)],
         cwd=str(PROJECT_DIR), timeout=4 * 3600)
     if r.returncode != 0 or not dry.exists():
-        _notify("❌ 月末干跑验证失败", "121/88 维预测链路未验证通过, 9/1 重训前需人工排查")
+        _notify("❌ 月末干跑验证失败", "88/121 维预测链路未验证通过, 9/1 重训前需人工排查")
         print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode}")
         return False
     print(f"[{today}] ✅ 干跑验证通过")
 
-    _notify("✅ 月末扩展维度全链完成",
-            f"{month} 数据拉取 + 缓存重建 + 自检 + 干跑全部通过, 9/1 00:00 重训可直接运行")
-    print(f"[{today}] ═══ 自动链全部完成 ═══")
+    if degraded:
+        _notify("✅ 月末全链完成（已回退 88 维）",
+                f"{month} 数据拉取完成但扩展维度不全 → 88 维缓存已重建并验证, 9/1 按 88 维重训。"
+                f"下次月末将自动重试 121 维")
+    else:
+        _notify("✅ 月末扩展维度全链完成",
+                f"{month} 数据拉取 + 121 维缓存重建 + 自检 + 干跑全部通过, 9/1 00:00 重训可直接运行")
+    print(f"[{today}] ═══ 自动链全部完成（{'降级 88 维' if degraded else '121 维'}）═══")
     return True
 
 

@@ -46,13 +46,14 @@ def _load_symbols(engine: DataEngine) -> list[str]:
     return symbols
 
 
-def rebuild(include_market_state: bool, n_workers: int) -> None:
+def rebuild(include_market_state: bool, n_workers: int, no_extra: bool = False) -> None:
     """重建单个维度缓存。"""
     cfg = get_config()
     engine = DataEngine(Settings())
     # 采样截止日动态化: 与 build_prediction_cache 同口径（DB 最后交易日）
     cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
-    include_extra = bool(getattr(cfg, "extra_features", False))
+    # 2026-08-07 回退机制: --no-extra 强制 88 维（扩展维度数据不全时降级重建）
+    include_extra = bool(getattr(cfg, "extra_features", False)) and not no_extra
     dim = "121维" if (include_market_state and include_extra) else \
           ("88维" if include_market_state else "80维")
     print(f"开始重建 {dim} 缓存 (sample_end={cfg.sample_end}, extra={include_extra}, "
@@ -72,18 +73,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="数据集缓存重建")
     parser.add_argument("--only-88", action="store_true", help="仅重建 88/121 维（树模型）")
     parser.add_argument("--only-80", action="store_true", help="仅重建 80 维（T4 LSTM）")
+    parser.add_argument("--no-extra", action="store_true",
+                        help="强制 88 维重建（扩展维度数据不全时降级, 2026-08-07 回退机制）")
     parser.add_argument("--workers", type=int, default=12, help="每进程 worker 数")
     args = parser.parse_args()
 
     if args.only_88:
-        rebuild(True, args.workers)
+        rebuild(True, args.workers, args.no_extra)
     elif args.only_80:
-        rebuild(False, args.workers)
+        rebuild(False, args.workers, args.no_extra)
     else:
         # 并行重建两个维度（各 workers 个进程，总 2×workers ≤ 36 核）
         import multiprocessing
-        p1 = multiprocessing.Process(target=rebuild, args=(True, args.workers))
-        p2 = multiprocessing.Process(target=rebuild, args=(False, args.workers))
+        p1 = multiprocessing.Process(target=rebuild, args=(True, args.workers, args.no_extra))
+        p2 = multiprocessing.Process(target=rebuild, args=(False, args.workers, args.no_extra))
         p1.start(); p2.start()
         p1.join(); p2.join()
         print("全部缓存重建完成")
