@@ -27,7 +27,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 OUT_DIR = PROJECT_ROOT / "experiments/kronos/output"
 LOG_DIR = PROJECT_ROOT / "logs"
+POOLS_DIR = PROJECT_ROOT / "output/backtest_v2/kronos_pools"
 PYTHON = "/home/zhulei/anaconda3/envs/zhulei_py312/bin/python"
+
+
+def load_pool(month: str, limit: int = 0) -> list[str]:
+    """按月动态池（2026-08-08: 回测必须用该月时点池, 避免幸存者偏差）。
+    优先 kronos_pools/{month}.json（build_pools.py 生成）; 缺失回退当前快照。"""
+    pool_f = POOLS_DIR / f"{month}.json"
+    if pool_f.exists():
+        symbols = json.loads(pool_f.read_text())
+        print(f"股票池（按月动态）: {len(symbols)} 只 ({pool_f.name})")
+    else:
+        symbols = json.loads((PROJECT_ROOT / "output/backtest_v2/.stock_pool.json").read_text())
+        print(f"股票池（当前快照）: {len(symbols)} 只")
+    return symbols[:limit] if limit > 0 else symbols
 
 
 def main() -> None:
@@ -41,7 +55,7 @@ def main() -> None:
     sys.path.insert(0, str(PROJECT_ROOT / "experiments/kronos"))
     import step2_monthly as S
     ref_date = S.get_month_last_trade_date(args.month)
-    symbols = S.load_pool(args.limit)
+    symbols = load_pool(args.month, args.limit)
     print(f"单月全量: month={args.month} ref={ref_date} pool={len(symbols)} 只 "
           f"procs={args.procs} samples={args.samples}")
 
