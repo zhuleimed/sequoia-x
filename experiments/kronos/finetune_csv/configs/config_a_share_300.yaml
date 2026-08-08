@@ -1,0 +1,53 @@
+# A 股日线微调——300 只（stride=5, 2026-08-08 阶梯扩量阶段 2）
+# 50 只验证达标后自动启动（auto_300.py）
+# stride=5: 样本降 5 倍（冗余窗口降采样）, 训练成本 ~2.5h
+data:
+  data_path: "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/kronos/finetune_csv/data/a_share_2026-02-28_300.csv"
+  lookback_window: 120
+  predict_window: 20
+  max_context: 512
+  clip: 5.0
+  stride: 5
+  train_ratio: 0.9
+  val_ratio: 0.1
+  test_ratio: 0.0
+
+training:
+  tokenizer_epochs: 2
+  basemodel_epochs: 2
+  batch_size: 32
+  log_interval: 200
+  num_workers: 6
+  seed: 42
+  tokenizer_learning_rate: 0.0002
+  predictor_learning_rate: 0.000001
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.1
+  accumulation_steps: 1
+
+model_paths:
+  pretrained_tokenizer: "/public/home/hpc/zhulei/superman/quant/code/models/Kronos-Tokenizer-base"
+  pretrained_predictor: "/public/home/hpc/zhulei/superman/quant/code/models/Kronos-small"
+  exp_name: "a_share_300_small"
+  base_path: "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/kronos/finetune_csv/finetuned/"
+  base_save_path: ""
+  finetuned_tokenizer: ""
+  tokenizer_save_name: "tokenizer"
+  basemodel_save_name: "basemodel"
+
+experiment:
+  name: "a_share_300_small"
+  description: "A股日线微调 small 基座 300 只 stride5"
+  use_comet: false
+  train_tokenizer: true
+  train_basemodel: true
+  skip_existing: false
+
+device:
+  use_cuda: false
+  device_id: 0
+
+distributed:
+  use_ddp: false
+  backend: "gloo"

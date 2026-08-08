@@ -40,6 +40,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 DB = str(PROJECT_ROOT / "data/sequoia_v2.db")
 MODELS_DIR = Path("/public/home/hpc/zhulei/superman/quant/code/models")
+# ⚠️ 2026-08-08 3b 支持: 环境变量覆盖模型路径（微调后模型评估用）
+#   KRONOS_TOKENIZER_DIR / KRONOS_PREDICTOR_DIR（默认官方 base）
+TOKENIZER_DIR = Path(os.environ.get("KRONOS_TOKENIZER_DIR", str(MODELS_DIR / "Kronos-Tokenizer-base")))
+PREDICTOR_DIR = Path(os.environ.get("KRONOS_PREDICTOR_DIR", str(MODELS_DIR / "Kronos-base")))
 POOL_PATH = PROJECT_ROOT / "output/backtest_v2/.stock_pool.json"
 OUT_DIR = PROJECT_ROOT / "experiments/kronos/output"
 LOOKBACK = 120
@@ -67,8 +71,8 @@ def worker_init():
     global _PREDICTOR
     from model import Kronos, KronosTokenizer, KronosPredictor
     tokenizer = KronosTokenizer.from_pretrained(
-        str(MODELS_DIR / "Kronos-Tokenizer-base"), local_files_only=True)
-    model = Kronos.from_pretrained(str(MODELS_DIR / "Kronos-base"), local_files_only=True)
+        str(TOKENIZER_DIR), local_files_only=True)
+    model = Kronos.from_pretrained(str(PREDICTOR_DIR), local_files_only=True)
     _PREDICTOR = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
 
 
@@ -83,25 +87,31 @@ def predict_one(code: str, ref_date: str, samples: int = 10) -> dict | None:
     """
     global _PREDICTOR
     conn = sqlite3.connect(DB)
+    # ⚠️ 2026-08-08 修复（假 IC 根因之二, 用户质疑触发）: 此前 SQL 取最近 140 天
+    # (LOOKBACK+20) 后反转升序, 再用 df.loc[:119] 取前 120 行 = 最老的 120 天
+    # （140天前~20天前）→ 模型输入不含最近 20 天和 ref 日价格 → 生成延续
+    # 20 天前水平 → exp_ret 退化为"过去 20 日收益反转因子"(corr=-0.878),
+    # 单月 IC +0.4503 是反转效应而非 Kronos 时序预测力。
+    # 修复: 只取最近 LOOKBACK=120 天（含 ref 日）, x_df = 全部 120 行。
     df = pd.read_sql(
         "SELECT date, open, high, low, close, volume, amount FROM stock_daily "
         "WHERE symbol=? AND date<=? ORDER BY date DESC LIMIT ?",
-        conn, params=[code, ref_date, LOOKBACK + 20])
+        conn, params=[code, ref_date, LOOKBACK])
     # y_timestamp: ref_date 后的 20 个交易日（未来日期, 仅时间特征, 无价格泄漏）
     future_dates = [r[0] for r in conn.execute(
         "SELECT DISTINCT date FROM stock_daily WHERE date>? ORDER BY date LIMIT ?",
         (ref_date, PRED_LEN)).fetchall()]
     conn.close()
-    if df is None or len(df) < LOOKBACK + 10 or len(future_dates) < PRED_LEN:
+    if df is None or len(df) < LOOKBACK or len(future_dates) < PRED_LEN:
         return None
     df = df.iloc[::-1].reset_index(drop=True)
 
-    x_df = df.loc[:LOOKBACK - 1, ["open", "high", "low", "close", "volume", "amount"]].copy()
+    x_df = df[["open", "high", "low", "close", "volume", "amount"]].copy()
     # amount 清洗: DB 腾讯源基本未入库 → volume×均价估算（Kronos 要求无 NaN）
     x_df["amount"] = x_df["amount"].fillna(
         x_df["volume"] * x_df[["open", "high", "low", "close"]].mean(axis=1))
     x_df = x_df.ffill().bfill()
-    x_ts = pd.to_datetime(df["date"].iloc[:LOOKBACK])
+    x_ts = pd.to_datetime(df["date"])  # 最近 120 天（含 ref 日）
     y_ts = pd.to_datetime(pd.Series(future_dates))
 
     pred_df = _PREDICTOR.predict(

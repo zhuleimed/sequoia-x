@@ -50,6 +50,7 @@ def main() -> None:
     ap.add_argument("--procs", type=int, default=36)
     ap.add_argument("--samples", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 只（调试）")
+    ap.add_argument("--suffix", default="", help="输出文件后缀（微调评估用 _ft, 避免覆盖零样本）")
     args = ap.parse_args()
 
     sys.path.insert(0, str(PROJECT_ROOT / "experiments/kronos"))
@@ -71,9 +72,9 @@ def main() -> None:
         batch = symbols[i * chunk:(i + 1) * chunk]
         if not batch:
             continue
-        out_f = OUT_DIR / f"month_{args.month}_{i}.jsonl"
+        out_f = OUT_DIR / f"month_{args.month}{args.suffix}_{i}.jsonl"
         # 分片级断点: 分片内全部完成才跳过（批内断点由 step2_batch 处理）
-        log_f = LOG_DIR / f"kronos_batch_{args.month}_{i}.log"
+        log_f = LOG_DIR / f"kronos_batch_{args.month}{args.suffix}_{i}.log"
         env = dict(os.environ)
         env.pop("KMP_AFFINITY", None)
         env["OMP_NUM_THREADS"] = "1"
@@ -108,8 +109,8 @@ def main() -> None:
         if alive == 0:
             break
 
-    # ── 汇总: 合并分片 → month_<YM>.jsonl ──
-    merged = OUT_DIR / f"month_{args.month}.jsonl"
+    # ── 汇总: 合并分片 → month_<YM>{suffix}.jsonl ──
+    merged = OUT_DIR / f"month_{args.month}{args.suffix}.jsonl"
     seen = set()
     with open(merged, "w", encoding="utf-8") as mf:
         for i, p, out_f in procs:

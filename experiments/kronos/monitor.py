@@ -23,9 +23,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 OUT_DIR = PROJECT_ROOT / "experiments/kronos/output"
+POOLS_DIR = PROJECT_ROOT / "output/backtest_v2/kronos_pools"
 PYTHON = "/home/zhulei/anaconda3/envs/zhulei_py312/bin/python"
 TIMEOUT_H = 6
-POOL_SIZE = 2978
+POOL_SIZE = 0  # 动态: 由 month 池子文件决定（2026-08-08 修复, 原硬编码 2978）
 
 
 def notify(title: str, body: str) -> None:
@@ -51,11 +52,15 @@ def count_done(month: str) -> int:
 
 
 def main() -> None:
+    global POOL_SIZE
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="2026-06")
     args = ap.parse_args()
     month = args.month
     merged = OUT_DIR / f"month_{month}.jsonl"
+    pool_f = POOLS_DIR / f"{month}.json"
+    POOL_SIZE = len(json.loads(pool_f.read_text())) if pool_f.exists() else 0
+    print(f"  动态池: {POOL_SIZE} 只", flush=True)
 
     print(f"[{datetime.now():%H:%M:%S}] 监测器启动: month={month} 目标={POOL_SIZE} 只 "
           f"超时={TIMEOUT_H}h", flush=True)

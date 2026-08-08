@@ -1,0 +1,53 @@
+# A 股日线微调——正式小样本配置（2026-08-08）
+# 基座: Kronos-Tokenizer-base (3.96M) + Kronos-small predictor (24.7M)
+# 理由: CPU 全参微调, Kronos-base (102.3M) 1 epoch ≈ 3h+ 不可行;
+#       small 1 epoch 预计 45-60min。评估用微调后的 small。
+data:
+  data_path: "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/kronos/finetune_csv/data/a_share_2026-02-28_50.csv"
+  lookback_window: 120
+  predict_window: 20
+  max_context: 512
+  clip: 5.0
+  train_ratio: 0.9
+  val_ratio: 0.1
+  test_ratio: 0.0
+
+training:
+  tokenizer_epochs: 3
+  basemodel_epochs: 2
+  batch_size: 32
+  log_interval: 200
+  num_workers: 6
+  seed: 42
+  tokenizer_learning_rate: 0.0002
+  predictor_learning_rate: 0.000001
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.1
+  accumulation_steps: 1
+
+model_paths:
+  pretrained_tokenizer: "/public/home/hpc/zhulei/superman/quant/code/models/Kronos-Tokenizer-base"
+  pretrained_predictor: "/public/home/hpc/zhulei/superman/quant/code/models/Kronos-small"
+  exp_name: "a_share_50_small"
+  base_path: "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/kronos/finetune_csv/finetuned/"
+  base_save_path: ""
+  finetuned_tokenizer: ""
+  tokenizer_save_name: "tokenizer"
+  basemodel_save_name: "basemodel"
+
+experiment:
+  name: "a_share_50_small"
+  description: "A股日线微调 small 基座 50 只股票"
+  use_comet: false
+  train_tokenizer: true
+  train_basemodel: true
+  skip_existing: false
+
+device:
+  use_cuda: false
+  device_id: 0
+
+distributed:
+  use_ddp: false
+  backend: "gloo"

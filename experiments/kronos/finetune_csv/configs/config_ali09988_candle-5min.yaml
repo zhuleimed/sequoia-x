@@ -1,0 +1,72 @@
+#This is a template config for custom finetuning kronos on csv data
+#这是一份模板config，用于kronos的csv自定义数据微调
+
+data:
+  data_path: "/xxxx/Kronos/finetune_csv/data/HK_ali_09988_kline_5min_all.csv"
+  lookback_window: 512
+  predict_window: 48
+  max_context: 512
+  clip: 5.0
+  # dataset split ratio
+  train_ratio: 0.9
+  val_ratio: 0.1
+  test_ratio: 0.0
+
+training:
+  # control the training epochs of tokenizer and basemodel
+  tokenizer_epochs: 30
+  basemodel_epochs: 20
+  batch_size: 32
+  log_interval: 50
+  num_workers: 6
+  seed: 42
+  
+  tokenizer_learning_rate: 0.0002
+  predictor_learning_rate: 0.000001
+  
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.1
+  
+  # gradient accumulation steps for tokenizer training
+  accumulation_steps: 1
+
+# model path configuration
+model_paths:
+  # pretrained model path
+  pretrained_tokenizer: "/xxx/Kronos/pretrained/Kronos-Tokenizer-base"
+  pretrained_predictor: "/xxx/Kronos/pretrained/Kronos-base"
+  
+  # experiment name - other paths will be generated based on this
+  exp_name: "HK_ali_09988_kline_5min_all"
+  base_path: "/xxx/Kronos/finetune_csv/finetuned/"
+
+  # the following paths will be generated based on exp_name, no need to modify manually
+  # way 1: leave empty string, the system will generate the full path
+  base_save_path: ""  #  /xxxx/Kronos/finetune_csv/finetuned/{exp_name}
+  finetuned_tokenizer: ""  # /xxxx/Kronos/finetune_csv/finetuned/{exp_name}/tokenizer/best_model
+  
+  # way 2: use template string, {exp_name} will be replaced with the actual experiment name
+  # base_save_path: "/xxxx/Kronos/finetune_csv/finetuned/{exp_name}"
+  # finetuned_tokenizer: "/xxxx/Kronos/finetune_csv/finetuned/{exp_name}/tokenizer/best_model"
+  
+  tokenizer_save_name: "tokenizer"
+  basemodel_save_name: "basemodel"
+
+experiment:
+  name: "kronos_custom_finetune"
+  description: "Custom finetune for HK stock data"
+  use_comet: false
+  
+  # control the training phase
+  train_tokenizer: true
+  train_basemodel: true
+  
+  # if true, skip the existing model training
+  skip_existing: false
+
+# device configuration
+device:
+  use_cuda: true
+  device_id: 0
+  

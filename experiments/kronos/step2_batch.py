@@ -31,8 +31,8 @@ def main() -> None:
     args = ap.parse_args()
 
     tokenizer = KronosTokenizer.from_pretrained(
-        str(S.MODELS_DIR / "Kronos-Tokenizer-base"), local_files_only=True)
-    model = Kronos.from_pretrained(str(S.MODELS_DIR / "Kronos-base"), local_files_only=True)
+        str(S.TOKENIZER_DIR), local_files_only=True)
+    model = Kronos.from_pretrained(str(S.PREDICTOR_DIR), local_files_only=True)
     S._PREDICTOR = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
     SAMPLES = int(args.samples)
 
