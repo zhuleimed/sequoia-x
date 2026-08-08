@@ -73,14 +73,16 @@ def main() -> None:
     print(out, flush=True)
 
     # 3. 解析增量 IC（完整列: month idx ic_ft ic_rev ic_mr corr inc）
+    #    analyze_baseline.py 实际输出 7 字段（2026-08-09 修复: 之前误以为 8 字段,
+    #    导致永远解析 0 行, inc_mean=-99 强制判负, 误判方向四收尾）
     rows = []
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) == 8 and parts[0].startswith("20"):
+        if len(parts) == 7 and parts[0].startswith("20"):
             rows.append({"month": parts[0], "idx_ret": float(parts[1].replace("%", "")) / 100,
-                         "ic_ft": float(parts[3]), "ic_rev": float(parts[4]),
-                         "ic_mr": float(parts[5]), "corr_mr": float(parts[6]),
-                         "inc": float(parts[7])})
+                         "ic_ft": float(parts[2]), "ic_rev": float(parts[3]),
+                         "ic_mr": float(parts[4]), "corr_mr": float(parts[5]),
+                         "inc": float(parts[6])})
     if len(rows) != len(args.months):
         print(f"⚠️ 解析到 {len(rows)} 个月（期望 {len(args.months)}）", flush=True)
     incs = [r["inc"] for r in rows]

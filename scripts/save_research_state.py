@@ -33,8 +33,17 @@ EXPERIMENTS = [
     ("方向一 LGBMRanker", ".tmp/t2_ranker", "experiments/t2_ranker/experiment_t2_ranker.py"),
     ("方向二 DLinear", ".tmp/dlinear", "experiments/dlinear/experiment_dlinear.py"),
     ("方向三 RankIC-LSTM", ".tmp/rankic_lstm", "experiments/rankic_lstm/experiment_rankic.py"),
-    ("方向四 Kronos", None, None),          # 调研完成待启动，无 tmp
+    ("方向四 Kronos", None, None),          # 无 tmp，状态从 V3 文档标题提取
     ("方向五 PatchTST", None, None),        # 前置门槛，未启动
+]
+
+# V3 文档章节标题 → 方向名（状态从【状态: ...】标记提取，单一事实源）
+DOC_SECTIONS = [
+    ("## 6. 方向一", "方向一"),
+    ("## 7. 方向二", "方向二"),
+    ("## 8. 方向三", "方向三"),
+    ("## 9. 方向四", "方向四"),
+    ("## 10. 方向五", "方向五"),
 ]
 
 # 各方向 IC 报告（存在则提取最新总体统计）
@@ -47,6 +56,18 @@ IC_REPORTS = {
 
 def _count_json(d: Path) -> int:
     return len(list(d.glob("*.json"))) if d.exists() else 0
+
+
+def _doc_status(name: str) -> str:
+    """从 V3 文档章节标题提取【状态: ...】标记（找不到回退空串）。"""
+    for sec_marker, dir_name in DOC_SECTIONS:
+        if name.startswith(dir_name):
+            for line in (ROOT / "V3研究方向与实验研究记录.md").read_text(
+                    errors="ignore").splitlines():
+                if line.startswith(sec_marker):
+                    i = line.find("【状态:")
+                    return line[i + 4:line.find("】", i)] if i >= 0 else ""
+    return ""
 
 
 def _running_procs() -> list[str]:
@@ -104,13 +125,14 @@ def generate(print_summary: bool = False) -> str:
     ]
 
     for name, tmp_rel, script in EXPERIMENTS:
+        doc_st = _doc_status(name)
         if tmp_rel is None:
-            lines.append(f"| {name} | 未启动/调研完成 | — | — | — |")
+            lines.append(f"| {name} | {doc_st or '未启动'} | — | — | — |")
             continue
         tmp = ROOT / tmp_rel
         n = _count_json(tmp)
-        # 判断预期总数（脚本中 70 个月）
-        state = "运行中" if (script and _probe_script(script)) else ("已完成" if n >= 70 else "部分完成")
+        # 判断预期总数（脚本中 70 个月）; 文档标记优先（证伪/完成是终态）
+        state = doc_st if doc_st else ("运行中" if (script and _probe_script(script)) else ("已完成" if n >= 70 else "部分完成"))
         lines.append(f"| {name} | {state} | {n}/70 个月 | {_ic_summary(IC_REPORTS[name[:3]])} | {_last_lines(ROOT / 'logs' / _log_for(script))} |")
 
     lines += [
@@ -128,18 +150,19 @@ def generate(print_summary: bool = False) -> str:
         "",
         "## 四、待办（详见 V3 文档 §14）",
         "",
-        "- 方向三 RankIC-LSTM 70 个月运行中（完成 → 自动 analyze → 填充 §8.8）",
-        "- 方向四 Kronos 3a 零样本基线（待用户确认启动）",
-        "- 方向三完成后：融合矩阵实验 / 回测验证",
+        "- 方向一/二/三/四均已完结（前三完成 70 个月, 方向四 3a+3b 证伪）",
+        "- 后续: 融合矩阵实验 / 72 组回测验证 / 2026-07 月补测",
         "",
     ]
     text = "\n".join(lines)
     STATE_PATH.write_text(text)
 
     if print_summary:
-        # hook 用：只打印 3 行摘要注入会话
+        # hook 用：只打印一行摘要注入会话
         procs_s = "、".join(procs) if procs else "无"
-        print(f"[状态] {now} | 方向一:证伪 方向二:证伪 方向三:{_count_json(ROOT/'.tmp/rankic_lstm')}/70 运行中 | 进程: {procs_s}")
+        statuses = " ".join(f"{name.split()[0]}:{_doc_status(name) or ('运行中' if _probe_script(script) else '完成')}"
+                            for name, _, script in EXPERIMENTS)
+        print(f"[状态] {now} | {statuses} | 进程: {procs_s}")
     return text
 
 

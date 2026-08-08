@@ -32,6 +32,11 @@ FT_PRED = FINETUNED / "basemodel" / "best_model"
 FINETUNE_LOG = PROJECT_ROOT / "logs/finetune_a_share_50.log"
 PYTHON = "/home/zhulei/anaconda3/envs/zhulei_py312/bin/python"
 STALL_MIN = 40
+# 训练完成标志（train_sequential.py 末尾打印; 2026-08-09 修复: 此前只看
+# best_model/model.safetensors 文件存在——训练中途每个 epoch 就保存 checkpoint,
+# 导致判定链提前触发, 用中途模型评估（08-08 晚 3b 误判收尾的根因之一））
+TRAIN_DONE_MARK = "Training completed successfully!"
+TRAIN_TIMEOUT_H = 10  # 硬超时: 50 只约 4h, 10h 未见完成标志则告警退出
 
 
 def notify(title: str, body: str) -> None:
@@ -89,9 +94,18 @@ def main() -> None:
 
     while True:
         time.sleep(180)
-        # 完成判定
-        if (FT_PRED / "model.safetensors").exists() or (FT_PRED / "pytorch_model.bin").exists():
-            break
+        # 完成判定: 训练日志出现完成标志（不能只看 best_model 文件存在——训练中途
+        # 每个 epoch 就保存 checkpoint, 会提前触发导致用中途模型评估）
+        if FINETUNE_LOG.exists():
+            log_text = FINETUNE_LOG.read_text(encoding="utf-8", errors="ignore")
+            if TRAIN_DONE_MARK in log_text:
+                break
+        # 硬超时保护
+        if time.time() - t0 > TRAIN_TIMEOUT_H * 3600:
+            notify("⚠️ Kronos 微调判定超时",
+                   f"{TRAIN_TIMEOUT_H}h 未见训练完成标志（{TRAIN_DONE_MARK}）, 判定链退出")
+            print(f"[{datetime.now():%H:%M:%S}] ⚠️ 超时退出, 未执行评估", flush=True)
+            return
         # 停滞告警
         if FINETUNE_LOG.exists():
             mtime = FINETUNE_LOG.stat().st_mtime
