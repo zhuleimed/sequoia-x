@@ -298,11 +298,14 @@ def _build_one_features(args: tuple):
     return sym, per_day[-cfg.window:]
 
 
-def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool):
+def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool,
+                   ratio: float = 1.0):
     """V3 修订二: 为合成标签 (symbol, ref) 重算特征 → (X_syn, y_syn)。
 
     合成样本: X = ref 前 120 天真实特征窗口（复用 _build_one_features）,
     y = Kronos 合成 20 日收益（校准后, 与 y2 同口径）。
+    ratio: 注入比例（2026-08-09 占比试调: 1.0=全量24%, 0.25≈5%, 0.5≈10%,
+    固定 seed 抽样子集, 可复现）。
     仅 88 维模式支持（include_extra 时扩展特征对合成样本不可用 → 返回空）。
     """
     import json as _json
@@ -340,6 +343,12 @@ def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool):
     conn.close()
     if not Xs:
         return np.array([]), np.array([])
+    # 占比抽样（2026-08-09）: ratio<1 时固定 seed 抽子集（可复现, 试调占比用）
+    if ratio < 1.0 and len(ys) > 1:
+        rng = __import__("random").Random(42)
+        idx = sorted(rng.sample(range(len(ys)), max(1, int(len(ys) * ratio))))
+        Xs = [Xs[i] for i in idx]
+        ys = [ys[i] for i in idx]
     return np.array(Xs, dtype=np.float32), np.array(ys, dtype=np.float32)
 
 
@@ -353,7 +362,7 @@ def _process_month_worker(args: tuple) -> tuple:
     Returns:
         (month, predictions_dict) 或 (month, None) 若失败。
     """
-    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file = args
+    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file, synth_ratio = args[:9]
 
     import json as _json
     import sqlite3
@@ -446,7 +455,8 @@ def _process_month_worker(args: tuple) -> tuple:
     # ── 合成增强（V3 修订二, 2026-08-09）: 追加 Kronos 合成标签样本, 只进 T2/T4 ──
     X_tr_enh, y_tr_enh, X_tr_2d_enh = X_tr, y_tr, X_tr_2d
     if synth_file and Path(synth_file).exists():
-        X_syn, y_syn = _synth_samples(synth_file, db_path, cfg, include_extra)
+        X_syn, y_syn = _synth_samples(synth_file, db_path, cfg, include_extra,
+                                      synth_ratio)
         if len(y_syn) > 0:
             X_tr_enh = np.concatenate([X_tr, X_syn])
             y_tr_enh = np.concatenate([y_tr, y_syn])
@@ -566,7 +576,8 @@ def _process_month_worker(args: tuple) -> tuple:
 def _process_and_save(month: str, db_path: str, cfg_dict: dict,
                        max_pool_size: int, skip_t4: bool,
                        cache_dir: str, include_extra: bool,
-                       synth_file: str = "", tmp_dir: str = "") -> None:
+                       synth_file: str = "", synth_ratio: float = 1.0,
+                       tmp_dir: str = "") -> None:
     """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。
 
     ⚠️ 2026-08-09 修复: tmp_dir 由 build_cache 按 output 文件名隔离传入——多个
@@ -584,7 +595,8 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
     tmp_file = tmp_dir / f"month_{month}.json"
 
     try:
-        args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file)
+        args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir,
+                include_extra, synth_file, synth_ratio)
         _, preds = _process_month_worker(args)
         if preds is not None:
             with open(tmp_file, "w") as f:
@@ -680,6 +692,7 @@ def build_cache(
     output_path: Path | None = None,
     skip_t4: bool = False,
     synth_file: str = "",
+    synth_ratio: float = 1.0,
 ) -> dict:
     """构建预测缓存（串行逐月，稳定可靠）。
 
@@ -777,7 +790,7 @@ def build_cache(
 
     task_args = [
         (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra,
-         synth_file, str(tmp_dir))
+         synth_file, synth_ratio, str(tmp_dir))
         for month in pending_months
     ]
 
@@ -834,6 +847,8 @@ def main():
                         help="V3 修订二: 合成标签 JSON（Kronos 生成, 仅 88 维模式生效）")
     parser.add_argument("--no-extra", action="store_true",
                         help="实验用: 强制 88 维（覆盖 config 的 extra_features, 不动生产配置）")
+    parser.add_argument("--synth-ratio", type=float, default=1.0,
+                        help="合成注入比例（1.0=全量24%, 0.25≈5%, 0.5≈10%; 占比试调）")
     args = parser.parse_args()
 
     cfg = get_config()
@@ -852,7 +867,7 @@ def main():
         cfg.extra_features = False   # 实验用 88 维（合成样本仅 88 维支持）
     build_cache(cfg, engine, test_months, args.max_stocks,
                 output_path=Path(args.output), skip_t4=args.skip_t4,
-                synth_file=args.synth_file)
+                synth_file=args.synth_file, synth_ratio=args.synth_ratio)
 
 
 if __name__ == "__main__":
