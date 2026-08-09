@@ -118,6 +118,7 @@ def _gen_series(symbol: str, seed: pd.DataFrame, T: float) -> pd.DataFrame | Non
 
 def _worker(args: tuple):
     symbol, T, out_dir = args
+    out_dir = Path(out_dir)      # ⚠️ 2026-08-10 修复: main 传 str, mkdir 需 Path
     conn = sqlite3.connect(S2.DB)
     seed = pd.read_sql(
         "SELECT date, open, high, low, close, volume, amount FROM stock_daily "
