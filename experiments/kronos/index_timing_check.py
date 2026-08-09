@@ -65,7 +65,7 @@ def ensure_index_data() -> list[str]:
     if n < 300:
         print(f"⏳ {INDEX_CODE} 缺失/不完整 ({n} 行), 腾讯源补齐...", flush=True)
         from sequoia_x.data.tencent_source import TencentSource
-        df = TencentSource().get_daily("sh000852", days=1600)
+        df = TencentSource().get_daily(INDEX_CODE.replace(".", ""), days=1600)
         if df is None or len(df) < 300:
             conn.close()
             raise RuntimeError("中证1000 拉取失败")
@@ -173,7 +173,13 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=365, help="回溯窗口（交易日历天数, 近 1 年默认）")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--out", default="index_timing_check.json", help="输出文件名")
+    ap.add_argument("--index", default="sh.000852",
+                    help="指数代码（004 库格式: sh.000852/sh.000300/sh.000905/sh.000016）")
     args = ap.parse_args()
+
+    global INDEX_CODE
+    INDEX_CODE = args.index
+    print(f"标的指数: {INDEX_CODE}", flush=True)
 
     dates = ensure_index_data()
     t0 = time.time()

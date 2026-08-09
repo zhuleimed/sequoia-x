@@ -386,7 +386,13 @@ def sample_from_logits(logits, temperature=1.0, top_k=None, top_p=None, sample_l
     return x
 
 
-def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context, pred_len, clip=5, T=1.0, top_k=0, top_p=0.99, sample_count=5, verbose=False):
+def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context, pred_len, clip=5, T=1.0, top_k=0, top_p=0.99, sample_count=5, verbose=False, aggregate=True):
+    """条件采样生成预测。
+
+    ⚠️ 2026-08-09 发现: 官方代码末尾 np.mean(preds, axis=1) 对 sample_count 条
+    采样路径取均值——predict() 实际只返回"平均路径", "N 采样取中位数"从未生效。
+    aggregate=False 时返回 (batch, sample, pred_len, feat) 全路径（合成 K 线生成用）。
+    """
     with torch.no_grad():
         batch_size = x.size(0)
         initial_seq_len = x.size(1)
@@ -438,7 +444,9 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
         z = tokenizer.decode(input_tokens, half=True)
         z = z.reshape(batch_size, sample_count, z.size(1), z.size(2))
         preds = z.cpu().numpy()
-        preds = np.mean(preds, axis=1)
+        if aggregate:
+            preds = np.mean(preds, axis=1)   # 官方行为: 平均路径（保持默认不变）
+        # aggregate=False: (batch, sample, pred_len, feat) 全采样路径
 
         return preds
 
@@ -469,15 +477,18 @@ class KronosPredictor:
         self.tokenizer = self.tokenizer.to(self.device)
         self.model = self.model.to(self.device)
 
-    def generate(self, x, x_stamp, y_stamp, pred_len, T, top_k, top_p, sample_count, verbose):
+    def generate(self, x, x_stamp, y_stamp, pred_len, T, top_k, top_p, sample_count, verbose, aggregate=True):
 
         x_tensor = torch.from_numpy(np.array(x).astype(np.float32)).to(self.device)
         x_stamp_tensor = torch.from_numpy(np.array(x_stamp).astype(np.float32)).to(self.device)
         y_stamp_tensor = torch.from_numpy(np.array(y_stamp).astype(np.float32)).to(self.device)
 
         preds = auto_regressive_inference(self.tokenizer, self.model, x_tensor, x_stamp_tensor, y_stamp_tensor, self.max_context, pred_len,
-                                          self.clip, T, top_k, top_p, sample_count, verbose)
-        preds = preds[:, -pred_len:, :]
+                                          self.clip, T, top_k, top_p, sample_count, verbose, aggregate=aggregate)
+        if aggregate:
+            preds = preds[:, -pred_len:, :]
+        else:
+            preds = preds[:, :, -pred_len:, :]
         return preds
 
     def predict(self, df, x_timestamp, y_timestamp, pred_len, T=1.0, top_k=0, top_p=0.9, sample_count=1, verbose=True):
