@@ -566,13 +566,20 @@ def _process_month_worker(args: tuple) -> tuple:
 def _process_and_save(month: str, db_path: str, cfg_dict: dict,
                        max_pool_size: int, skip_t4: bool,
                        cache_dir: str, include_extra: bool,
-                       synth_file: str = "") -> None:
-    """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。"""
+                       synth_file: str = "", tmp_dir: str = "") -> None:
+    """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。
+
+    ⚠️ 2026-08-09 修复: tmp_dir 由 build_cache 按 output 文件名隔离传入——多个
+    build_prediction_cache 任务并行时共享 .cache_tmp 会被先完成任务的 rmtree 删除,
+    导致其他任务写 temp 失败（FileNotFoundError）。
+    """
     import json as _json, traceback
     from pathlib import Path as _Path
     # 绝对路径，避免子进程 CWD 不一致
     _proj_root = _Path(__file__).resolve().parent.parent
-    tmp_dir = _proj_root / "output/backtest_v2/.cache_tmp"
+    if not tmp_dir:
+        tmp_dir = str(_proj_root / "output/backtest_v2/.cache_tmp")
+    tmp_dir = _Path(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp_file = tmp_dir / f"month_{month}.json"
 
@@ -763,14 +770,16 @@ def build_cache(
     n_workers = min(24, len(pending_months))
     logger.info(f"并行构建: {len(pending_months)} 个月, {n_workers} 进程")
 
-    task_args = [
-        (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file)
-        for month in pending_months
-    ]
-
-    tmp_dir = (output_path.parent / ".cache_tmp").resolve()
+    # ⚠️ 2026-08-09: tmp_dir 按 output 文件名隔离（多任务并行互不干扰）
+    tmp_dir = (output_path.parent / f".cache_tmp_{output_path.stem}").resolve()
     tmp_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"临时目录: {tmp_dir}")
+
+    task_args = [
+        (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra,
+         synth_file, str(tmp_dir))
+        for month in pending_months
+    ]
 
     from multiprocessing import Pool
     if n_workers == 1:
