@@ -172,13 +172,28 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
 
 
 def build_prediction_cache(target_month: str) -> bool:
-    """T2/T1/T3 预测缓存构建（增量，断点续跑）。"""
+    """T2/T1/T3 预测缓存构建（增量，断点续跑）。
+
+    V3 修订二（2026-08-10）: 合成序列增强（cfg.synth_series_dir 非空时启用）。
+    121 维完整支持: 合成样本扩展特征 = 种子股票最新基本面快照广播
+    （合成序列是种子股票的价格延续, 语义自洽）——不降级特征维度。
+    """
     logger.info(f"Step1: T2/T1/T3 预测缓存构建（{target_month}）...")
-    r = subprocess.run(
-        [PYTHON, "-u", "scripts/build_prediction_cache.py",
-         "--start-month", target_month, "--end-month", target_month, "--skip-t4"],
-        cwd=str(PROJECT_DIR),
-    )
+    from sequoia_x.model_selection_v2.config import get_config
+    cmd = [PYTHON, "-u", "scripts/build_prediction_cache.py",
+           "--start-month", target_month, "--end-month", target_month, "--skip-t4"]
+    cfg = get_config()
+    # 合成序列启用: 月末链 marker 优先（自动）→ config.synth_series_dir（手动兜底）
+    synth_dir = ""
+    marker = PROJECT_DIR / "output/backtest_v2/.synth_series_marker"
+    if marker.exists() and Path(marker.read_text().strip()).exists():
+        synth_dir = marker.read_text().strip()
+    elif getattr(cfg, "synth_series_dir", "") and Path(cfg.synth_series_dir).exists():
+        synth_dir = cfg.synth_series_dir
+    if synth_dir:
+        cmd += ["--synth-series", synth_dir]
+        logger.info(f"Step1: 合成序列增强启用（{synth_dir}, 121 维保持）")
+    r = subprocess.run(cmd, cwd=str(PROJECT_DIR))
     return r.returncode == 0
 
 

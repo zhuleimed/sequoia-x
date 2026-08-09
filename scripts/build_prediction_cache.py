@@ -303,11 +303,12 @@ def _synth_series_samples(series_dir: str, db_path: str, cfg, include_extra: boo
 
     与 _synth_samples（标签替换）的本质区别: 特征+标签全从合成序列计算（自洽）,
     扩充的是样本量本身。每只合成序列(300 天) → ~160 个样本 (X(120,88), y2 20 日)。
+    2026-08-10: 121 维支持——合成序列前 120 天为真实种子段, 扩展特征 = 种子股票
+    最新基本面快照广播（语义: 合成序列是种子股票的价格延续）; 种子数据缺失 → 全 0
+    （与真实缺失 fillna(0) 同语义）。
     """
     import sqlite3 as _sqlite3
     import pandas as _pd
-    if include_extra:
-        return np.array([]), np.array([])
     from sequoia_x.model_selection_v2.features import _extract_per_day_features
     from pathlib import Path as _Path
     sdir = _Path(series_dir)
@@ -324,7 +325,11 @@ def _synth_series_samples(series_dir: str, db_path: str, cfg, include_extra: boo
             series = _pd.read_csv(fp)
             if len(series) < cfg.window + 40:
                 continue
-            per_day = _extract_per_day_features(series, idx_df, cfg, extra_matrix=None)
+            extra_matrix = None
+            if include_extra:
+                extra_matrix = _synth_extra_matrix(series, fp.stem.replace("syn_", ""))
+            per_day = _extract_per_day_features(series, idx_df, cfg,
+                                                extra_matrix=extra_matrix)
             arr = np.asarray(per_day, dtype=float)
             if len(arr) < cfg.window + 20 or np.isnan(arr).any():
                 continue
@@ -340,6 +345,27 @@ def _synth_series_samples(series_dir: str, db_path: str, cfg, include_extra: boo
     if not Xs:
         return np.array([]), np.array([])
     return np.concatenate(Xs).astype(np.float32), np.concatenate(ys).astype(np.float32)
+
+
+def _synth_extra_matrix(series: pd.DataFrame, seed_code: str):
+    """合成序列的扩展特征矩阵: 种子股票最新基本面快照广播到全序列。
+
+    合成序列前 120 行为真实种子段（日期真实, DB 有扩展数据）→ 取种子段最后
+    可用扩展行 → tile 到全序列长度。种子无数据 → 全 0（与真实缺失同语义）。
+    """
+    import pandas as _pd
+    try:
+        from sequoia_x.features_extra.build_extra_features import build_extra_with_flag
+        seed_part = series.head(120)
+        dates = _pd.DatetimeIndex(_pd.to_datetime(seed_part["date"]))
+        close = _pd.Series(seed_part["close"].values.astype(float), index=dates, name="close")
+        extra, incomplete, _ = build_extra_with_flag(dates, close, seed_code)
+        if extra is not None and len(extra):
+            last = extra.ffill().iloc[-1].fillna(0).values
+            return np.tile(last, (len(series), 1)).astype(np.float32)
+    except Exception:
+        pass
+    return np.zeros((len(series), 33), dtype=np.float32)   # 33 维扩展（88+33=121）
 
 
 def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool,

@@ -106,8 +106,55 @@ def _verify_caches() -> tuple[bool, str]:
     return (not bad), "; ".join(msgs + bad)
 
 
+SYNTH_SERIES_DIR = str(PROJECT_DIR / "experiments/kronos/output/synth_series")
+SYNTH_MARKER = str(PROJECT_DIR / "output/backtest_v2/.synth_series_marker")
+SYNTH_N = 96          # 合成序列数量（V3 修订二, ~65min @ 12 workers）
+
+
+def _gen_synth_series(today: date) -> bool:
+    """V3 修订二: 合成序列生成（缓存重建前串行, ~65min）。
+
+    成功 → 写 marker（v2_monthly_retrain 读取启用注入）; 失败 → 告警跳过
+    （合成是增强非必需, 不阻断月度流程, 与扩展维度降级同哲学）。
+    已有 marker 且目录有效 → 跳过（断点续跑）。
+    """
+    print(f"[{today}] 1.5 合成序列生成（{SYNTH_N} 只, ~65min）...")
+    if Path(SYNTH_MARKER).exists() and Path(SYNTH_SERIES_DIR).exists():
+        n = len(list(Path(SYNTH_SERIES_DIR).glob("syn_*.csv")))
+        if n >= SYNTH_N * 0.9:
+            print(f"[{today}] ✅ 已有合成序列 {n} 只, 跳过生成")
+            return True
+    r = subprocess.run(
+        [sys.executable, "-u", str(PROJECT_DIR / "experiments/kronos/synth_full_series.py"),
+         "--n", str(SYNTH_N), "--workers", "12"],
+        cwd=str(PROJECT_DIR), timeout=5 * 3600)
+    if r.returncode != 0:
+        _notify("⚠️ 合成序列生成失败（跳过, 重训不带合成增强）",
+                "合成是增强非必需 → 本月重训按纯真实数据执行; 可手动重跑 synth_full_series.py")
+        print(f"[{today}] ❌ 合成序列生成失败 exit={r.returncode}, 跳过")
+        return False
+    # 抽样检验（数量 + 前 3 只质量）
+    files = sorted(Path(SYNTH_SERIES_DIR).glob("syn_*.csv"))
+    n = len(files)
+    if n < SYNTH_N * 0.9:
+        _notify("⚠️ 合成序列数量不足", f"仅 {n}/{SYNTH_N} 只 → 跳过合成增强")
+        return False
+    try:
+        import pandas as _pd
+        for fp in files[:3]:
+            s = _pd.read_csv(fp)
+            assert len(s) >= 280 and s.isna().sum().sum() == 0
+    except Exception as e:
+        _notify("⚠️ 合成序列质量检验失败", f"{e} → 跳过合成增强")
+        return False
+    Path(SYNTH_MARKER).write_text(SYNTH_SERIES_DIR)
+    _notify("✅ 合成序列生成完成", f"{n} 只已就绪, 9/1 重训将注入（121 维, 种子基本面快照）")
+    print(f"[{today}] ✅ 合成序列 {n} 只, marker 已写")
+    return True
+
+
 def auto_rebuild_and_verify(today: date) -> bool:
-    """自动链: 覆盖率检查 → 缓存重建 → 自检 → 单月干跑验证。
+    """自动链: 覆盖率检查 → 合成序列生成 → 缓存重建 → 自检 → 单月干跑验证。
 
     Returns: True=全链通过（9/1 重训可直接运行）; False=某环失败（已微信告警）。
     """
@@ -124,6 +171,9 @@ def auto_rebuild_and_verify(today: date) -> bool:
         print(f"[{today}] ⚠️ {msg} → 降级 88 维重建")
     else:
         print(f"[{today}] ✅ {msg}")
+
+    # 1.5 合成序列生成（V3 修订二, 2026-08-10; 失败跳过不阻断）
+    _gen_synth_series(today)
 
     # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读;
     #    数据不全时 --no-extra 强制 88 维）
@@ -148,15 +198,18 @@ def auto_rebuild_and_verify(today: date) -> bool:
     print(f"[{today}] ✅ 自检: {msg}")
 
     # 4. 单月干跑验证（临时输出, 不污染生产 prediction_cache.json;
-    #    降级模式 build_prediction_cache 自动检测 121 缓存缺失 → 88 维链路）
+    #    降级模式 build_prediction_cache 自动检测 121 缓存缺失 → 88 维链路;
+    #    V3 修订二: 合成 marker 存在 → 带合成注入验证）
     month = today.strftime("%Y-%m")
     print(f"[{today}] ④ 单月干跑验证（{month}, build_prediction_cache, 约 30-60min）...")
     dry = PROJECT_DIR / "output/backtest_v2/.dryrun_cache.json"
-    r = subprocess.run(
-        [sys.executable, "-u", str(PROJECT_DIR / "scripts/build_prediction_cache.py"),
-         "--start-month", month, "--end-month", month, "--skip-t4",
-         "--output", str(dry)],
-        cwd=str(PROJECT_DIR), timeout=4 * 3600)
+    dry_cmd = [sys.executable, "-u", str(PROJECT_DIR / "scripts/build_prediction_cache.py"),
+               "--start-month", month, "--end-month", month, "--skip-t4",
+               "--output", str(dry)]
+    if Path(SYNTH_MARKER).exists():
+        dry_cmd += ["--synth-series", SYNTH_SERIES_DIR]
+        print(f"[{today}] 干跑带合成序列增强（marker 存在）")
+    r = subprocess.run(dry_cmd, cwd=str(PROJECT_DIR), timeout=4 * 3600)
     if r.returncode != 0 or not dry.exists():
         _notify("❌ 月末干跑验证失败", "88/121 维预测链路未验证通过, 9/1 重训前需人工排查")
         print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode}")
