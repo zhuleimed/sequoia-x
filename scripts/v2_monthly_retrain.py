@@ -1,8 +1,8 @@
-"""V2 月度重训 + 选股 + 信号入库（cron 每月 1 日 00:00 触发）
+"""V2 月度重训 + 选股 + 信号入库（cron 每月 1 日 03:00 触发（2026-08-10: 与月末链错开——19:00 月末链约 8h 至 02:00, 03:00 重训零重叠））
 
 时机依据（用户设计）：
   - 月末最后交易日 18:10 同步完成 → 上月数据 100% 完整
-  - 下月 1 日 00:00 重训（此时数据完整，凌晨训练不占盘面时间）
+  - 下月 1 日 03:00 重训（月末链 02:00 完成后 1h 缓冲, 凌晨训练不占盘面时间）
   - 重训完成 → 选股信号入库 sim_v2.db（strategy_from="V2"）
   - 信号日期标记为"上月最后交易日"→ 下一个交易日晚上 --sim-update
     执行买入（用当日开盘价）——若 1 日不是交易日则自动顺延（T+1 模型天然支持）
@@ -14,8 +14,8 @@
   4. 写入 sim_v2.db（submit_buy_signals，strategy_name="V2"）
   5. V2 荐股推送（wxpusher）
 
-用法（cron）：
-  0 0 1 * * cd <project> && python scripts/v2_monthly_retrain.py >> logs/v2_retrain_$(date +%Y%m).log 2>&1
+用法（cron, 2026-08-10: 00:00 → 03:00 与月末链错开）：
+  0 3 1 * * cd <project> && python scripts/v2_monthly_retrain.py >> logs/v2_retrain_$(date +%Y%m).log 2>&1
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def _notify(title: str, body: str) -> None:
 
 def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     """等待月末自动链的训练缓存就绪（2026-08-07: 8/31 19:00 拉取+重建 2-6h,
-    9/1 00:00 重训启动时可能尚未完成 → 每 5min 轮询, 最长 12h 后失败告警）。
+    9/1 03:00 重训启动时可能尚未完成 → 每 5min 轮询, 最长 12h 后失败告警）。
 
     判定: 树模型缓存(121/88 按 config) metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。
     """
@@ -312,7 +312,7 @@ def main() -> None:
         logger.warning(f"Step0: 辅助维度刷新异常(不阻断重训): {e}")
 
     # ── Step0.5: 等待月末自动链训练缓存就绪（2026-08-07）──
-    #    8/31 19:00 拉取 + 重建 2-6h, 9/1 00:00 启动时可能未完成 → 轮询等待（最长 12h）
+    #    8/31 19:00 拉取 + 重建 2-6h, 9/1 03:00 启动时可能未完成 → 轮询等待（最长 12h）
     if not wait_for_cache_ready(target_month):
         _notify("❌ V2 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
         sys.exit(1)
