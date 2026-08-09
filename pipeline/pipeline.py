@@ -64,6 +64,8 @@ STEPS: list[dict] = [
         "timeout": 14400,  # 4h（baostock 慢时 3h 不够用）
     },
     # ── 2. 策略选股 + LLM（必需） ──
+    # （注: ETF 择时模拟盘不在此管线——20:30 独立 cron 运行, 全量走 019 库
+    #   [当日 ETF+指数 20:05 已入库], 见 scripts/sim_etf_timing.py）
     {
         "id": "strategy",
         "name": "策略选股+LLM",

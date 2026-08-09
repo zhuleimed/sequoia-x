@@ -42,12 +42,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "experiments/kronos"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-DB = str(PROJECT_ROOT / "data/sequoia_v2.db")
+# 2026-08-09 数据源可配置: 模拟盘（20:30 运行）全量走 019 库（当日 ETF+指数 20:05
+# 已入库）; 回测/推理默认 004 库。环境变量覆盖: KRONOS_INDEX_DB / KRONOS_INDEX_SYMBOL
+DB = os.environ.get("KRONOS_INDEX_DB",
+                    str(PROJECT_ROOT / "data/sequoia_v2.db"))
 MODELS_DIR = Path("/public/home/hpc/zhulei/superman/quant/code/models")
 TOKENIZER_DIR = Path(os.environ.get("KRONOS_TOKENIZER_DIR", str(MODELS_DIR / "Kronos-Tokenizer-base")))
 PREDICTOR_DIR = Path(os.environ.get("KRONOS_PREDICTOR_DIR", str(MODELS_DIR / "Kronos-base")))
 OUT_DIR = PROJECT_ROOT / "experiments/kronos/output"
-INDEX_CODE = "sh.000852"      # 中证1000
+INDEX_CODE = os.environ.get("KRONOS_INDEX_SYMBOL", "sh.000852")   # 中证1000（019 库为 000852）
 LOOKBACK = 120
 PRED_LEN = 5                  # 中金口径: 未来 5 日收盘价
 SAMPLES = 30
@@ -90,11 +93,37 @@ def _load_predictor():
     _PREDICTOR = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
 
 
+def next_n_trade_dates(after: str, n: int) -> list[str]:
+    """after 之后的 n 个交易日（不含 after）。实盘时 DB 无未来数据, 生成日历。
+
+    2026-08-09 改: 只用 chinese_calendar 本地日历（无网络; 实测 baostock
+    query_trade_dates 卡死 30s+）。2027+ 年份容错（节假日当工作日）——此日期
+    仅作 Kronos y_timestamp 时间特征（周几/年位置）与 exec_date 参考, 不含价格
+    → 无 look-ahead; 实际交易执行以行情库当日数据为准。
+    """
+    import chinese_calendar as cc
+    from datetime import date, timedelta
+    d0 = date.fromisoformat(after)
+    days: list[str] = []
+    d = d0 + timedelta(days=1)
+    while len(days) < n and d < d0 + timedelta(days=120):
+        try:
+            if d.weekday() < 5 and cc.is_workday(d):
+                days.append(d.strftime("%Y-%m-%d"))
+        except NotImplementedError:   # 2027+ 无节假日数据
+            if d.weekday() < 5:
+                days.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    return days[:n]
+
+
 def predict_index(ref_date: str) -> dict | None:
     """单点: ≤ref 最近 120 日指数 OHLCV → 预测未来 5 日收盘价。
 
     与 predict_one 同规则: y_timestamp 用指数自身未来交易日（时间特征, 无价格泄漏）,
     amount 用 volume×均价 估算（指数源无 amount 列）。
+    2026-08-09 实盘适配: DB 无 ref 之后数据（实盘当天）→ 用生成的交易日历（baostock/
+    chinese_calendar）补 future_dates, 否则回测路径不变。
     """
     global _PREDICTOR
     conn = sqlite3.connect(DB)
@@ -105,7 +134,9 @@ def predict_index(ref_date: str) -> dict | None:
     future_dates = [r[0] for r in conn.execute(
         "SELECT date FROM index_daily WHERE symbol=? AND date>? ORDER BY date LIMIT ?",
         (INDEX_CODE, ref_date, PRED_LEN)).fetchall()]
-    # 实际 5 日后收盘价（评估用, 非模型输入）
+    if len(future_dates) < PRED_LEN:   # 实盘: 今天之后无数据
+        future_dates = next_n_trade_dates(ref_date, PRED_LEN)
+    # 实际 5 日后收盘价（回测评估用; 实盘当天无未来数据 → None）
     actual = conn.execute(
         "SELECT close FROM index_daily WHERE symbol=? AND date>? ORDER BY date LIMIT ?",
         (INDEX_CODE, ref_date, PRED_LEN)).fetchall()
@@ -125,15 +156,15 @@ def predict_index(ref_date: str) -> dict | None:
         pred_len=PRED_LEN, T=T, top_p=TOP_P, sample_count=SAMPLES, verbose=False)
     pred_close5 = float(np.median(pred_df["close"].values))  # 未来 5 日收盘价中位数
     close = float(df["close"].iloc[-1])
-    actual_close5 = float(actual[PRED_LEN - 1][0])
-    if close <= 0 or actual_close5 <= 0:
+    actual_close5 = float(actual[PRED_LEN - 1][0]) if len(actual) >= PRED_LEN else None
+    if close <= 0 or (actual_close5 is not None and actual_close5 <= 0):
         return None
     return {
         "date": ref_date,
         "close": close,
         "pred_close5": pred_close5,
         "pred_ret5": pred_close5 / close - 1.0,
-        "actual_ret5": actual_close5 / close - 1.0,
+        "actual_ret5": actual_close5 / close - 1.0 if actual_close5 else None,
     }
 
 
