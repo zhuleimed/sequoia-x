@@ -298,16 +298,62 @@ def _build_one_features(args: tuple):
     return sym, per_day[-cfg.window:]
 
 
+def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool):
+    """V3 修订二: 为合成标签 (symbol, ref) 重算特征 → (X_syn, y_syn)。
+
+    合成样本: X = ref 前 120 天真实特征窗口（复用 _build_one_features）,
+    y = Kronos 合成 20 日收益（校准后, 与 y2 同口径）。
+    仅 88 维模式支持（include_extra 时扩展特征对合成样本不可用 → 返回空）。
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+    import pandas as _pd
+    if include_extra:
+        return np.array([]), np.array([])
+    synth_map = _json.loads(Path(synth_file).read_text())
+    conn = _sqlite3.connect(db_path)
+    idx_df = _pd.read_sql(
+        "SELECT date, open, high, low, close, volume FROM index_daily "
+        "WHERE symbol='sh.000300' ORDER BY date", conn)
+    Xs, ys = [], []
+    for symbol, ref_map in synth_map.items():
+        for ref, y_list in ref_map.items():
+            df = _pd.read_sql(
+                "SELECT date, open, high, low, close, volume, amount FROM stock_daily "
+                "WHERE symbol=? AND date<=? ORDER BY date DESC LIMIT 200",
+                conn, params=[symbol, ref])
+            if len(df) < cfg.window + 10:
+                continue
+            df = df.iloc[::-1].reset_index(drop=True)
+            r = _build_one_features((symbol, df, idx_df, cfg, False))
+            if r is None:
+                continue
+            _, X_i = r
+            # 路径级标签: 每条采样路径 = 一个训练样本（X 同, y 不同 → 保留采样多样性）
+            if isinstance(y_list, list):
+                for y_syn in y_list:
+                    Xs.append(X_i)
+                    ys.append(y_syn)
+            else:
+                Xs.append(X_i)
+                ys.append(y_list)
+    conn.close()
+    if not Xs:
+        return np.array([]), np.array([])
+    return np.array(Xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+
+
 def _process_month_worker(args: tuple) -> tuple:
     """处理单个月份的训练+预测（模块级函数，供 multiprocessing 使用）。
 
     Args:
-        args: (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
+        args: (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir,
+               include_extra, synth_file)
 
     Returns:
         (month, predictions_dict) 或 (month, None) 若失败。
     """
-    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra = args
+    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file = args
 
     import json as _json
     import sqlite3
@@ -397,10 +443,23 @@ def _process_month_worker(args: tuple) -> tuple:
         setattr(cfg, k, v)
     cfg.extra_features = include_extra  # 特征拼接开关（父进程 cfg_dict 同值）
 
+    # ── 合成增强（V3 修订二, 2026-08-09）: 追加 Kronos 合成标签样本, 只进 T2/T4 ──
+    X_tr_enh, y_tr_enh, X_tr_2d_enh = X_tr, y_tr, X_tr_2d
+    if synth_file and Path(synth_file).exists():
+        X_syn, y_syn = _synth_samples(synth_file, db_path, cfg, include_extra)
+        if len(y_syn) > 0:
+            X_tr_enh = np.concatenate([X_tr, X_syn])
+            y_tr_enh = np.concatenate([y_tr, y_syn])
+            X_tr_2d_enh = X_tr_enh.reshape(len(X_tr_enh), -1)
+            print(f"[Worker {month}] 合成增强: +{len(y_syn)} 样本 "
+                  f"({len(X_tr)}→{len(X_tr_enh)}, 仅 T2/T4)", flush=True)
+        else:
+            print(f"[Worker {month}] ⚠️ 合成样本为 0（88 维模式才支持）, 跳过", flush=True)
+
     # ── 训练 T2 ──
-    print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr)})...", flush=True)
+    print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr_enh)})...", flush=True)
     from sequoia_x.model_selection_v2.models.tree_reg import train_reg
-    t2_model = train_reg(X_tr_2d, y_tr, cfg, search_optuna=False)
+    t2_model = train_reg(X_tr_2d_enh, y_tr_enh, cfg, search_optuna=False)
 
     # ── 训练 T1 ──
     print(f"[Worker {month}] Step2: T1训练...", flush=True)
@@ -418,7 +477,7 @@ def _process_month_worker(args: tuple) -> tuple:
     if not skip_t4:
         try:
             from sequoia_x.model_selection_v2.models.deep_lstm import train_lstm
-            t4_model = train_lstm(X_tr, y_tr, cfg, search_optuna=False,
+            t4_model = train_lstm(X_tr_enh, y_tr_enh, cfg, search_optuna=False,
                                   model_id=f"cache_{month}")
         except Exception:
             pass
@@ -506,7 +565,8 @@ def _process_month_worker(args: tuple) -> tuple:
 
 def _process_and_save(month: str, db_path: str, cfg_dict: dict,
                        max_pool_size: int, skip_t4: bool,
-                       cache_dir: str, include_extra: bool) -> None:
+                       cache_dir: str, include_extra: bool,
+                       synth_file: str = "") -> None:
     """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。"""
     import json as _json, traceback
     from pathlib import Path as _Path
@@ -517,7 +577,7 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
     tmp_file = tmp_dir / f"month_{month}.json"
 
     try:
-        args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
+        args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file)
         _, preds = _process_month_worker(args)
         if preds is not None:
             with open(tmp_file, "w") as f:
@@ -612,6 +672,7 @@ def build_cache(
     max_pool_size: int = 0,
     output_path: Path | None = None,
     skip_t4: bool = False,
+    synth_file: str = "",
 ) -> dict:
     """构建预测缓存（串行逐月，稳定可靠）。
 
@@ -703,7 +764,7 @@ def build_cache(
     logger.info(f"并行构建: {len(pending_months)} 个月, {n_workers} 进程")
 
     task_args = [
-        (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra)
+        (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file)
         for month in pending_months
     ]
 
@@ -760,6 +821,10 @@ def main():
     parser.add_argument("--output", type=str,
                         default=str(OUTPUT_PATH),
                         help="输出路径")
+    parser.add_argument("--synth-file", type=str, default="",
+                        help="V3 修订二: 合成标签 JSON（Kronos 生成, 仅 88 维模式生效）")
+    parser.add_argument("--no-extra", action="store_true",
+                        help="实验用: 强制 88 维（覆盖 config 的 extra_features, 不动生产配置）")
     args = parser.parse_args()
 
     cfg = get_config()
@@ -774,8 +839,11 @@ def main():
     logger.info(f"  股票池: {'全量(~2977)' if args.max_stocks <= 0 else str(args.max_stocks)}")
     logger.info(f"  输出: {args.output}")
 
+    if args.no_extra:
+        cfg.extra_features = False   # 实验用 88 维（合成样本仅 88 维支持）
     build_cache(cfg, engine, test_months, args.max_stocks,
-                output_path=Path(args.output), skip_t4=args.skip_t4)
+                output_path=Path(args.output), skip_t4=args.skip_t4,
+                synth_file=args.synth_file)
 
 
 if __name__ == "__main__":
