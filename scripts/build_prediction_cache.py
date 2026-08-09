@@ -298,6 +298,50 @@ def _build_one_features(args: tuple):
     return sym, per_day[-cfg.window:]
 
 
+def _synth_series_samples(series_dir: str, db_path: str, cfg, include_extra: bool):
+    """V3 修订二: 合成完整序列 → 特征 → 滑窗样本（真·数据增强, 2026-08-09）。
+
+    与 _synth_samples（标签替换）的本质区别: 特征+标签全从合成序列计算（自洽）,
+    扩充的是样本量本身。每只合成序列(300 天) → ~160 个样本 (X(120,88), y2 20 日)。
+    """
+    import sqlite3 as _sqlite3
+    import pandas as _pd
+    if include_extra:
+        return np.array([]), np.array([])
+    from sequoia_x.model_selection_v2.features import _extract_per_day_features
+    from pathlib import Path as _Path
+    sdir = _Path(series_dir)
+    if not sdir.exists():
+        return np.array([]), np.array([])
+    conn = _sqlite3.connect(db_path)
+    idx_df = _pd.read_sql(
+        "SELECT date, open, high, low, close, volume FROM index_daily "
+        "WHERE symbol='sh.000300' ORDER BY date", conn)
+    conn.close()
+    Xs, ys = [], []
+    for fp in sorted(sdir.glob("syn_*.csv")):
+        try:
+            series = _pd.read_csv(fp)
+            if len(series) < cfg.window + 40:
+                continue
+            per_day = _extract_per_day_features(series, idx_df, cfg, extra_matrix=None)
+            arr = np.asarray(per_day, dtype=float)
+            if len(arr) < cfg.window + 20 or np.isnan(arr).any():
+                continue
+            X = np.lib.stride_tricks.sliding_window_view(
+                arr[:len(arr) - 20], cfg.window, axis=0).transpose(0, 2, 1)
+            y = (series["close"].values[cfg.window + 20:] /
+                 series["close"].values[cfg.window:-20] - 1)
+            n = min(len(X), len(y))
+            Xs.append(X[:n])
+            ys.append(y[:n])
+        except Exception:
+            continue
+    if not Xs:
+        return np.array([]), np.array([])
+    return np.concatenate(Xs).astype(np.float32), np.concatenate(ys).astype(np.float32)
+
+
 def _synth_samples(synth_file: str, db_path: str, cfg, include_extra: bool,
                    ratio: float = 1.0):
     """V3 修订二: 为合成标签 (symbol, ref) 重算特征 → (X_syn, y_syn)。
@@ -362,7 +406,7 @@ def _process_month_worker(args: tuple) -> tuple:
     Returns:
         (month, predictions_dict) 或 (month, None) 若失败。
     """
-    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file, synth_ratio = args[:9]
+    month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file, synth_ratio, synth_series_dir = args[:10]
 
     import json as _json
     import sqlite3
@@ -452,11 +496,24 @@ def _process_month_worker(args: tuple) -> tuple:
         setattr(cfg, k, v)
     cfg.extra_features = include_extra  # 特征拼接开关（父进程 cfg_dict 同值）
 
-    # ── 合成增强（V3 修订二, 2026-08-09）: 追加 Kronos 合成标签样本, 只进 T2/T4 ──
+    # ── 合成增强（V3 修订二, 2026-08-09）: 追加 Kronos 合成样本, 只进 T2/T4 ──
     X_tr_enh, y_tr_enh, X_tr_2d_enh = X_tr, y_tr, X_tr_2d
-    if synth_file and Path(synth_file).exists():
+    if synth_series_dir:
+        X_syn, y_syn = _synth_series_samples(synth_series_dir, db_path, cfg, include_extra)
+        tag = "完整序列"
+    elif synth_file and Path(synth_file).exists():
         X_syn, y_syn = _synth_samples(synth_file, db_path, cfg, include_extra,
                                       synth_ratio)
+        tag = "标签替换"
+    else:
+        X_syn, y_syn = np.array([]), np.array([])
+        tag = ""
+    if len(y_syn) > 0:
+        X_tr_enh = np.concatenate([X_tr, X_syn])
+        y_tr_enh = np.concatenate([y_tr, y_syn])
+        X_tr_2d_enh = X_tr_enh.reshape(len(X_tr_enh), -1)
+        print(f"[Worker {month}] 合成增强({tag}): +{len(y_syn)} 样本 "
+              f"({len(X_tr)}→{len(X_tr_enh)}, 仅 T2/T4)", flush=True)
         if len(y_syn) > 0:
             X_tr_enh = np.concatenate([X_tr, X_syn])
             y_tr_enh = np.concatenate([y_tr, y_syn])
@@ -577,7 +634,7 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
                        max_pool_size: int, skip_t4: bool,
                        cache_dir: str, include_extra: bool,
                        synth_file: str = "", synth_ratio: float = 1.0,
-                       tmp_dir: str = "") -> None:
+                       synth_series_dir: str = "", tmp_dir: str = "") -> None:
     """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。
 
     ⚠️ 2026-08-09 修复: tmp_dir 由 build_cache 按 output 文件名隔离传入——多个
@@ -596,7 +653,7 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
 
     try:
         args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir,
-                include_extra, synth_file, synth_ratio)
+                include_extra, synth_file, synth_ratio, synth_series_dir)
         _, preds = _process_month_worker(args)
         if preds is not None:
             with open(tmp_file, "w") as f:
@@ -693,6 +750,7 @@ def build_cache(
     skip_t4: bool = False,
     synth_file: str = "",
     synth_ratio: float = 1.0,
+    synth_series_dir: str = "",
 ) -> dict:
     """构建预测缓存（串行逐月，稳定可靠）。
 
@@ -790,7 +848,7 @@ def build_cache(
 
     task_args = [
         (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra,
-         synth_file, synth_ratio, str(tmp_dir))
+         synth_file, synth_ratio, synth_series_dir, str(tmp_dir))
         for month in pending_months
     ]
 
@@ -849,6 +907,8 @@ def main():
                         help="实验用: 强制 88 维（覆盖 config 的 extra_features, 不动生产配置）")
     parser.add_argument("--synth-ratio", type=float, default=1.0,
                         help="合成注入比例（1.0=全量24%, 0.25≈5%, 0.5≈10%; 占比试调）")
+    parser.add_argument("--synth-series", type=str, default="",
+                        help="V3 修订二: 合成完整序列目录（真·数据增强, 优先于 --synth-file）")
     args = parser.parse_args()
 
     cfg = get_config()
@@ -867,7 +927,8 @@ def main():
         cfg.extra_features = False   # 实验用 88 维（合成样本仅 88 维支持）
     build_cache(cfg, engine, test_months, args.max_stocks,
                 output_path=Path(args.output), skip_t4=args.skip_t4,
-                synth_file=args.synth_file, synth_ratio=args.synth_ratio)
+                synth_file=args.synth_file, synth_ratio=args.synth_ratio,
+                synth_series_dir=args.synth_series)
 
 
 if __name__ == "__main__":
