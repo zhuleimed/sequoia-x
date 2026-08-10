@@ -179,21 +179,13 @@ def build_prediction_cache(target_month: str) -> bool:
     （合成序列是种子股票的价格延续, 语义自洽）——不降级特征维度。
     """
     logger.info(f"Step1: T2/T1/T3 预测缓存构建（{target_month}）...")
-    from sequoia_x.model_selection_v2.config import get_config
-    cmd = [PYTHON, "-u", "scripts/build_prediction_cache.py",
-           "--start-month", target_month, "--end-month", target_month, "--skip-t4"]
-    cfg = get_config()
-    # 合成序列启用: 月末链 marker 优先（自动）→ config.synth_series_dir（手动兜底）
-    synth_dir = ""
-    marker = PROJECT_DIR / "output/backtest_v2/.synth_series_marker"
-    if marker.exists() and Path(marker.read_text().strip()).exists():
-        synth_dir = marker.read_text().strip()
-    elif getattr(cfg, "synth_series_dir", "") and Path(cfg.synth_series_dir).exists():
-        synth_dir = cfg.synth_series_dir
-    if synth_dir:
-        cmd += ["--synth-series", synth_dir]
-        logger.info(f"Step1: 合成序列增强启用（{synth_dir}, 121 维保持）")
-    r = subprocess.run(cmd, cwd=str(PROJECT_DIR))
+    # 注: V3 合成序列增强（--synth-series）不纳入 V2 生产重训（2026-08-10 用户明确:
+    #   V3 体系功能不在 V2 生产 cron 中实现; 将来 V3 替代 V2 时再集成, 见 V3 §20.3）
+    r = subprocess.run(
+        [PYTHON, "-u", "scripts/build_prediction_cache.py",
+         "--start-month", target_month, "--end-month", target_month, "--skip-t4"],
+        cwd=str(PROJECT_DIR),
+    )
     return r.returncode == 0
 
 

@@ -114,10 +114,6 @@ class V2Config:
     #   数据不全时自动回退 88 维（4 层机制, 见 V3 文档 §19.2）——不会因启用而中断月度流程
     #   仅作用于树模型链路（T2/T1/T3, include_market_state=True）；T4 LSTM 保持 80 维不拼
     extra_features: bool = True
-    # ── V3 修订二: 合成序列增强（2026-08-10）──
-    #   完整合成序列目录（synth_full_series 生成, 真·数据增强）; 空=关闭（默认）;
-    #   启用时: 88 维模式生效（合成样本无扩展特征, extra_features=True 时自动降级 88 维并告警）
-    synth_series_dir: str = ""
     feature_ma_periods: tuple = (5, 10, 20, 60, 120)
     feature_rsi_period: int = 14
     feature_atr_period: int = 14
