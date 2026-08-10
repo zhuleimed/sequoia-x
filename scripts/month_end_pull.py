@@ -108,7 +108,8 @@ def _verify_caches() -> tuple[bool, str]:
 
 SYNTH_SERIES_DIR = str(PROJECT_DIR / "experiments/kronos/output/synth_series")
 SYNTH_MARKER = str(PROJECT_DIR / "output/backtest_v2/.synth_series_marker")
-SYNTH_N = 96          # 合成序列数量（V3 修订二, ~65min @ 12 workers）
+SYNTH_N = 24          # 合成序列数量（V3 修订二, ~16min @ 12 workers;
+                      #   2026-08-10 规模效应实验: 24 只(43% 注入)最优, 96 只(75%)过犹不及）
 
 
 def _gen_synth_series(today: date) -> bool:

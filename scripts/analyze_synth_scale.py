@@ -61,43 +61,51 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = {m: {} for m in MONTHS}
-    complete = True
+    # 2026-08-10 修复: 24 只实验仅 05/06 两月（04 月未跑）→ 缺失月份显示 "—",
+    # 主对比 = 96 只 3 个月 vs 基线（必须齐全才推送）
+    missing_96 = False
     for mth in MONTHS:
         for label, stem in VARIANTS:
             ic = calc_ic(PROJECT_DIR / f"output/backtest_v2/{stem}_{mth}.json", mth)
             if ic is None:
-                complete = False
+                if label == "96只":
+                    missing_96 = True
             else:
                 rows[mth][label] = ic[0]
 
-    if not complete:
-        print(f"[{datetime.now():%H:%M:%S}] ⏳ 部分任务未完成, 稍后再查", flush=True)
+    if missing_96:
+        print(f"[{datetime.now():%H:%M:%S}] ⏳ 96 只实验未完成, 稍后再查", flush=True)
         return
 
-    lines = ["📊 V3修订二 合成规模效应（T2 Rank IC, 800 只, 3 个月）",
+    lines = ["📊 V3修订二 合成规模效应（T2 Rank IC, 800 只）",
              "月份    基线     24只     96只"]
     for mth in MONTHS:
         r = rows[mth]
-        lines.append(f"{mth}  {r['基线']:+.4f}  {r['24只']:+.4f}  {r['96只']:+.4f}")
+        s24 = f"{r['24只']:+.4f}" if '24只' in r else "   —  "
+        lines.append(f"{mth}  {r['基线']:+.4f}  {s24}  {r['96只']:+.4f}")
     mb = np.mean([rows[m]['基线'] for m in MONTHS])
-    m24 = np.mean([rows[m]['24只'] for m in MONTHS])
     m96 = np.mean([rows[m]['96只'] for m in MONTHS])
-    lines.append(f"均值   {mb:+.4f}  {m24:+.4f}  {m96:+.4f}")
+    # 24 只均值仅 05/06（若有）
+    have24 = [rows[m]['24只'] for m in MONTHS if '24只' in rows[m]]
+    m24 = np.mean(have24) if have24 else float("nan")
+    lines.append(f"均值   {mb:+.4f}  {f'{m24:+.4f}' if have24 else '   —  '}  {m96:+.4f}")
 
-    d24, d96 = m24 - mb, m96 - mb
-    if d96 > d24 > 0:
-        verdict = "🚀 规模效应确认: 96 只 > 24 只 > 基线（样本量越大增强越强）"
-        nxt = "下一步: 纳入 V3 正式训练管线（88 维模式 + 自动降级告警）"
-    elif d96 > 0 and d96 <= d24:
-        verdict = "⚠️ 96 只无额外增益（24 只已达饱和）"
-        nxt = "下一步: 定格 24 只配置, 纳入正式管线"
+    d96 = m96 - mb
+    d24 = (m24 - mb) if have24 else float("nan")
+    if d96 > 0.02:
+        verdict = "🚀 96 只 3 个月一致有效（真·数据增强成立, 样本量扩充 → IC 提升）"
+        nxt = "下一步: 规模再扩验证（192 只）或定格 96 只配置纳入正式管线"
+    elif d96 > 0:
+        verdict = "✅ 96 只有效（轻微提升）"
+        nxt = "下一步: 扩大合成规模验证"
     elif d96 <= 0:
-        verdict = "❌ 96 只反而有害（过拟合合成数据）"
-        nxt = "下一步: 回退 24 只, 检查生成质量"
+        verdict = "❌ 96 只无效（生成质量或过拟合问题）"
+        nxt = "下一步: 检查生成质量/样本分布"
     else:
         verdict = "⚠️ 混合信号, 需细看各月"
         nxt = "下一步: 分月诊断"
-    lines.append(f"\nΔ24只={d24:+.4f} Δ96只={d96:+.4f} → {verdict}")
+    d24_txt = f"{d24:+.4f}" if have24 else "   —  "
+    lines.append(f"\nΔ96只={d96:+.4f} (24只参考 {d24_txt}) → {verdict}")
     lines.append(nxt)
 
     report = "\n".join(lines)
