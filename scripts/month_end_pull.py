@@ -106,8 +106,26 @@ def _verify_caches() -> tuple[bool, str]:
     return (not bad), "; ".join(msgs + bad)
 
 
+def _refresh_stock_pool(today: date) -> None:
+    """月末刷新股票池（2026-08-10 审计改进: 月度池子变化——新上市/ST/低价剔除）。
+
+    刷新后 .stock_pool.json 更新 → rebuild/build/wait 三处同源新池 → 缓存 hash 一致;
+    baostock 失败 → 保留旧池 + 日志（不阻断月末流程, 一致性优先）。
+    """
+    pool_path = PROJECT_DIR / "output/backtest_v2/.stock_pool.json"
+    try:
+        from sequoia_x.core.config import Settings
+        from sequoia_x.data.engine import DataEngine
+        engine = DataEngine(Settings())
+        symbols = engine.get_base_stock_pool()
+        pool_path.write_text(json.dumps(symbols))
+        print(f"[{today}] ✅ 股票池刷新: {len(symbols)} 只")
+    except Exception as e:
+        print(f"[{today}] ⚠️ 股票池刷新失败（保留旧池, 一致性优先）: {e}")
+
+
 def auto_rebuild_and_verify(today: date) -> bool:
-    """自动链: 覆盖率检查 → 缓存重建 → 自检 → 单月干跑验证。
+    """自动链: 覆盖率检查 → 股票池刷新 → 缓存重建 → 自检 → 单月干跑验证。
 
     Returns: True=全链通过（9/1 重训可直接运行）; False=某环失败（已微信告警）。
     """
@@ -124,6 +142,9 @@ def auto_rebuild_and_verify(today: date) -> bool:
         print(f"[{today}] ⚠️ {msg} → 降级 88 维重建")
     else:
         print(f"[{today}] ✅ {msg}")
+
+    # 1.5 股票池月度刷新（2026-08-10 审计改进, 失败不阻断）
+    _refresh_stock_pool(today)
 
     # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读;
     #    数据不全时 --no-extra 强制 88 维）

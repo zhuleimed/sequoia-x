@@ -172,12 +172,7 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
 
 
 def build_prediction_cache(target_month: str) -> bool:
-    """T2/T1/T3 预测缓存构建（增量，断点续跑）。
-
-    V3 修订二（2026-08-10）: 合成序列增强（cfg.synth_series_dir 非空时启用）。
-    121 维完整支持: 合成样本扩展特征 = 种子股票最新基本面快照广播
-    （合成序列是种子股票的价格延续, 语义自洽）——不降级特征维度。
-    """
+    """T2/T1/T3 预测缓存构建（增量，断点续跑）。"""
     logger.info(f"Step1: T2/T1/T3 预测缓存构建（{target_month}）...")
     # 注: V3 合成序列增强（--synth-series）不纳入 V2 生产重训（2026-08-10 用户明确:
     #   V3 体系功能不在 V2 生产 cron 中实现; 将来 V3 替代 V2 时再集成, 见 V3 §20.3）
