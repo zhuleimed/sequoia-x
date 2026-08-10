@@ -278,6 +278,8 @@ def push_recommendation(target_month: str, pred_info: dict) -> None:
 
 
 def main() -> None:
+    import time as _time
+    t_main = _time.time()
     target_month = get_target_month()
     logger.info("=" * 60)
     logger.info(f"V2 月度重训启动 | 目标月={target_month} | {datetime.now()}")
@@ -293,7 +295,7 @@ def main() -> None:
              "--refresh-days", "40"],
             check=False, timeout=3600,
         )
-        logger.info("Step0: 辅助维度刷新完成")
+        logger.info(f"Step0: 辅助维度刷新完成（{(_time.time()-t_main)/60:.0f}min）")
         _check_extra_coverage()
     except Exception as e:
         logger.warning(f"Step0: 辅助维度刷新异常(不阻断重训): {e}")
@@ -303,26 +305,31 @@ def main() -> None:
     if not wait_for_cache_ready(target_month):
         _notify("❌ V2 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
         sys.exit(1)
-    logger.info("训练缓存就绪，继续重训")
+    logger.info(f"训练缓存就绪，继续重训（累计 {(_time.time()-t_main)/60:.0f}min）")
 
     # ── Step1: T2/T1/T3 缓存构建（增量，断点续跑）──
     if not build_prediction_cache(target_month):
         _notify("❌ V2 重训 Step1 失败", "T2/T1/T3 预测缓存构建失败, 请查 logs/v2_retrain_*.log")
         logger.error("T2/T1/T3 构建失败，重训终止")
         sys.exit(1)
+    logger.info(f"Step1 完成（累计 {(_time.time()-t_main)/60:.0f}min）")
 
     # ── Step2: T4 训练（追加 T4 预测到缓存）──
     if not train_t4(target_month):
         _notify("❌ V2 重训 Step2 失败", "T4 LSTM 训练失败, 请查 logs/v2_retrain_*.log")
         logger.error("T4 训练失败，重训终止（可重跑续跑）")
         sys.exit(1)
+    logger.info(f"Step2 T4 完成（累计 {(_time.time()-t_main)/60:.0f}min）")
 
     # ── Step3: 选股（Rank 融合）──
     buy_list, pred_info = select_stocks(target_month)
     if not buy_list:
         logger.error("选股为空，重训终止")
         sys.exit(1)
-    logger.info(f"选股完成: {buy_list}")
+    logger.info(f"选股完成: {len(buy_list)} 只（累计 {(_time.time()-t_main)/60:.0f}min）")
+    logger.info(f"  预测摘要: 池子={pred_info.get('n_pool')} 只 | "
+                f"T2 头部均值={pred_info.get('t2_mean_top', 0):+.2%} | "
+                f"T4 头部均值={pred_info.get('t4_mean_top', 0):+.2%}")
 
     # ── Step4: 信号入库 sim_v2.db（strategy_from="V2"）──
     n = submit_buy_signals(

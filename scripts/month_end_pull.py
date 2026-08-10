@@ -148,17 +148,30 @@ def auto_rebuild_and_verify(today: date) -> bool:
 
     # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读;
     #    数据不全时 --no-extra 强制 88 维）
+    #    ⚠️ 断点续跑（2026-08-10 铁律二）: 重建成功写 .rebuild_done_<date> 标记;
+    #    重跑时标记存在且 dim 一致 → 跳过重建（省 4-6h）——适用于"重建后环节
+    #    （自检/干跑）失败、修码后重跑"场景; 重建本身中途失败无标记 → 重跑重建
     dim = "88 维(降级)" if degraded else "121/88 维"
-    print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 9/1 重训轮询等待）...")
-    cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py")]
-    if degraded:
-        cmd.append("--no-extra")
-    r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
-    if r.returncode != 0:
-        _notify("❌ 月末缓存重建失败", "9/1 重训将轮询等待后失败; 请查看 logs/month_end_pull_*.log 排查")
-        print(f"[{today}] ❌ 缓存重建失败 exit={r.returncode}")
-        return False
-    print(f"[{today}] ✅ 缓存重建完成")
+    # ⚠️ 2026-08-10 修复: dim 含 '/'（121/88 维）→ 文件名替换防目录分隔符
+    dim_tag = dim.replace(' ', '_').replace('/', '_')
+    rebuild_marker = PROJECT_DIR / f"output/backtest_v2/.rebuild_done_{today:%Y%m%d}_{dim_tag}"
+    if rebuild_marker.exists():
+        print(f"[{today}] ② 断点续跑: 重建已完成标记存在（{rebuild_marker.name}）, 跳过重建")
+    else:
+        import time as _time
+        print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 9/1 重训轮询等待）...")
+        t_rebuild = _time.time()
+        cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py")]
+        if degraded:
+            cmd.append("--no-extra")
+        r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
+        if r.returncode != 0:
+            _notify("❌ 月末缓存重建失败", "9/1 重训将轮询等待后失败; 请查看 logs/month_end_pull_*.log 排查")
+            print(f"[{today}] ❌ 缓存重建失败 exit={r.returncode} 耗时={(_time.time()-t_rebuild)/60:.0f}min")
+            return False
+        rebuild_marker.write_text(
+            f"完成于 {today} {_time.strftime('%H:%M:%S')} | dim={dim} | 耗时 {(_time.time()-t_rebuild)/60:.0f}min")
+        print(f"[{today}] ✅ 缓存重建完成 耗时={(_time.time()-t_rebuild)/60:.0f}min, 标记已写 {rebuild_marker.name}")
 
     # 3. 自检（维度 + 采样日覆盖; 降级时预期 88 维）
     ok, msg = _verify_caches()
@@ -171,8 +184,9 @@ def auto_rebuild_and_verify(today: date) -> bool:
     # 4. 单月干跑验证（临时输出, 不污染生产 prediction_cache.json;
     #    降级模式 build_prediction_cache 自动检测 121 缓存缺失 → 88 维链路）
     month = today.strftime("%Y-%m")
-    print(f"[{today}] ④ 单月干跑验证（{month}, build_prediction_cache, 约 30-60min）...")
+    print(f"[{today}] ④ 单月干跑验证（{month}, build_prediction_cache, 约 30-60min; 断点续跑: 已完成的月份自动跳过）...")
     dry = PROJECT_DIR / "output/backtest_v2/.dryrun_cache.json"
+    t_dry = _time.time()
     r = subprocess.run(
         [sys.executable, "-u", str(PROJECT_DIR / "scripts/build_prediction_cache.py"),
          "--start-month", month, "--end-month", month, "--skip-t4",
@@ -180,9 +194,20 @@ def auto_rebuild_and_verify(today: date) -> bool:
         cwd=str(PROJECT_DIR), timeout=4 * 3600)
     if r.returncode != 0 or not dry.exists():
         _notify("❌ 月末干跑验证失败", "88/121 维预测链路未验证通过, 9/1 重训前需人工排查")
-        print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode}")
+        print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode} 耗时={(_time.time()-t_dry)/60:.0f}min")
         return False
-    print(f"[{today}] ✅ 干跑验证通过")
+    print(f"[{today}] ✅ 干跑验证通过 耗时={(_time.time()-t_dry)/60:.0f}min")
+    # 干跑产出统计（中间结果显示, 排障用）
+    try:
+        import json as _json
+        _dry = _json.loads(dry.read_text())
+        for _m, _e in _dry.items():
+            _n = len(_e.get("symbols", []))
+            _t2 = _e.get("t2", [])
+            _t2std = (sum((x - sum(_t2)/len(_t2))**2 for x in _t2)/len(_t2)) ** 0.5 if _t2 else 0
+            print(f"[{today}]   干跑产出: {_m} {_n} 只, T2 预测 std={_t2std:.4f}")
+    except Exception as _e:
+        print(f"[{today}]   ⚠️ 干跑产出统计失败: {_e}")
 
     if degraded:
         _notify("✅ 月末全链完成（已回退 88 维）",
