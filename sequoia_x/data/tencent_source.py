@@ -67,11 +67,15 @@ def to_sina_code(symbol: str) -> str:
 
 
 class TencentSource:
-    """腾讯数据源 — 获取 A 股日线数据（前复权）。
+    """腾讯数据源 — 获取 A 股日线数据（不复权）。
 
     API:
-      - 日 K 线: web.ifzq.gtimg.cn（腾讯证券，前复权）
+      - 日 K 线: web.ifzq.gtimg.cn（腾讯证券，不复权）
       - 实时行情: qt.gtimg.cn（成交额、市盈率等）
+
+    复权口径铁律（2026-08-10）：全库统一【不复权】实际价（复权只在计算层做）。
+    腾讯 fqkline 的 qfq（前复权）会把除权日前历史价按当日基准重算——增量/补拉
+    场景下历史行污染（假断层），必须用不复权（fq 参数留空，返回 key="day"）。
 
     数据源内部追踪机制（参考 019 项目）：
       - active_source: 当前活跃源（"tencent" / "sina"）
@@ -106,7 +110,7 @@ class TencentSource:
     # ── 腾讯 K 线 ──
 
     def _tencent_kline(self, code: str, days: int = 5) -> Optional[pd.DataFrame]:
-        """从腾讯获取前复权日线。
+        """从腾讯获取不复权日线（实际成交价）。
 
         Args:
             code: 股票代码，如 'sh600519'。
@@ -117,13 +121,13 @@ class TencentSource:
         """
         url = (
             f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/"
-            f"get?param={code},day,,,{days},qfq"
+            f"get?param={code},day,,,{days},"  # fq 参数留空 = 不复权（qfq 前复权会污染历史行）
         )
         try:
             self._rate_limit()
             r = self._session.get(url, timeout=10)
             data = r.json()
-            rows = data.get("data", {}).get(code, {}).get("qfqday", [])
+            rows = data.get("data", {}).get(code, {}).get("day", [])
             if not rows:
                 return None
             df = pd.DataFrame(
