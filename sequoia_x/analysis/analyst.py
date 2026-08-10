@@ -1081,30 +1081,41 @@ RECOMMEND: 600519,000858
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 4096,
+            "max_tokens": 8192,  # 推理模型需预留推理+正文空间；4096 常被推理耗尽致 content 为空
         }
 
-        try:
-            resp = requests.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=120,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            content = result["choices"][0]["message"]["content"]
-            usage = result.get("usage", {})
-            logger.info(
-                f"DeepSeek API 调用完成: "
-                f"输入 {usage.get('prompt_tokens', '?')} tokens / "
-                f"输出 {usage.get('completion_tokens', '?')} tokens"
-            )
-            return content
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"DeepSeek API 调用失败: {e}")
-            return "⚠️ LLM 分析暂时不可用（API 调用失败）"
-        except (KeyError, json.JSONDecodeError) as e:
-            logger.error(f"DeepSeek API 响应解析失败: {e}")
-            return "⚠️ LLM 分析失败（响应解析异常）"
+        # 重试一次：content 为空（推理耗尽 max_tokens 截断）时再调一次
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=180,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                content = result["choices"][0]["message"].get("content") or ""
+                usage = result.get("usage", {})
+                logger.info(
+                    f"DeepSeek API 调用完成: "
+                    f"输入 {usage.get('prompt_tokens', '?')} tokens / "
+                    f"输出 {usage.get('completion_tokens', '?')} tokens"
+                )
+                if content.strip() or attempt == 1:
+                    return content
+                logger.warning(
+                    f"DeepSeek 响应 content 为空（finish_reason="
+                    f"{result['choices'][0].get('finish_reason')}，"
+                    f"推理 tokens={usage.get('completion_tokens_details', {}).get('reasoning_tokens', '?')}），"
+                    f"重试第 {attempt + 2} 次..."
+                )
+            except requests.exceptions.RequestException as e:
+                logger.error(f"DeepSeek API 调用失败（第{attempt + 1}次）: {e}")
+                if attempt == 1:
+                    return "⚠️ LLM 分析暂时不可用（API 调用失败）"
+            except (KeyError, json.JSONDecodeError) as e:
+                logger.error(f"DeepSeek API 响应解析失败（第{attempt + 1}次）: {e}")
+                if attempt == 1:
+                    return "⚠️ LLM 分析失败（响应解析异常）"
+        return ""
