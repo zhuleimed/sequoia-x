@@ -53,51 +53,19 @@ def load_codes(pool_path: str, limit: int = None):
 
 
 def fetch_fund_flow(code: str) -> pd.DataFrame:
-    """主力资金流向(东财 push2his 直连, ~120天) — 替换 akshare 层
+    """主力资金流向(新浪 MoneyFlow 全历史, 2018 起) — 2026-08-11 替换东财 push2his
 
-    直连优势: 自带 Referer/UA + 请求间隔>=1s 限流(东财风控阈值 ~5次/s),
-    比 akshare 内部高频调用稳定得多。
-    字段验证: 主力净额 = 大单净额 + 超大单净额 (f52 = f55 + f56)。
+    背景: 东财 push2his 仅返回近 ~120 天(接口硬限制), 历史无法补全 → 121 维扩展特征
+    采样日被锁死在 120 天窗口。新浪 MoneyFlow 全历史(实测 2018-05 起 2000 行)。
+    口径: 新浪 netamount = 四档净额之和(全市场), 本项目/东财"主力" = 超大单+大单 →
+    还原: 主力净额 = r0_net + r1_net, 各档占比 = 全口径占比 × 档净额/全净额(恒等式)。
+    列格式与东财版同构(13列+code), 实现见 sync_fund_flow_history.py::fetch_sina_fund_flow。
     """
-    import requests
-    market = "1" if code_market(code) == "sh" else "0"
-    url = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
-           f"?lmt=0&klt=101&fields1=f1,f2,f3,f7"
-           f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"
-           f"&secid={market}.{code}")
-    headers = {
-        "Referer": "https://quote.eastmoney.com/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-    resp = requests.get(url, headers=headers, timeout=15)
-    resp.raise_for_status()
-    data = resp.json().get("data")
-    if not data or not data.get("klines"):
+    from sync_fund_flow_history import fetch_sina_fund_flow
+    df = fetch_sina_fund_flow(code)
+    if df is None or len(df) == 0:
         return None
-    rows = []
-    for line in data["klines"]:
-        p = line.split(",")
-        if len(p) < 14:
-            continue
-        rows.append({
-            "日期": p[0],
-            "收盘价": p[11],
-            "涨跌幅": p[12],
-            "主力净流入-净额": p[1],
-            "小单净流入-净额": p[2],
-            "中单净流入-净额": p[3],
-            "大单净流入-净额": p[4],
-            "超大单净流入-净额": p[5],
-            "主力净流入-净占比": p[6],
-            "小单净流入-净占比": p[7],
-            "中单净流入-净占比": p[8],
-            "大单净流入-净占比": p[9],
-            "超大单净流入-净占比": p[10],
-        })
-    df = pd.DataFrame(rows)
     df.insert(0, "code", code)
-    # 东财限流: 请求间隔 >=1s (风控阈值 ~5/s, 并发4时每秒<=4次安全)
-    time.sleep(1.0)
     return df
 
 

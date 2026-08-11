@@ -161,7 +161,9 @@ def auto_rebuild_and_verify(today: date) -> bool:
         import time as _time
         print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 9/1 重训轮询等待）...")
         t_rebuild = _time.time()
-        cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py")]
+        cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py"),
+               "--workers", "16"]  # 2026-08-11: 每 job 16 worker（121/88 + 80 双 job 并行 = 32 进程,
+        #   36 核机器合理; 原默认 12×2=24 偏保守但 121 维重建 17.6h; 勿用 32——64 进程会过载卡死）
         if degraded:
             cmd.append("--no-extra")
         r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
