@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 import numpy as np
+import pandas as pd
 import sqlite3
 from datetime import datetime
 from sequoia_x.data.engine import DataEngine
@@ -100,6 +101,12 @@ def _compute_label_t1(
     if len(rows) < cfg.predict_horizon_t1:
         return None
 
+    # 2026-08-10 补丁②: 标签收益用后复权价（DB 为不复权价，跨除权日的收益会假跌）
+    from sequoia_x.model_selection_v2.adjust import apply_adjust
+    df_rows = pd.DataFrame(rows, columns=["date", "close"])
+    apply_adjust(df_rows, symbol)
+    rows = list(df_rows.itertuples(index=False, name=None))
+
     ref_close = rows[0][1]
     target_close = rows[cfg.predict_horizon_t1 - 1][1]
     if ref_close is None or target_close is None or ref_close <= 0:
@@ -117,11 +124,16 @@ def _compute_label_t2(
     个股 20 日收益率 - 沪深 300 的 20 日收益率。
     """
     conn = sqlite3.connect(engine.db_path)
-    # 个股
+    # 个股（2026-08-10 补丁②: 用后复权价，跨除权日收益不假跌）
     stock_rows = conn.execute(
-        "SELECT close FROM stock_daily WHERE symbol=? AND date > ? ORDER BY date LIMIT ?",
+        "SELECT date, close FROM stock_daily WHERE symbol=? AND date > ? ORDER BY date LIMIT ?",
         (symbol, ref_date, cfg.predict_horizon_t2 + 2)
     ).fetchall()
+    if len(stock_rows) >= 2:
+        from sequoia_x.model_selection_v2.adjust import apply_adjust
+        df_rows = pd.DataFrame(stock_rows, columns=["date", "close"])
+        apply_adjust(df_rows, symbol)
+        stock_rows = list(df_rows.itertuples(index=False, name=None))
     # 指数（优先从 index_daily 表查询 sh.000300，fallback 到 stock_daily 的 000300）
     idx_rows = conn.execute(
         "SELECT close FROM index_daily WHERE symbol='sh.000300' AND date > ? ORDER BY date LIMIT ?",
@@ -137,7 +149,7 @@ def _compute_label_t2(
     if len(stock_rows) < cfg.predict_horizon_t2 or len(idx_rows) < cfg.predict_horizon_t2:
         return None
 
-    stock_ret = (stock_rows[cfg.predict_horizon_t2 - 1][0] / stock_rows[0][0]) - 1.0
+    stock_ret = (stock_rows[cfg.predict_horizon_t2 - 1][1] / stock_rows[0][1]) - 1.0
     idx_ret = (idx_rows[cfg.predict_horizon_t2 - 1][0] / idx_rows[0][0]) - 1.0
     ret = stock_ret - idx_ret
 
@@ -151,7 +163,7 @@ def _compute_label_t3(
     """计算 T3 标签：20 日日收益率年化波动率。"""
     conn = sqlite3.connect(engine.db_path)
     rows = conn.execute(
-        "SELECT close FROM stock_daily WHERE symbol=? AND date > ? ORDER BY date LIMIT ?",
+        "SELECT date, close FROM stock_daily WHERE symbol=? AND date > ? ORDER BY date LIMIT ?",
         (symbol, ref_date, cfg.predict_horizon_t3 + 2)
     ).fetchall()
     conn.close()
@@ -159,7 +171,13 @@ def _compute_label_t3(
     if len(rows) < cfg.predict_horizon_t3 + 1:
         return None
 
-    closes = np.array([r[0] for r in rows[:cfg.predict_horizon_t3 + 1] if r[0] is not None])
+    # 2026-08-10 补丁②: 后复权价算波动率（除权日假断层会虚增波动率）
+    from sequoia_x.model_selection_v2.adjust import apply_adjust
+    df_rows = pd.DataFrame(rows, columns=["date", "close"])
+    apply_adjust(df_rows, symbol)
+    rows = list(df_rows.itertuples(index=False, name=None))
+
+    closes = np.array([r[1] for r in rows[:cfg.predict_horizon_t3 + 1] if r[1] is not None])
     if len(closes) < 10:
         return None
 
@@ -199,6 +217,46 @@ def _process_chunk(args: tuple) -> tuple[str, np.ndarray, np.ndarray, np.ndarray
 
     if not X_list:
         return ref_date, np.array([]), np.array([]), np.array([]), np.array([])
+
+    # 2026-08-11: 特征列数一致性校验（121维全历史重建发现维度不齐 → 拼接崩溃）。
+    # 记录异常股票（打印定位根因），剔除后继续——避免整批中断。
+    widths = {x.shape[1] for x in X_list}
+    if len(widths) > 1:
+        from collections import Counter as _Cnt
+        cnt = _Cnt(x.shape[1] for x in X_list)
+        main_w = cnt.most_common(1)[0][0]
+        keep = [i for i, x in enumerate(X_list) if x.shape[1] == main_w]
+        bad = [symbols_chunk[i] for i in range(len(X_list)) if i not in keep]
+        logger.error(
+            f"[{ref_date}] 特征列数不一致 {dict(cnt)}（主列数 {main_w}）→ "
+            f"剔除 {len(bad)} 只: {bad}"
+        )
+        # 现场诊断（2026-08-11）: 同 worker 内重查异常股票各数据面列数, 定位 0 列面
+        try:
+            import pandas as _pd
+            from sequoia_x.features_extra.build_extra_features import FEATURE_GROUPS as _FG
+            for b in bad:
+                _df = engine.get_ohlcv(b)
+                _dates = _pd.DatetimeIndex(_pd.to_datetime(_df[_df["date"] <= ref_date]["date"]))
+                _close = _pd.Series(
+                    _df[_df["date"] <= ref_date]["close"].values.astype(float),
+                    index=_dates, name="close",
+                )
+                _parts = {}
+                for _g, _fn in _FG.items():
+                    try:
+                        _p = _fn(b, _dates) if _g not in ("consensus", "xdxr") else _fn(b, _dates, _close)
+                        _parts[_g] = _p.shape[1]
+                    except Exception as _e:
+                        _parts[_g] = f"ERR {type(_e).__name__}:{str(_e)[:40]}"
+                logger.error(f"  现场[{b}] 各面列数: {_parts}")
+        except Exception as _e3:
+            logger.error(f"  现场诊断失败: {_e3}")
+        X_list = [X_list[i] for i in keep]
+        y1_list = [y1_list[i] for i in keep]
+        y2_list = [y2_list[i] for i in keep]
+        y3_list = [y3_list[i] for i in keep]
+
     return (ref_date,
             np.array(X_list, dtype=np.float32),
             np.array(y1_list, dtype=np.int32),
@@ -222,7 +280,7 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str], include_market_state:
         "sample_start": cfg.sample_start,
         "sample_end": cfg.sample_end,
         "window": cfg.window,
-        "feature_version": 2,  # 2026-07-29: v2=88维(新增市场状态特征)
+        "feature_version": 3,  # 2026-08-10: v3=特征/标签层后复权(补丁②, DB为不复权价)
         "market_state": include_market_state,  # T4=80维(False), T2/T1/T3=88维(True)
     }
     # 2026-08-07: 88+33=121维扩展特征——仅 True 时加 key（False 时 hash 与现有 88 维缓存一致,
@@ -261,8 +319,14 @@ def _load_cached_dataset(cache_dir: Path, metadata_path: Path):
         return None
 
 
-def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates):
-    """保存数据集到缓存目录。"""
+def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates, params: dict | None = None):
+    """保存数据集到缓存目录。
+
+    Args:
+        params: 缓存参数（sample_start/sample_end/window/feature_version 等）——
+            2026-08-11 起写入 metadata, 供月末增量复用判定（旧缓存同参数 → 采样日可复制）。
+            旧缓存（无 params 字段）视为不可复用 → 全量重建。
+    """
     import json
     cache_dir.mkdir(parents=True, exist_ok=True)
     np.save(str(cache_dir / "X.npy"), X)
@@ -276,9 +340,72 @@ def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates):
         "X_shape": list(X.shape),
         "created": str(datetime.now()),
     }
+    if params:
+        meta["params"] = params
     with open(cache_dir / "metadata.json", "w") as f:
         json.dump(meta, f)
     logger.info(f"数据集已缓存: {cache_dir} ({X.nbytes / 1e9:.1f}GB)")
+
+
+def _find_reusable_cache(cfg: V2Config, symbols: list[str],
+                         include_market_state: bool, include_extra: bool,
+                         sample_end: str) -> tuple[Path, list[str]] | None:
+    """月末增量复用: 找同参数旧缓存（仅 sample_end 更早）→ 采样日可复制。
+
+    2026-08-11: 月末重建（rebuild_dataset_cache.py）每月因 sample_end 变化而全量重建
+    （hash 含 sample_end → 新目录, ~146 天 × 2978 只, 2-6h, 其中 ~95% 是旧采样日重复计算）。
+    特征只依赖 ≤ref_date 的数据（DB 存不复权历史不漂移 / xdxr 后复权因子历史不变）→
+    旧采样日样本确定性成立 → 直接从旧缓存复制, 只构建新增采样日（~21 天, 30-40min）。
+
+    Returns:
+        (旧缓存目录, 旧采样日期列表) 或 None（无同参数旧缓存 → 全量构建）。
+    """
+    import glob
+    import json as _json
+    from pathlib import Path
+
+    # 当前参数（与 hash key 同口径）
+    want = {
+        "n_stocks": len(symbols),
+        "sample_start": cfg.sample_start,
+        "window": cfg.window,
+        "feature_version": 3,
+        "market_state": include_market_state,
+    }
+    if include_extra:
+        want["extra_features"] = True
+
+    best: tuple[Path, list[str], str] | None = None
+    for d in glob.glob("data/cache/v2_dataset/*/"):
+        meta_path = Path(d) / "metadata.json"
+        if not meta_path.exists():
+            continue
+        try:
+            m = _json.loads(meta_path.read_text())
+            p = m.get("params")
+            if not p:  # 旧格式缓存（无参数）→ 不可判定 → 跳过
+                continue
+            match = all(p.get(k) == v for k, v in want.items())
+            if not match:
+                continue
+            old_end = str(p.get("sample_end", ""))
+            if old_end >= sample_end:  # 不早于当前 → 无需复用（可能是当前目录）
+                continue
+            dates = _json.loads((Path(d) / "dates.json").read_text())
+            if not dates:
+                continue
+            # 取 sample_end 最晚的旧缓存（增量最小）
+            if best is None or old_end > best[2]:
+                best = (Path(d), dates, old_end)
+        except Exception:
+            continue
+    if best is not None:
+        logger.info(
+            f"增量复用: 发现同参数旧缓存 {best[0].name} "
+            f"（sample_end={best[2]}, {len(best[1])} 个旧采样日）→ 只构建新增采样日"
+        )
+        return best[0], best[1]
+    return None
 
 
 def build_training_dataset(
@@ -327,14 +454,40 @@ def build_training_dataset(
                 f"股票: {len(symbols)} 只, workers: {n_workers}, "
                 f"extra_features: {include_extra}")
 
+    # ═══ 2026-08-11 月末增量复用: 同参数旧缓存（仅 sample_end 更早）→ 旧采样日直接复制,
+    #     只构建新增采样日（月末从 146 天全量 2-6h → ~21 天 30-40min） ═══
+    #     前提: 特征只依赖 ≤ref_date 数据（DB 不复权历史不漂移 / xdxr 后复权因子不漂移）
+    reuse_from = _find_reusable_cache(cfg, symbols, include_market_state, include_extra,
+                                      dates[-1]) if dates else None
+    old_X = old_y1 = old_y2 = old_y3 = old_dates = None
+    build_dates = dates
+    if reuse_from is not None:
+        old_dir, old_dates = reuse_from
+        old_set = set(old_dates)
+        build_dates = [d for d in dates if d not in old_set]
+        if build_dates:
+            old_X = np.load(str(old_dir / "X.npy"))
+            old_y1 = np.load(str(old_dir / "y1.npy"))
+            old_y2 = np.load(str(old_dir / "y2.npy"))
+            old_y3 = np.load(str(old_dir / "y3.npy"))
+            logger.info(
+                f"  增量模式: 旧缓存 {old_dir.name} X={old_X.shape} 复用, "
+                f"只构建新增采样日 {len(build_dates)} 天 "
+                f"({build_dates[0]} ~ {build_dates[-1]})"
+            )
+        else:
+            # 旧缓存已覆盖全部采样日（理论上 hash 不同不会发生）→ 直接返回旧数据
+            return (np.load(str(old_dir / "X.npy")), np.load(str(old_dir / "y1.npy")),
+                    np.load(str(old_dir / "y2.npy")), np.load(str(old_dir / "y3.npy")), old_dates)
+
     # 每个日期切成小块（~200只/块），避免大pipe传输
     CHUNK = 200
     tasks = []
-    for d in dates:
+    for d in build_dates:
         for i in range(0, len(symbols), CHUNK):
             tasks.append((d, symbols[i:i+CHUNK], cfg, include_market_state, include_extra))
 
-    total_chunks = len(dates) * ((len(symbols) + CHUNK - 1) // CHUNK)
+    total_chunks = len(build_dates) * ((len(symbols) + CHUNK - 1) // CHUNK)
     logger.info(f"  共 {len(tasks)} 个小任务（{CHUNK}只/块）")
 
     t0 = time.time()
@@ -357,27 +510,37 @@ def build_training_dataset(
             if len(done_dates) > last_report and (len(done_dates) % 10 == 0 or elapsed > 120):
                 last_report = len(done_dates)
                 rate = elapsed / len(done_dates) if len(done_dates) > 0 else 0
-                eta = rate * (len(dates) - len(done_dates))
+                eta = rate * (len(build_dates) - len(done_dates))
                 logger.info(
-                    f"  已完成 {len(done_dates)}/{len(dates)} 日期, "
+                    f"  已完成 {len(done_dates)}/{len(build_dates)} 日期, "
                     f"{done_chunks}/{len(tasks)} chunks, "
                     f"累计 {sum(len(x) for x in all_X)} 样本, {elapsed:.0f}s, "
                     f"速率 {rate:.0f}s/日期, 预计剩余 {eta:.0f}s ({eta/60:.0f}min)"
                 )
 
     elapsed = time.time() - t0
-    total_samples = sum(len(x) for x in all_X)
-    logger.info(f"数据集构建完成: {total_samples} 样本, {elapsed:.0f}s")
+    total_samples = sum(len(x) for x in all_X) + (0 if old_X is None else len(old_X))
+    logger.info(f"数据集构建完成: 新增 {sum(len(x) for x in all_X)} 样本, 耗时 {elapsed:.0f}s")
 
     if total_samples == 0:
         return (np.array([]).reshape(0, cfg.window, 0),
                 np.array([]), np.array([]), np.array([]),
                 [])
 
-    X = np.concatenate(all_X, axis=0)
-    y1 = np.concatenate(all_y1, axis=0).astype(np.int32)
-    y2 = np.concatenate(all_y2, axis=0).astype(np.float32)
-    y3 = np.concatenate(all_y3, axis=0).astype(np.float32)
+    # 增量拼接: 旧缓存样本（≤旧 sample_end）+ 新增采样日样本（顺序与全量一致）
+    if old_X is not None:
+        X = np.concatenate([old_X] + all_X, axis=0) if all_X else old_X
+        y1 = np.concatenate([old_y1] + all_y1, axis=0).astype(np.int32) if all_y1 else old_y1.astype(np.int32)
+        y2 = np.concatenate([old_y2] + all_y2, axis=0).astype(np.float32) if all_y2 else old_y2.astype(np.float32)
+        y3 = np.concatenate([old_y3] + all_y3, axis=0).astype(np.float32) if all_y3 else old_y3.astype(np.float32)
+        # 注意: X 行序 = old(旧缓存原序) + new(新增构建追加序), dates 必须同序对应——
+        # 不能 sort（X 不重排会导致 X/dates 行错位）。与全量构建的"追加序"语义一致。
+        all_dates = old_dates + [d for d in all_dates if d not in set(old_dates)]
+    else:
+        X = np.concatenate(all_X, axis=0)
+        y1 = np.concatenate(all_y1, axis=0).astype(np.int32)
+        y2 = np.concatenate(all_y2, axis=0).astype(np.float32)
+        y3 = np.concatenate(all_y3, axis=0).astype(np.float32)
 
     logger.info(
         f"X.shape={X.shape}, "
@@ -386,8 +549,18 @@ def build_training_dataset(
         f"y3 均值={y3.mean():.4f}"
     )
 
-    # ── 缓存到磁盘 ──
-    _save_dataset_cache(cache_dir, X, y1, y2, y3, all_dates)
+    # ── 缓存到磁盘（params 供月末增量复用判定）──
+    cache_params = {
+        "n_stocks": len(symbols),
+        "sample_start": str(cfg.sample_start),
+        "sample_end": str(dates[-1] if dates else cfg.sample_end),
+        "window": cfg.window,
+        "feature_version": 3,
+        "market_state": include_market_state,
+    }
+    if include_extra:
+        cache_params["extra_features"] = True
+    _save_dataset_cache(cache_dir, X, y1, y2, y3, all_dates, params=cache_params)
 
     return X, y1, y2, y3, all_dates
 

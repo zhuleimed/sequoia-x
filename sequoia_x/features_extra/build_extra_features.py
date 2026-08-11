@@ -269,7 +269,10 @@ def _forecast_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     ev = ev.dropna(subset=["avail"]).sort_values("avail")
     if len(ev) == 0:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    out = pd.DataFrame(index=dates, dtype=float)
+    # 2026-08-11 修复: out 必须初始化为固定 4 列——若该股票全部预告事件都在
+    # ref_date 之后(早期采样日常见), 循环永不赋值, 空 DataFrame(0 列) 会破坏
+    # 33 列拼接契约(121维全历史重建实测: 117 列崩)。
+    out = pd.DataFrame(0.0, index=dates, columns=cols)
     for i, d in enumerate(dates):
         w = ev[ev["avail"] <= d]
         if len(w) == 0:
@@ -279,7 +282,7 @@ def _forecast_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
         out.loc[d, "fc_max_chg_12m"] = w12["chg"].max()
         out.loc[d, "fc_cnt_12m"] = len(w12)
         out.loc[d, "fc_freshness"] = 1.0 / (1.0 + (d - w["avail"].iloc[-1]).days)  # 距最近预告
-    return out.fillna(0.0)
+    return out
 
 
 # ════════════════════════════════════════════════════════════
