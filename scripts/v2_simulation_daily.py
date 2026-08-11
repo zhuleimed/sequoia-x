@@ -6,7 +6,7 @@
      - 再执行待买入（T 日开盘价）→ 递补
      - 收盘价更新估值 + 13 条卖出规则评估 → 标记 pending_sell
   2. V2 组合日报推送（复用 reporter，wxpusher）
-  3. 月末检测：今天是否月末最后交易日 → 日志提示重训 cron（每月 1 日 00:00）
+  3. 月末检测：今天是否月末最后交易日 → 日志提示重训 cron（每月 1 日 03:00）
 
 用法：
   python scripts/v2_simulation_daily.py            # 日常（pipeline 调用）
@@ -105,11 +105,11 @@ def main() -> None:
         except Exception as e:
             logger.warning(f"V2 日报推送失败: {e}")
 
-    # ── 3. 月末检测：提示重训（cron 每月 1 日 00:00 自动触发）──
+    # ── 3. 月末检测：提示重训（cron 每月 1 日 03:00 自动触发）──
     if is_last_trading_day_of_month(settings):
         logger.info(
-            "📌 今天是月末最后交易日——V2 月度重训将在下月 1 日 00:00 自动启动"
-            "（cron: 0 0 1 * * → v2_monthly_retrain.py）"
+            "📌 今天是月末最后交易日——V2 月度重训将在下月 1 日 03:00 自动启动"
+            "（cron: 0 3 1 * *（2026-08-10 由 00:00 调整） → v2_monthly_retrain.py）"
         )
     else:
         logger.info("非月末，无重训安排")

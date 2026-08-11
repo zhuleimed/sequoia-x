@@ -649,7 +649,7 @@ prediction_cache 70 个月 × 全部股票（~2900 只）Spearman（预测 vs �
   数据同步（~34min）→ LLM 选股（3min）→ LLM 模拟盘操作（1min）
   → 【V2 模拟盘操作（1min）】→ 日报推送 ×2（LLM + V2）
 月末最后交易日操作完成后：
-  → 下月 1 日 00:00 cron 自动重训（上月数据完整，凌晨训练不占盘面）
+  → 下月 1 日 03:00 cron 自动重训（2026-08-10 由 00:00 调整）（上月数据完整，凌晨训练不占盘面）
 重训完成（信号入库）：
   → 下个交易日晚上 LLM 操作后执行 V2 买入（当天开盘价，收盘价算当日收益）
   → 若 1 日非交易日自动顺延（T+1 模型天然支持）
@@ -866,7 +866,7 @@ $PY scripts/plot_backtest_results.py --with-curve --csv output/backtest_v2/summa
 
 # ═══ 模拟盘 ═══
 $PY scripts/v2_simulation_daily.py          # V2 日常操作（pipeline 自动）
-$PY scripts/v2_monthly_retrain.py           # 月度重训（cron 每月 1 日 00:00）
+$PY scripts/v2_monthly_retrain.py           # 月度重训（cron 每月 1 日 03:00）
 
 # ═══ 后台状态 ═══
 ps -eo pid,etime,pcpu,args | grep -E "build_prediction_cache|t4_monthly"
@@ -877,7 +877,7 @@ bash scripts/launch_t4_parallel.sh --status
 
 - **T4 并行**：`launch_t4_parallel.sh`（start/status/merge/kill），12 并发，`--merge` 合并 t4
 - **回测并行**：`launch_backtest_parallel.sh`（24 进程，环境变量 TOP_N_OVERRIDE/MODES_OVERRIDE/PERIODS_OVERRIDE）
-- **重训自动链**：cron `0 0 1 * *` → v2_monthly_retrain.py；pipeline 步骤 v2_simulation（LLM 后）
+- **重训自动链**：cron `0 3 1 * *`（2026-08-10 由 00:00 调整） → v2_monthly_retrain.py；pipeline 步骤 v2_simulation（LLM 后）
 - **监控**：`logs/` 按日期命名；铁律五三问日志（进度/ETA/指标）
 
 ## 25. 文件索引
