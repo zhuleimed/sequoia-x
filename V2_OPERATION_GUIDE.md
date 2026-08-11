@@ -1,4 +1,4 @@
-# Sequoia-X V2 体系完整操作指南（最终版 v5.1，2026-08-11）
+# Sequoia-X V2 体系完整操作指南（最终版 v5.2，2026-08-11）
 
 > 本文档是 **V2 量化选股体系**的最终权威指南，从数据同步到月末缓存重建、下月初月度重训的
 > 完整闭环，涵盖原理、目的、意义、做法、步骤、流程、逻辑、功能与经验。
@@ -8,7 +8,9 @@
 > 旧版见 `V2_OPERATION_GUIDE_v3_backup.md`（v3.0）/ `V2_OPERATION_GUIDE_v4_backup.md`（v4.0）；
 > 研究方向与实验记录见 `V3研究方向与实验研究记录.md`；教训/规则见 memory/。
 >
-> **版本要点（v5.1）**：
+> **版本要点（v5.2）**：
+> - 新增"第十部分：手机微信操作指引"（§31-36）
+> - v5.1 要点：
 > - 新增"第二部分：原理与逻辑详解（小白版）"——2.1~2.12 用类比直白讲解体系原理
 > - v5.0 要点：
 > - 定位重构：V2 独立体系，剔除 LLM 项目内容
@@ -667,3 +669,85 @@ $PY scripts/analyze_monthly_ic.py       # 逐月 IC 分析
 ---
 
 *文档终。修改任何体系行为（数据源/复权/时间/参数）后，请同步更新本文档与记忆。*
+
+---
+
+# 第十部分：手机微信操作指引（wechat-claude-code）
+
+> 2026-08-11 部署：微信扫码绑定 ClawBot（wechat-claude-code 桥接，systemd 托管），
+> **服务器上不打开 Claude，日常全部在微信里操作**成为常态模式。
+
+## 31. 部署状态与入口
+
+| 项 | 说明 |
+|----|------|
+| 桥接服务 | `~/.claude/skills/wechat-claude-code`（systemd: wechat-claude-code.service） |
+| 绑定方式 | 微信扫码（账号存 `~/.wechat-claude-code/accounts/`） |
+| 对话入口 | 微信里新出现的 ClawBot 好友 |
+| 权限模式 | `--dangerously-skip-permissions`（全权限，与服务器会话一致） |
+| 服务管理 | `cd ~/.claude/skills/wechat-claude-code && npm run daemon -- status/restart/logs` |
+
+## 32. 微信端命令
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 帮助 |
+| `/clear` | 新会话 |
+| `/stop` | 停止当前任务 |
+| `/cwd <路径>` | 切换工作目录（本项目：`/cwd /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x`） |
+| `/prompt <内容>` | 设置系统提示词（如"用中文回答"） |
+| `/model <名称>` | 切换模型 |
+| `/skills` | 查看已安装 Skill |
+| `/status` | 当前会话状态 |
+| `/history [数量]` | 最近对话 |
+| `/compact` | 压缩上下文 |
+| `/reset` | 完全重置 |
+
+## 33. 日常操作示例（复制即用）
+
+```text
+# 查状态
+看一下重建/月末链/重训有没有在跑：ps -eo pid,etime,pcpu,args | grep -E "rebuild|month_end|v2_monthly|pipeline"
+
+# 看日志
+tail -50 logs/rebuild_121dim_full_20260811.log
+grep "已完成" logs/rebuild_121dim_full_20260811.log | tail -3
+
+# 跑脚本（必须 py312）
+/home/zhulei/anaconda3/envs/zhulei_py312/bin/python scripts/patch_cache_params.py
+
+# 改配置 / 提交
+# 直接文字描述即可，它会读写文件、git 提交
+```
+
+## 34. 与服务器会话的区别（重要）
+
+| 差异 | 说明 |
+|------|------|
+| **会话独立** | 手机 Claude 看不到服务器会话的对话历史——靠文档恢复上下文 |
+| **长任务** | 长命令等待时微信显示"输入中"，完成后才回复；可用 `/stop` 中断；超长任务让它 nohup 后台跑 |
+| **并发冲突** | 手机与服务器 Claude 同时改同一文件可能冲突（无锁）——不同时操作同一文件 |
+| **输出格式** | 超长输出分段推送 |
+
+## 35. 接续工作流程（手机 Claude 恢复上下文的标准动作）
+
+任何新会话（含手机 Claude）接手本项目前，按顺序读取：
+
+1. **`V2_OPERATION_GUIDE.md`** ← 本文档（体系全貌 + 原理 + 操作）
+2. **`RESEARCH_STATE.md`** ← 机器快照（实验状态/进程/待办，自动生成）
+3. **`V3研究方向与实验研究记录.md`** ← 研究方向与 ADR 决策（需要时）
+4. **`logs/` 最新日志** ← 当前运行状态
+5. **`memory/`** ← 教训与规则（需要时）
+
+**手机 Claude 判断"是否正常"的要点**（防误判）：
+- 日志文件可能有**历史残留**（多进程混写/旧组输出）——**以最新时间戳为准**（`grep ... | tail` 看 13:xx/14:xx 等当天最新行）
+- 进程 95% CPU = 正常计算，不是空转（如 121 维重建 32 workers 满载）
+- "异常"判断前先与 `V2_OPERATION_GUIDE.md §28 监控与排障` 对照
+
+## 36. 安全注意事项
+
+- 手机 Claude 全权限（可执行任意命令/读写任意文件）——**微信账号即服务器钥匙**，注意微信账号安全
+- 涉及**不可逆操作**（删库/删缓存/kill 进程/改生产配置）时：先让 Claude 说明将执行什么、确认后再执行
+- 重大节点（月末链/重训/重建）由 cron 自动执行——手机 Claude 只做**查看/干预**，不必手动触发（除非异常需要）
+
+---
