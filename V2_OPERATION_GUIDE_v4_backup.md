@@ -1,52 +1,49 @@
-# Sequoia-X V2 体系完整操作指南（最终版 v5.0，2026-08-11）
+# Sequoia-X V2 体系完整操作指南（最终版 v4.0，2026-08-11）
 
-> 本文档是 **V2 量化选股体系**的最终权威指南，从数据同步到月末缓存重建、下月初月度重训的
-> 完整闭环，涵盖原理、目的、意义、做法、步骤、流程、逻辑、功能与经验。
+> 本文档是 V2 体系的**最终权威指南**，从数据同步到月末缓存重建、下月初月度重训的完整闭环，
+> 涵盖原理、目的、意义、做法、步骤、流程、逻辑、功能与经验。旧版（v3.0）见
+> `V2_OPERATION_GUIDE_v3_backup.md`；研究方向与实验记录见 `V3研究方向与实验研究记录.md`；
+> 教训/规则见 memory/；RESEARCH_STATE.md 为脚本自动生成的实验状态快照（勿手改）。
 >
-> **⚠️ 定位声明（2026-08-11 用户明确）**：**V2 体系与 LLM 选股策略是两个完全独立的项目**，
-> 本文档只描述 V2 体系全过程，不涉及 LLM 项目（LLM 策略可随时停止运行，不影响 V2）。
-> 旧版见 `V2_OPERATION_GUIDE_v3_backup.md`（v3.0）/ `V2_OPERATION_GUIDE_v4_backup.md`（v4.0）；
-> 研究方向与实验记录见 `V3研究方向与实验研究记录.md`；教训/规则见 memory/。
->
-> **版本要点（v5.0）**：
-> - 定位重构：V2 独立体系，剔除 LLM 项目内容
+> **版本要点（v4.0 新增/修订）**：
 > - 复权口径铁律（全库不复权 + 计算层后复权，feature_version=3）
 > - fund_flow 全历史切换（新浪源，2018 起）→ 121 维采样日 10 → 143 天
 > - 月末缓存**增量复用**（同参数旧缓存复制 + 只构建新增月份，重建 2-6h → 30-40min）
 > - 月度重训时间 00:00 → **03:00**（与月末链错开）
+> - LLM 研判推送修复（DeepSeek 推理 max_tokens 4096 → 8192）
 > - 月末链 workers 优化（--workers 16，双 job 32 进程）
 
 ---
 
 # 第一部分：体系总览
 
-## 1. V2 体系定位与架构
+## 1. 项目定位与体系架构
 
-**Sequoia-X V2** 是 A 股量化选股与模拟盘体系：每日自动同步行情 → 特征/模型预测 → 月度
-选股 → V2 模拟盘执行与风控 → 微信推送。每月自动完成"月末扩展维度拉取 + 训练缓存重建 +
-月初重训 + 选股信号入库"的完整闭环，全程无人值守（cron 驱动），异常微信告警。
+**Sequoia-X V2** 是 A 股量化选股与模拟盘系统：每日自动同步行情 → 特征/模型预测 → 策略选股
+→ LLM 多维研判 → 双模拟盘（V2 + LLM）执行与风控 → 微信推送。每月自动完成"月末扩展维度
+拉取 + 训练缓存重建 + 月初重训 + 选股信号入库"的完整闭环。
 
 ```
 数据层 ──→ 特征/模型层 ──→ 信号层 ──→ 执行层 ──→ 推送层
- 日线同步      88/121 维     月度选股       V2 模拟盘     微信
- 扩展维度      T2/T3/T4     信号入库       风控/月报     日志
- (月末拉取)     LSTM
+ 日线同步      88/121 维      策略选股       V2 模拟盘     微信
+ 扩展维度      T2/T1/T3        LLM 研判      LLM 模拟盘    日志
+ (月末拉取)     T4 LSTM        信号入库      风控/月报
 ```
 
-**V2 与 LLM 项目的关系**：完全独立。V2 使用独立数据库（sim_v2.db）、独立信号源（月度重训
-选股）、独立模拟盘。两个项目共享的仅为主库（sequoia_v2.db 日线/扩展维度数据）与每日
-数据同步——**停止 LLM 项目不影响 V2 任何环节**。
+**核心目标**：每日产出可执行的选股信号（V2 每月 10 只 + LLM 每日 2 只），模拟盘 T+1 执行，
+全程无人值守（cron 驱动），异常微信告警。
 
 ## 2. 数据流全景（一图看懂）
 
 | 环节 | 触发 | 脚本 | 产出 |
 |------|------|------|------|
 | 日线同步 | 每日 18:10 | pipeline/pipeline.py → sync | stock_daily 更新到当日 |
-| V2 模拟盘日常 | 每日 18:10 | scripts/v2_simulation_daily.py | 持仓/风控/日报 |
+| 日常选股 | 18:10 管线 | main.py 策略层 | results_YYYYMMDD.json |
+| LLM 研判 | 18:10 管线 | MarketAnalyst | AI 研判推送 + 2 只买入信号 |
+| 模拟盘 | 18:10 管线 | SimEngine | 持仓/日报 |
 | 月末拉取 | 月末 19:00 | month_end_pull.py | 扩展维度全量刷新 |
 | 缓存重建 | 月末（拉取后） | rebuild_dataset_cache.py | 121/88+80 维缓存（增量/全量） |
 | 月度重训 | 1 日 03:00 | v2_monthly_retrain.py | 模型重训 + 10 只选股信号 |
-| 信号执行 | 重训后首个交易日 | v2_simulation_daily.py | T+1 开盘买入 10 只 |
 
 ## 3. 关键决策记录表（理解体系的钥匙）
 
@@ -57,8 +54,7 @@
 | 数据源四轨 | OHLCV: baostock/腾讯/新浪；估值: TDX/baostock；指数: baostock | 2026-07-24 |
 | fund_flow | **新浪 MoneyFlow 全历史**（2018 起；东财仅 120 天） | 2026-08-11 |
 | 特征版本 | feature_version=3（后复权补丁②） | 2026-08-10 |
-| 模型 | T2/T3 树模型 + T4 LSTM（纯 LSTM，L2=0，无 Transformer） | 2026-07-29 |
-| 选股 | T2+T4 Rank 融合 TOP_N=10（回测最优 M4） | 2026-08-02 |
+| 模型 | T2/T1/T3 树模型 + T4 LSTM（纯 LSTM，L2=0，无 Transformer） | 2026-07-29 |
 | 月末重建 | 全量（首次）→ **增量复用**（池不变月份） | 2026-08-11 |
 | 重训时间 | 每月 1 日 **03:00**（由 00:00 调整，避开月末链 02:00 完成窗口） | 2026-08-10 |
 
@@ -149,11 +145,11 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 对 OHLCV 原地后复权（除权日假断层会污染收益/均线/技术指标）；extra 特征用原始价构建。
 执行层（模拟盘/回测）不走此函数。
 
-## 11. 标签体系（T2 / T3）
+## 11. 标签体系（T1/T2/T3）
 
-- **T2**：未来 5 日超额收益（回归，主信号）
-- **T3**：未来 20 日收益（回归，长周期辅助）
-- （T1 方向风控已于 2026-08-02 实证关闭）
+- **T1**：未来 1 日涨跌方向（分类）
+- **T2**：未来 5 日超额收益（回归，主力信号）
+- **T3**：未来 20 日收益（回归，长周期）
 
 标签用后复权价计算（跨除权日收益不假跌）。y2 均值 2026 H1 -10.8%（市场风格切换背景）。
 
@@ -162,10 +158,11 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 | 模型 | 结构 | 职责 |
 |------|------|------|
 | T2 | LGBM/XGB 树（Optuna 50 trials） | 5 日超额收益主信号 |
+| T1 | 树模型 | 方向风控（2026-08-02 实证关闭） |
 | T3 | 树模型 | 长周期辅助 |
 | T4 | LSTM（纯 LSTM，128 units，L2=0，无 Transformer，dropout 0.285） | 时序信号 |
 
-**融合**：T2+T4 Rank 融合选股（回测最优 M4+TOP_N=10，89.5% 夏普 3.35）。
+**融合**：T2+T4 Rank 融合为主（回测最优 M4+TOP_N=10，89.5% 夏普 3.35）。
 
 ## 13. 数据集缓存机制
 
@@ -181,45 +178,63 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 
 ---
 
-# 第四部分：日常运行
+# 第四部分：日常运行（每日 18:10 管线）
 
-## 14. 每日运行（数据同步 + V2 模拟盘日常）
+## 14. 每日管线流程（pipeline/pipeline.py，cron `10 18 * * 1-5`）
 
 ```
-每日 18:10  pipeline.py 启动
- ├─ 步骤 [sync]        数据同步+清洗（~50min 至 18:59）
- ├─ 步骤 [v2_simulation] V2 模拟盘日常操作（v2_simulation_daily.py）
- │    ├─ SimEngine.run_daily()：pending 信号 → T+1 开盘价买入 / 持仓估值 / 风控卖出
- │    └─ V2 组合日报推送（持仓/当日操作/收益）
- └─ 18:59 完成
+18:10 启动
+ ├─ 步骤 [sync]      数据同步+清洗（~50min）
+ ├─ 步骤 [strategy]  8 策略选股 + LLM 多维度研判（~3min）
+ ├─ 步骤 [simulation] LLM 模拟盘更新（T+1 执行买入信号 + 风控）
+ ├─ 步骤 [v2_simulation] V2 模拟盘日常操作（日报推送）
+ └─ 步骤 [strategy_summary] 策略汇总推送（V2 vs LLM 收益对比）
+18:59 完成 → 状态推送
 ```
 
-**V2 模拟盘规则**（与回测 M4+TOP_N=10 一致）：
-- 资金 100 万，持仓上限 10 只 × 每只 10 万
-- **买入**：仅重训后首个交易日（月度信号 10 只，T+1 开盘价）
-- **卖出**：13 条风控规则（总分 ≥60 触发）+ 止损止盈
-- 非重训日唯一买卖 = 风控卖出（无新买入）
+**策略选股（8 个策略）**：均量线突破 / 海龟交易法则 / 高紧旗形突破 / 涨停洗盘 / 上涨回调 /
+RPS 动量突破 / 多周期 RPS 突破 / 定增公告监控。选股结果保存 `data/results/results_YYYYMMDD.json`
+（供 LLM 分析 + 次日复盘）。
 
-**月末提示**：v2_simulation_daily 在月末最后交易日提示"重训将在下月 1 日 03:00 自动启动"。
+**数据完整性检查**：覆盖率 ≥90% 才继续；否则推送告警并跳过选股（不推送假信号）。
 
-## 15. V2 模拟盘数据与引擎
+## 15. LLM 研判与推送（DeepSeek，关键修复）
 
-| 项 | 说明 |
-|----|------|
-| 数据库 | `data/sim_v2.db`（独立库，与 LLM 项目完全隔离） |
-| 信号表 | sim_buy_signals（strategy_from="V2"） |
-| 持仓表 | sim_positions（UNIQUE(symbol, buy_date) 防重复） |
-| 平仓表 | sim_closed_trades |
-| 行情查询 | 主库 settings.db_path（模拟盘引擎统一查主库行情） |
+**流程**：策略选股（限流取前 10 只）→ 实时数据采集（知兔行情 + 新浪指数 + 本地情绪 + 东财公告）
+→ DeepSeek 分析（deepseek-v4-flash）→ 解析 RECOMMEND 行（2 只推荐）→ 推送 + 写入模拟盘信号。
 
-**引擎关键防错**：`_execute_pending_buys` 循环内 held_symbols 实时更新 + IntegrityError 兜底
-（重复信号不崩溃整个模拟盘）；买入信号显式去重（同 symbol+buy_date+pending 跳过）。
+**⚠️ 推理模型事故（2026-08-10 修复，勿回退）**：
+- 根因：deepseek-v4-flash 为推理模型，`reasoning_content` 计入 completion_tokens。
+  `max_tokens=4096` 被推理耗尽时 **content 为空** → 推送失败（wxpusher code 1001 "content不能为空"）
+  + RECOMMEND 解析失败回退"多策略频率推荐"（**非 LLM 真推荐**）。8-3/8-6/8-10 三天受影响；
+  8-7 截断致 RECOMMEND 行丢失（推送成功但**信号缺失**）。
+- 修复：`max_tokens` 4096 → **8192** + content 为空自动重试一次 + 超时 120→180s。
+- 判定推送成功：看 `_push_ai_report` 的 messageId 日志（main.py 的"已推送"INFO 是无条件打印的坑）。
+- 判定信号是否真 LLM 推荐：signals.py 日志分支——"RECOMMEND 行"=真；"多策略频率回退"=假。
+
+**推送节奏**（用户明确）：LLM 每日 2 只荐股 → 次日 T+1 开盘买入；V2 每月 1 日重训后
+一次 10 只（仅重训后首个交易日买入），非重训日唯一买卖=风控卖出；两套日报并存是常态。
+
+## 16. 模拟盘（双模拟盘完全隔离）
+
+| 项 | V2 模拟盘 | LLM 模拟盘 |
+|----|-----------|-----------|
+| 数据库 | sim_v2.db（独立） | sequoia_v2.db 的 sim_* 表 |
+| 资金 | 100 万 | 100 万 |
+| 持仓规则 | 上限 10 只 × 10 万 | 10 只 × 10 万（月买 2 只滚动） |
+| 信号来源 | 月度重训选股（V2 策略） | 每日 LLM 研判（top_n=2） |
+| 买入 | T+1 开盘价 | T+1 开盘价 |
+| 卖出 | 13 条规则（风控总分≥60） | 同引擎 |
+
+**执行引擎**：`SimEngine.run_daily()`——pending 信号 → 开盘价买入（held_symbols 循环内更新 +
+IntegrityError 兜底，防重复信号崩溃）→ 持仓估值/止损止盈判定 → 日报。行情查主库
+（settings.db_path），持仓/信号查模拟盘库。
 
 ---
 
 # 第五部分：月末链（关键节点一，cron `0 19 * * 1-5`）
 
-## 16. 月末链总览（month_end_pull.py）
+## 17. 月末链总览（month_end_pull.py）
 
 **目的**：每月最后交易日收盘后，把扩展维度数据拉取完整 + 重建训练缓存 + 验证链路，
 使下月 1 日 03:00 重训可直接运行（无人值守，全自动，异常微信告警）。
@@ -242,7 +257,7 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
  └─ 微信推送"全链完成"（成功/降级/失败三态）
 ```
 
-## 17. 缓存重建详解（全量 vs 增量）
+## 18. 缓存重建详解（全量 vs 增量）
 
 **全量**（首次月末 / 股票池变化 / 特征参数变化）：146 天 × 2978 只全构建。
 - 121 维：3-4h（每只读 7 个 parquet，IO 瓶颈，32 进程）
@@ -259,7 +274,7 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 - 边界：股票池变化（n_stocks 变）→ hash 变 → 自动全量（正确行为，每月都可能，属正常设计）。
 - metadata 需含 params（新格式）；旧格式缓存不可复用（8/31 首次月末链为全量，9/30 起增量）。
 
-## 18. 覆盖率检查与 88 维降级（四层回退机制）
+## 19. 覆盖率检查与 88 维降级（四层回退机制）
 
 | 层 | 位置 | 行为 |
 |----|------|------|
@@ -271,7 +286,7 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 **关键面**（fund_flow/finance/holders ≥90% 判定）与**语义可缺失面**（consensus/news/xdxr/
 forecast 只报告不阻断）区分——consensus 64% 是真实覆盖水平（A 股约 36% 无研报），不得误判降级。
 
-## 19. 自检与干跑
+## 20. 自检与干跑
 
 - **自检**（_verify_caches）：树模型缓存（121/88）+ T4 缓存（80）存在 + 维度正确 + 采样日覆盖月末。
 - **干跑**（build_prediction_cache --start-month --end-month --skip-t4）：单月预测全链路验证
@@ -281,7 +296,7 @@ forecast 只报告不阻断）区分——consensus 64% 是真实覆盖水平（
 
 # 第六部分：月度重训（关键节点二，cron `0 3 1 * *`）
 
-## 20. 重训总览（v2_monthly_retrain.py，每月 1 日 03:00）
+## 21. 重训总览（v2_monthly_retrain.py，每月 1 日 03:00）
 
 **目的**：用上月完整数据重训全部模型 → 产出本月 10 只选股信号 → 写入 V2 模拟盘 → 推送月报。
 **为什么 03:00**：月末链 19:00 起（拉取 4-7h + 重建 2-6h + 干跑 1h）≈ 8h 至 02:00；
@@ -291,29 +306,29 @@ forecast 只报告不阻断）区分——consensus 64% 是真实覆盖水平（
 03:00 启动
  ├─ Step0: 辅助维度增量刷新（--refresh-days 40，月末已全量则秒过）+ 覆盖率告警
  ├─ Step0.5: 缓存就绪轮询（每 5min，最长 12h；121→88 降级；超时告警中止）
- ├─ Step1: T2/T3 预测缓存构建（build_prediction_cache，断点续跑）
+ ├─ Step1: T2/T1/T3 预测缓存构建（build_prediction_cache，断点续跑）
  ├─ Step2: T4 LSTM 训练（t4_monthly_worker，追加预测到缓存）
  ├─ Step3: 选股（T2+T4 Rank 融合 → TOP_N=10）
  ├─ Step4: 信号入库 sim_v2.db（strategy_from="V2"）
  ├─ Step5: 荐股推送
- └─ Step6: V2 模拟盘月度报告推送
+ └─ Step6: V2 + LLM 模拟盘月度报告合并推送（上月数据）
 ```
 
-## 21. 缓存就绪轮询（wait_for_cache_ready）
+## 22. 缓存就绪轮询（wait_for_cache_ready）
 
 - 判定：hash 目录 metadata 存在 + 维度正确（121/88）+ 采样日覆盖上月最后交易日
 - 121 缺失但 88 就绪 → 降级接受（微信告知）；都缺 → 轮询至 12h 超时 → 告警中止
 - 与月末链衔接：重建完成写 marker → 重训轮询即时通过；重建未完成 → 轮询等待（最长 12h 兜底）
 
-## 22. 重训步骤要点
+## 23. 重训步骤要点
 
-- **Step1 预测缓存**：树模型（T2/T3）月度预测，增量断点续跑（已完成月份跳过）
+- **Step1 预测缓存**：树模型（T2/T1/T3）月度预测，增量断点续跑（已完成月份跳过）
 - **Step2 T4**：LSTM 训练 + 预测追加；失败可重跑续跑（.t4_tmp 原子更新）
 - **Step3 选股**：Rank 融合取 TOP10（回测最优 M4+TOP_N=10 配置）
 - **Step4 信号**：T+1 规则——1 日产生的信号，2 日（首个交易日）开盘买入
-- **Step6 月报**：V2 模拟盘月度报告（sim_v2.db）
+- **Step6 月报**：合并 V2（sim_v2.db）+ LLM（sequoia_v2.db）双模拟盘月度报告
 
-## 23. 失败保护（不卡死原则）
+## 24. 失败保护（不卡死原则）
 
 每个 Step 失败：微信告警 + sys.exit(1)（可重跑续跑）——**不存在静默卡死**；
 重跑幂等：断点续跑（marker/pending 过滤/原子更新）；Step0 失败不阻断（仅告警）。
@@ -322,7 +337,7 @@ forecast 只报告不阻断）区分——consensus 64% 是真实覆盖水平（
 
 # 第七部分：验证与回测（决策依据）
 
-## 24. 验证历程（小三步 → 大三步 → 全量回测）
+## 25. 验证历程（小三步 → 大三步 → 全量回测）
 
 | 阶段 | 内容 | 结论 |
 |------|------|------|
@@ -336,7 +351,7 @@ forecast 只报告不阻断）区分——consensus 64% 是真实覆盖水平（
 年化 89.5%，夏普 3.35。**核心结论**：2026 风格切换后（y2 均值 -10.8%），滚动窗口 +
 近期数据纳入可逐步改善 IC（-0.258 → -0.156 → -0.093）。
 
-## 25. T4 LSTM 调试史（最深刻一课）
+## 26. T4 LSTM 调试史（最深刻一课）
 
 **表象**：T4 预测恒等（pred_std=0）→ **四轮误诊**（数据/标签/线程）→ **真凶**：
 L2=1e-4 正则杀死 LSTM kernel（norm 0.00）+ Transformer 层稀释信号 → **修复**：
@@ -347,7 +362,7 @@ L2=1e-4 正则杀死 LSTM kernel（norm 0.00）+ Transformer 层稀释信号 →
 
 # 第八部分：经验教训与铁律
 
-## 26. 铁律体系
+## 27. 铁律体系
 
 | # | 铁律 | 内容 |
 |---|------|------|
@@ -362,9 +377,9 @@ L2=1e-4 正则杀死 LSTM kernel（norm 0.00）+ Transformer 层稀释信号 →
 脚本内 `tf.config.threading.set_*()` 显式设置（get_* 返回 0 是误导）。
 
 **多进程 kill 铁律**（2026-08-11 新教训）：kill 多进程任务必须杀**进程树**（pkill -f 或全 PID），
-只杀 bash 包装会让 python 主进程成为孤儿继续运行（3 组 96 worker 抢 CPU + 混写日志的教训）。
+只杀 bash 包装会让 python 主进程成为孤儿继续运行（本次 3 组 96 worker 抢 CPU + 混写日志的教训）。
 
-## 27. 重大事故与教训索引
+## 28. 重大事故与教训索引
 
 | 事故 | 日期 | 教训 |
 |------|------|------|
@@ -373,19 +388,20 @@ L2=1e-4 正则杀死 LSTM kernel（norm 0.00）+ Transformer 层稀释信号 →
 | 环境差异漂移 25% | 08-02 | 统一 py312 |
 | 复权口径前复权污染 | 08-10 | 全库不复权 + 计算层后复权 |
 | 腾讯 qfq 污染多行写库 | 08-10 | 腾讯 fq 留空读 day |
+| LLM 推理挤占 content 空 | 08-10 | max_tokens 8192 + 空重试 |
 | forecast 0 列破坏 33 列契约 | 08-11 | 固定列初始化 + 列数校验 |
 | 孤儿进程混写日志 | 08-11 | kill 进程树 |
 
-## 28. 监控与排障
+## 29. 监控与排障
 
 **微信推送**（三态）：成功 / 降级（88 维）/ 失败告警——月末链与重训每个环节都推送。
 **日志位置**：`logs/pipeline_YYYYMMDD.log`（日常）/ `month_end_pull_YYYYMM.log`（月末）/
 `v2_retrain_YYYYMM.log`（重训）/ `rebuild_*_YYYYMMDD.log`（重建）/ `sync_fund_flow_history_*.log`。
-**关键判定**：缓存就绪看 wait_for_cache_ready 日志；重建完成看 marker 文件；
-V2 信号入库看 v2_retrain 日志 Step4。
-**进程检查**：`ps -eo pid,etime,pcpu,args | grep -E "rebuild|month_end|v2_monthly|pipeline|v2_simulation"`。
+**关键判定**：LLM 推送成功看 messageId 日志；信号真伪看 RECOMMEND/回退分支；
+缓存就绪看 wait_for_cache_ready 日志；重建完成看 marker 文件。
+**进程检查**：`ps -eo pid,etime,pcpu,args | grep -E "rebuild|month_end|v2_monthly|pipeline"`。
 
-## 29. 常用命令速查
+## 30. 常用命令速查
 
 ```bash
 PY=/home/zhulei/anaconda3/envs/zhulei_py312/bin/python   # 铁律六：必须 py312
@@ -411,8 +427,10 @@ $PY scripts/rebuild_dataset_cache.py --only-88 --workers 16 --no-extra  # 88 维
 $PY scripts/month_end_pull.py           # 月末链（非月末零成本退出）
 $PY scripts/v2_monthly_retrain.py       # 月度重训（1 日 03:00）
 
-# ═══ V2 模拟盘 ═══
-$PY scripts/v2_simulation_daily.py      # V2 模拟盘日常（管线 [v2_simulation] 步骤）
+# ═══ 日常管线 / 模拟盘 ═══
+$PY pipeline/pipeline.py                # 完整管线（cron 18:10）
+$PY main.py --sim-update                # LLM 模拟盘更新
+$PY scripts/v2_simulation_daily.py      # V2 模拟盘日常
 
 # ═══ 回测 / 分析 ═══
 $PY backtest_v2.py                      # 回测
@@ -425,19 +443,18 @@ $PY scripts/analyze_monthly_ic.py       # 逐月 IC 分析
 
 | 路径 | 用途 |
 |------|------|
-| `data/sequoia_v2.db` | 主库（日线/估值/扩展维度索引） |
-| `data/sim_v2.db` | **V2 模拟盘独立库** |
+| `data/sequoia_v2.db` | 主库（日线/估值/扩展维度索引/LLM 模拟盘） |
+| `data/sim_v2.db` | V2 模拟盘独立库 |
 | `data/extra_features/{subset}/{code}.parquet` | 扩展维度 7 类（fund_flow 新浪全历史） |
 | `data/cache/v2_dataset/<hash>/` | 训练数据集缓存（含 params metadata） |
+| `data/results/results_YYYYMMDD.json` | 每日策略选股结果 |
 | `output/backtest_v2/.stock_pool.json` | 统一股票池（三处同源） |
 | `output/backtest_v2/.rebuild_done_*` | 月末重建断点 marker |
 | `output/backtest_v2/.dryrun_cache.json` | 月末干跑断点 |
 | `scripts/sync_fund_flow_history.py` | 新浪资金流全历史同步（2026-08-11 新增） |
-| `scripts/month_end_pull.py` | 月末链（19:00 cron） |
-| `scripts/v2_monthly_retrain.py` | 月度重训（1 日 03:00 cron） |
 | `sequoia_x/model_selection_v2/adjust.py` | 后复权模块（2026-08-10 新增） |
 | `V3研究方向与实验研究记录.md` | 研究方向/实验/ADR 决策记录 |
-| `V2_OPERATION_GUIDE_v3_backup.md` / `_v4_backup.md` | 本指南旧版备份 |
+| `V2_OPERATION_GUIDE_v3_backup.md` | 本指南旧版（v3.0）备份 |
 
 ---
 
