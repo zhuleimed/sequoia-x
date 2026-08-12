@@ -291,7 +291,7 @@ def _build_one_features(args: tuple):
         extra_matrix = extra.values.astype(np.float32)
     per_day = _extract_per_day_features(
         df, idx_df if idx_df is not None and len(idx_df) else None, cfg,
-        extra_matrix=extra_matrix,
+        extra_matrix=extra_matrix, symbol=sym,
     )
     if len(per_day) < cfg.window:
         return None

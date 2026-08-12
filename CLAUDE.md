@@ -2,24 +2,18 @@
 
 本文件为 004_sequoia-x 项目的 Claude Code 工作指南。父级规则见 `../CLAUDE.md`。
 
-## 当前状态（2026-08-01 晚 21:20 更新）
+## 当前状态（2026-08-12 19:08 更新）
 
-**数据已扩展到 2020-01 起（1594 交易日）**，缓存已重建（80维=`62cf234c5440`，88维=`13132147f8e8`，40 万样本）。
+**60 个月扩展回测已完成**，V2/V3 体系稳定运行中。
 
-**进行中的工作（60 个月扩展回测流水线，预计今晚全部完成）**：
-1. 🟢 T2/T1/T3 预测缓存构建（**24 进程并行**，PID 见 ps，v7 日志 `logs/pred_cache_t2t1t3_20260801_v7.log`；预计 **~00:00-00:30** 完成 36 个月）
-2. 🟢 T4 71 个月并行训练（`launch_t4_parallel.sh`，**12 并发**，已完成 48/71，预计 **~23:00-23:30** 完成）
-3. ⏳ 完成后：`bash scripts/launch_t4_parallel.sh --merge` 合并 t4 → 60 个月回测 → **逐月 T2/T4 Rank IC 分析**（见 BACKTEST_PLAN §25 优化方案）
+**新增数据资产（2026-08-12）**：
+- ✅ **mootdx 通达信财务数据全量下载**：119 期（1990-2026），585 字段/期，398 MB
+- 位置：`data/extra_features/mootdx_finance/gpcwYYYYMMDD.parquet`
+- 脚本：`scripts/download_mootdx_finance.py`（断点续跑，同命令恢复）
+- 远超现有 finance（同花顺 10 维）+ holders（东财 2 维），一源覆盖全部基本面
+- **暂不接入特征工程**（用户指令），后续接入时筛选 585→N 维
 
-**⚠️ 今晚关键修复（勿回退）**：
-- **KMP_AFFINITY 锁核**（CLAUDE.md 铁律 + BACKTEST_PLAN §26）：T4/build 均需 `env -u KMP_AFFINITY` + 脚本内 `pop("KMP_AFFINITY")` + OMP 硬设 1（build 已修复，`build_prediction_cache.py` 顶部）
-- **T4/build 并行时序**：T4 worker 缓存检查已放宽（不在缓存存 `.t4_tmp` 快照），merge 只更新 t4 字段
-- 并发配置：build 24 worker（n_jobs=1）、T4 12 worker（TF 2/1 + OMP=2）
-
-**已废弃**：`pipeline_t4_auto_start.sh` 监督脚本已 kill（T4 已并行启动，不再需要）；旧 11 个月（2025-08~2026-06）已在 20:33 build 重启时自动重建。
-
-**后台任务查询**：`ps -eo pid,etime,pcpu,args | grep -E "build_prediction_cache|t4_monthly"`；
-**T4 状态**：`bash scripts/launch_t4_parallel.sh --status`
+**后台任务查询**：`ps -eo pid,etime,pcpu,args | grep python`
 
 ## ⚠️ 首次读取指引
 
@@ -226,5 +220,6 @@
 | `data/cache/v2_dataset/` | 数据集磁盘缓存（80维/88维） |
 | `data/models/v2_selection/` | 模型文件 + Walk-Forward 结果 |
 | `logs/` | 运行日志 |
-| `scripts/` | 测试/验证/回测脚本 |
+| `scripts/` | 测试/验证/回测脚本（含 `download_mootdx_finance.py` 财务数据下载） |
+| `data/extra_features/mootdx_finance/` | mootdx 通达信财务数据（119 期 parquet，585 字段，398 MB） |
 | `memory/` | 项目记忆文件 |

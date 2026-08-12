@@ -666,7 +666,11 @@ class DataSync:
         # ── 三轨制：源健康追踪 + 动态优先级 ──
         # 三个数据源平级独立，按健康度排序尝试
         # 2026-08-03: baostock 排第一（2026-06-20 起异常一个多月，08-03 实测恢复且速度最快 29ms/请求）
-        #   - 全字段（OHLCV+4估值+换手率 turn），前复权口径正确（Tencent 除权后历史价不调整，产生断层）
+        #   - 全字段（OHLCV+4估值+换手率 turn）
+        #   - ⚠️ 复权口径铁律（2026-08-10 实测确认）：全库为【不复权】价（除权日有完整跳空，
+        #     100% 匹配腾讯 bfq / baostock adjustflag=3）。所有拉取一律 adjustflag="3"（不复权）——
+        #     增量/补拉/回填统一口径，禁止再写前复权/后复权（复权只在计算层做，见 021 因子库/特征层）。
+        #     前复权价随拉取日基准漂移，补拉除权日前历史会产生断层；不复权=实际成交价，永不漂移。
         #   - ⚠️ baostock 为 TCP 长连接（端口 10070），不允许多进程同时拉取 → 本函数必须单进程串行
         #   - 异常时自动降级：连续失败 5 次 → 排到最后；每 50 只试探恢复一级
         SOURCE_NAMES = ["baostock", "tencent", "sina"]
@@ -822,7 +826,7 @@ class DataSync:
                                 start_date=start,
                                 end_date=today_str,
                                 frequency="d",
-                                adjustflag="2",
+                                adjustflag="3",
                             )
                             requests_since_login += 1
                             if bs_rs.error_code == "0":
@@ -1098,7 +1102,7 @@ class DataSync:
                         start_date=earliest,
                         end_date=latest_str,
                         frequency="d",
-                        adjustflag="2",
+                        adjustflag="3",
                     )
                     data = None
                     if rs.error_code == "0":
@@ -1168,7 +1172,7 @@ class DataSync:
                             start_date=earliest,
                             end_date=latest_str,
                             frequency="d",
-                            adjustflag="2",
+                            adjustflag="3",
                         )
                         data = None
                         if rs.error_code == "0":
@@ -1354,7 +1358,7 @@ class DataSync:
                             start_date=batch_start,
                             end_date=batch_end,
                             frequency="d",
-                            adjustflag="2",
+                            adjustflag="3",
                         )
                         if rs.error_code != "0":
                             continue
@@ -1513,7 +1517,7 @@ class DataSync:
                             bs_code,
                             "date,peTTM,pbMRQ,psTTM,pcfNcfTTM",
                             start_date=dates[0], end_date=dates[-1],
-                            frequency="d", adjustflag="2",
+                            frequency="d", adjustflag="3",
                         )
                         requests_since_login += 1
                         if rs.error_code == "0":
@@ -1671,7 +1675,7 @@ class DataSync:
                         start_date=start_date,
                         end_date=today_str,
                         frequency="d",
-                        adjustflag="2",
+                        adjustflag="3",
                     )
                     if rs.error_code == "0":
                         bs_data = self._bs_get_data(rs)

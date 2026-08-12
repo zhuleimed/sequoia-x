@@ -179,7 +179,7 @@ def build_features_and_predict(
         try:
             per_day = _extract_per_day_features(
                 df, idx if not idx_empty else None, cfg,
-                include_market_state=False,  # T4 用 80 维
+                include_market_state=False, symbol=s,  # T4 用 80 维
             )
         except Exception:
             continue

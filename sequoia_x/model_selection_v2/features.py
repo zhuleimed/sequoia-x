@@ -88,7 +88,8 @@ def _compute_bollinger(close: np.ndarray, period: int = 20
 def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
                                cfg: V2Config,
                                include_market_state: bool = True,
-                               extra_matrix: np.ndarray | None = None) -> np.ndarray:
+                               extra_matrix: np.ndarray | None = None,
+                               symbol: str | None = None) -> np.ndarray:
     """从日线 DataFrame 逐日提取特征向量。
 
     Args:
@@ -100,10 +101,16 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
                               树模型需要显式市场特征，LSTM能自学时序中的市场模式。
         extra_matrix: 扩展维度特征 (n_days, 33)（可选, 2026-08-07 88+33=121维拼接）。
                       由调用方 build_extra_with_flag 生成, 与 88 维同流程归一化。
+        symbol: 股票代码（2026-08-10 补丁②）。DB 全库为不复权价，特征计算必须用
+                后复权价（除权日假断层会污染收益/均线/技术指标特征）；传入后在本函数
+                开头对 OHLCV 做后复权。执行层（模拟盘/回测）不走本函数，不受影响。
 
     Returns:
         (n_days, 80) 或 (n_days, 88) 或 (n_days, 121) 特征矩阵，全部 Z-score 归一化
     """
+    if symbol is not None:
+        from sequoia_x.model_selection_v2.adjust import apply_adjust
+        apply_adjust(df, symbol)  # 原地后复权 open/high/low/close（extra 特征已用原始价构建）
     n = len(df)
     close = df["close"].values.astype(float)
     high = df["high"].values.astype(float)
@@ -454,7 +461,7 @@ def build_stock_features(
         df_index = None
 
     per_day = _extract_per_day_features(df, df_index, cfg, include_market_state,
-                                        extra_matrix=extra_matrix)
+                                        extra_matrix=extra_matrix, symbol=symbol)
     if len(per_day) < cfg.window:
         return None, None
 
@@ -544,7 +551,7 @@ def build_prediction_features(
         df_index = None
 
     per_day = _extract_per_day_features(df, df_index, cfg, include_market_state,
-                                        extra_matrix=extra_matrix)
+                                        extra_matrix=extra_matrix, symbol=symbol)
     if len(per_day) < cfg.window:
         return None
 
