@@ -460,6 +460,26 @@ def get_recent_account_days(db_path: str, days: int = 30) -> list[dict]:
 # ════════════════════════════════════════════════════════════
 
 
+def get_realized_unrealized_pnl(db_path: str) -> tuple[float, float]:
+    """获取已实现/未实现盈亏（日报拆分展示用，2026-08-12 新增）。
+
+    已实现盈亏 = 已平仓交易 pnl 合计（sim_closed_trades）
+    未实现盈亏 = 当前持仓 pnl 合计（sim_positions）
+    二者之和 = 账户累计盈亏（total_value - 初始资金）
+
+    Returns:
+        (realized_pnl, unrealized_pnl)
+    """
+    with sqlite3.connect(db_path) as conn:
+        realized = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM sim_closed_trades"
+        ).fetchone()[0]
+        unrealized = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) FROM sim_positions"
+        ).fetchone()[0]
+    return float(realized), float(unrealized)
+
+
 def get_cash_balance(db_path: str) -> float:
     """计算当前可用现金余额。
 

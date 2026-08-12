@@ -1127,6 +1127,11 @@ class MonthlyBacktestEngine:
                 symbol_df = symbol_df[symbol_df["date"] <= today]
 
                 # 卖出规则检查
+                # 双轨止损（2026-08-12，与实盘 SimEngine 口径一致）：
+                # pos.current_price 为前一交易日收盘（本日估值前的最后估值），
+                # 其开盘价（symbol_df 倒数第2行）也参与硬止损判定；
+                # symbol_df 已过滤 date<=today，无未来数据。
+                prev_bar = symbol_df.iloc[-2] if len(symbol_df) >= 2 else None
                 result = evaluate_exit(
                     entry_price=pos.entry_price,
                     current_price=pos.current_price,
@@ -1136,6 +1141,7 @@ class MonthlyBacktestEngine:
                     symbol_df=symbol_df.tail(60) if len(symbol_df) >= 20 else None,
                     index_df=idx_df.tail(60) if idx_df is not None and not idx_df.empty else None,
                     today_opened=(di == 0),
+                    day_open=float(prev_bar["open"]) if prev_bar is not None else None,
                 )
 
                 if result.should_exit:

@@ -105,6 +105,8 @@ def build_daily_summary_text(
     cancelled: Optional[list[dict]] = None,
     pending_sells: Optional[list[dict]] = None,
     max_positions: int = 20,
+    realized_pnl: Optional[float] = None,
+    unrealized_pnl: Optional[float] = None,
 ) -> str:
     """生成每日模拟盘组合日报。
 
@@ -116,6 +118,10 @@ def build_daily_summary_text(
         cancelled: 今日被取消的买入信号及原因。
         pending_sells: 标记为待卖出的持仓（明日开盘执行）。
         max_positions: 持仓上限（LLM=20，V2=10），仅影响日报显示。
+        realized_pnl: 已实现盈亏合计（已平仓交易，2026-08-12 新增）。
+        unrealized_pnl: 未实现盈亏合计（当前持仓浮盈浮亏，2026-08-12 新增）。
+            展示拆分后，"持仓多只盈利但总收益为负"不再令人困惑
+            （总收益 = 已实现 + 未实现）。
 
     Returns:
         格式化的日报文本，或空字符串（当日无交易时）。
@@ -138,6 +144,13 @@ def build_daily_summary_text(
         lines.append("  ▶ 账户概况")
         lines.append(f"    总资产: {total_value:>10,.2f}")
         lines.append(f"    累计收益: {total_return:>+8.2%}")
+        # 已实现/未实现盈亏拆分（2026-08-12 新增）：
+        # 累计收益 = 已实现（已平仓）+ 未实现（当前持仓），避免持仓全红但总收益为负的困惑
+        if realized_pnl is not None or unrealized_pnl is not None:
+            lines.append(
+                f"    已实现盈亏: {realized_pnl or 0:>+10,.2f}  |  "
+                f"未实现盈亏: {unrealized_pnl or 0:>+10,.2f}"
+            )
         lines.append(f"    现金: {cash:>10,.2f}  |  持仓市值: {stock_value:>10,.2f}")
         lines.append(f"    持仓数量: {pos_count}/{max_positions}")
         lines.append("")
@@ -256,6 +269,40 @@ def push_daily_summary(settings: Settings, text: str) -> None:
             logger.info("sim: 组合日报推送成功")
     except Exception as e:
         logger.warning(f"sim: 组合日报推送异常: {e}")
+
+
+def push_sim_alert(settings: Settings, message: str) -> None:
+    """模拟盘运行异常/跳过时推送微信告警（2026-08-12 新增）。
+
+    背景：2026-07-30 模拟盘更新崩溃（UNIQUE constraint）时只记了日志，
+    无人发现，止损执行被延迟。此后 --sim-update 的异常和数据未就绪跳过
+    都会推送此告警，避免静默失败。
+
+    Args:
+        settings: 系统配置（wxpusher token/topic）。
+        message: 告警内容（异常信息或跳过原因）。
+    """
+    from datetime import date as _date
+
+    try:
+        from wxpusher import WxPusher
+        text = (
+            f"⚠️ Sequoia-X 模拟盘告警 | {_date.today().strftime('%m-%d')}\n\n"
+            f"{message}\n\n"
+            f"请检查 logs/pipeline_{_date.today().strftime('%Y%m%d')}.log"
+        )
+        result = WxPusher.send_message(
+            content=text,
+            token=settings.wxpusher_token,
+            topic_ids=settings.wxpusher_topic_ids,
+            content_type=1,
+        )
+        if result.get("code") == 1000:
+            logger.info(f"sim: 模拟盘告警推送成功: {message[:40]}")
+        else:
+            logger.warning(f"sim: 模拟盘告警推送失败: {result}")
+    except Exception as e:
+        logger.warning(f"sim: 模拟盘告警推送异常: {e}")
 
 
 # ════════════════════════════════════════════════════════════

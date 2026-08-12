@@ -64,6 +64,7 @@ from sequoia_x.simulation.models import (
     get_account_summary,
     get_recent_account_days,
     get_cash_balance,
+    get_realized_unrealized_pnl,
 )
 from sequoia_x.simulation.signals import (
     mark_signal_executed,
@@ -470,6 +471,8 @@ class SimEngine:
                 continue
 
             # 运行卖出规则
+            # v1.4 (2026-08-12): 传入今日开盘价 day_open → 硬止损"开盘价优先+收盘确认"双轨触发，
+            # 跳空低开跌破止损线当天即标记卖出，收窄 T+1 模型下的止损跳空亏损
             result = evaluate_exit(
                 entry_price=updated_pos["buy_price"],
                 current_price=close_price,
@@ -479,6 +482,7 @@ class SimEngine:
                 symbol_df=df.tail(30),
                 index_df=index_df.tail(30) if index_df is not None else None,
                 today_opened=bool(updated_pos.get("today_opened", 0)),
+                day_open=float(today_row["open"]) if "open" in today_row.index else None,
             )
 
             if result.should_exit:
@@ -633,6 +637,8 @@ class SimEngine:
         try:
             positions = get_all_positions(self.db_path)
             account = get_account_summary(self.db_path, today_str)
+            # 已实现/未实现盈亏拆分（2026-08-12 新增，日报展示）
+            realized, unrealized = get_realized_unrealized_pnl(self.db_path)
             text = build_daily_summary_text(
                 today_str=today_str,
                 account=account,
@@ -642,6 +648,8 @@ class SimEngine:
                 cancelled=results.get("cancelled", []),
                 pending_sells=results.get("marked_sell", []),
                 max_positions=self.max_positions,
+                realized_pnl=realized,
+                unrealized_pnl=unrealized,
             )
             if text:
                 from wxpusher import WxPusher

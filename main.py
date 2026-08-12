@@ -144,6 +144,7 @@ def main() -> None:
             #  模拟盘更新模式（管线 Step 2.5）
             # ═══════════════════════════════════════════════
             logger.info("=== 模拟盘更新模式 ===")
+            from sequoia_x.simulation.reporter import push_sim_alert
             try:
                 from sequoia_x.simulation.engine import SimEngine
                 sim = SimEngine(settings)
@@ -154,8 +155,14 @@ def main() -> None:
                     f"模拟盘更新完成: status={status}, "
                     f"actions={' / '.join(actions) if actions else '无操作'}"
                 )
+                # 数据未就绪跳过 → 当日模拟盘没跑，推微信告警（2026-08-12 新增）
+                # 非交易日跳过（无 detail）是正常现象，不告警
+                if status == "skipped" and result.get("detail"):
+                    logger.warning(f"模拟盘更新跳过: {result.get('detail')}")
+                    push_sim_alert(settings, f"模拟盘更新跳过，当日未运行\n原因: {result.get('detail')}")
             except Exception as e:
                 logger.exception(f"模拟盘更新异常: {e}")
+                push_sim_alert(settings, f"模拟盘更新异常: {e}")
             return
 
         if args.sim_report:

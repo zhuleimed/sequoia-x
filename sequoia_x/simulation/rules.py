@@ -94,18 +94,43 @@ class ExitRuleResult:
 # ════════════════════════════════════════════════════════════
 
 
-def _check_hard_stop(entry_price: float, current_price: float) -> tuple[int, str]:
+def _check_hard_stop(entry_price: float, current_price: float,
+                     day_open: Optional[float] = None) -> tuple[int, str]:
     """S1/S2 硬止损检查。
+
+    双轨触发（2026-08-12 新增，修复 T+1 跳空亏损扩大问题）：
+      - 收盘确认：current_price ≤ 止损线（原逻辑）
+      - 开盘价优先：day_open ≤ 止损线也触发——跳空低开直接跌破止损线
+        （即使收盘拉回止损线上方）当天即标记卖出，次日开盘执行，
+        比纯收盘确认早一天，收窄连续大跌/跌停时的实际亏损。
+    检查价取 min(收盘, 开盘)，reason 中标注触发来源。
+
+    Args:
+        entry_price: 持仓成本价。
+        current_price: 当日收盘价。
+        day_open: 当日开盘价（开盘价优先触发用；None=仅收盘确认，保持旧行为）。
 
     Returns:
         (score, reason)
     """
     if entry_price <= 0:
         return 0, ""
-    pnl_pct = (current_price - entry_price) / entry_price
+    stop_level = entry_price * (1 + HARD_STOP_LOSS)
 
-    if pnl_pct <= HARD_STOP_LOSS:
-        return SCORE_HARD_STOP, f"硬止损: 成本{entry_price:.2f}×{(1+HARD_STOP_LOSS):.2f}={entry_price*(1+HARD_STOP_LOSS):.2f}, 当前{current_price:.2f}"
+    # 双轨：开盘价优先 + 收盘确认，取两者更低者作为检查价
+    check_price = current_price
+    trigger_src = "收盘"
+    if day_open is not None and day_open > 0 and day_open < current_price:
+        check_price = day_open
+        trigger_src = "开盘"
+
+    pnl_pct = (check_price - entry_price) / entry_price
+
+    if check_price <= stop_level:
+        return SCORE_HARD_STOP, (
+            f"硬止损({trigger_src}触发): 成本{entry_price:.2f}×"
+            f"{(1+HARD_STOP_LOSS):.2f}={stop_level:.2f}, {trigger_src}{check_price:.2f}"
+        )
 
     if pnl_pct <= HARD_STOP_LOSS_WARN:
         return SCORE_HARD_STOP_WARN, f"止损预警: 亏损{pnl_pct:.1%}≥{HARD_STOP_LOSS_WARN:.0%}"
@@ -345,12 +370,16 @@ def evaluate_exit(
     symbol_df: Optional[pd.DataFrame] = None,
     index_df: Optional[pd.DataFrame] = None,
     today_opened: bool = False,
+    day_open: Optional[float] = None,
 ) -> ExitRuleResult:
     """对单只持仓进行全维度卖出评分。
 
     T+1 保护：今日买入（today_opened=True）不触发任何卖出。
 
     v1.3 新增: LSTM 预测因子 + 最低持有天数保护。
+    v1.4 新增 (2026-08-12): day_open 开盘价优先触发硬止损（双轨止损），
+    仅影响 S 硬止损规则；其余规则仍用收盘价评估。
+    该参数为可选，不传时保持旧行为（回测引擎兼容）。
 
     Args:
         entry_price: 持仓成本价。
@@ -361,6 +390,7 @@ def evaluate_exit(
         symbol_df: 个股日线 DataFrame（含 close 列）。
         index_df: 指数日线 DataFrame（含 close 列，用于相对强弱）。
         today_opened: 今日是否新开仓（T+1 保护）。
+        day_open: 当日开盘价（v1.4: 硬止损开盘价优先触发；None=仅收盘确认）。
 
     Returns:
         ExitRuleResult。
@@ -372,8 +402,8 @@ def evaluate_exit(
     breakdown: list[tuple[str, int]] = []
     total_score = 0
 
-    # ── S 硬止损 ──
-    score, reason = _check_hard_stop(entry_price, current_price)
+    # ── S 硬止损（v1.4 双轨: 开盘价优先 + 收盘确认）──
+    score, reason = _check_hard_stop(entry_price, current_price, day_open)
     if score > 0:
         breakdown.append((f"S(硬止损)", score))
         total_score += score

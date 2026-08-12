@@ -78,7 +78,8 @@ class V2BacktestEngine:
                 continue
 
             # 生成信号（T1过滤→T2排序→T3调仓）
-            signals = self._generate_signals(predictions)
+            # eval_date=prev_date: current_price 为 T-1 收盘，双轨止损用 T-1 开盘价
+            signals = self._generate_signals(predictions, eval_date=prev_date)
 
             # 执行卖出
             self._execute_sells(signals.get("sell", []), today)
@@ -123,8 +124,16 @@ class V2BacktestEngine:
                 })
         return results
 
-    def _generate_signals(self, predictions: list[dict]) -> dict:
-        """生成买卖信号。"""
+    def _generate_signals(self, predictions: list[dict],
+                          eval_date: str | None = None) -> dict:
+        """生成买卖信号。
+
+        Args:
+            predictions: 预测结果列表。
+            eval_date: 评估基准日（即 current_price 对应日 = T-1）。
+                硬止损双轨触发（2026-08-12，与实盘 SimEngine 口径一致）需要
+                T-1 开盘价参与止损判定；None=仅收盘确认（旧行为）。
+        """
         signals: dict = {"buy": [], "sell": []}
 
         # 卖出：运行 rules.py 的 evaluate_exit（复用共享模块）
@@ -144,6 +153,8 @@ class V2BacktestEngine:
                 symbol_df=df.tail(60) if df is not None and not df.empty else None,
                 index_df=idx_df.tail(60) if idx_df is not None and not idx_df.empty else None,
                 today_opened=False,
+                # 双轨止损：T-1 开盘价也参与硬止损判定（跳空破线当天即触发）
+                day_open=self._get_open_price(symbol, eval_date) if eval_date else None,
             )
             # V2 特有：叠加 T1/T2 预测因子
             pred_for_sym = next((p for p in predictions if p["symbol"] == symbol), None)

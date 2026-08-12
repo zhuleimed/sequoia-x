@@ -33,6 +33,7 @@ from sequoia_x.simulation.engine import SimEngine
 from sequoia_x.simulation.models import (
     get_account_summary,
     get_all_positions,
+    get_realized_unrealized_pnl,
 )
 from sequoia_x.simulation.reporter import build_daily_summary_text, push_daily_summary
 
@@ -89,6 +90,8 @@ def main() -> None:
         try:
             account = get_account_summary(SIM_V2_DB, today)
             positions = get_all_positions(SIM_V2_DB)
+            # 已实现/未实现盈亏拆分（2026-08-12 新增，日报展示）
+            realized, unrealized = get_realized_unrealized_pnl(SIM_V2_DB)
             text = build_daily_summary_text(
                 today,
                 account,
@@ -98,6 +101,8 @@ def main() -> None:
                 cancelled=result.get("cancelled"),
                 pending_sells=result.get("marked_sell"),
                 max_positions=10,
+                realized_pnl=realized,
+                unrealized_pnl=unrealized,
             )
             header = f"【V2 模型模拟盘日报 {today}】\n"
             push_daily_summary(settings, header + text)

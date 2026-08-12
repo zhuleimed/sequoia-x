@@ -118,7 +118,8 @@ class LSTMBacktestEngine:
                 continue
 
             # Step 3: 生成信号
-            signals = self._generate_signals(predictions, today)
+            # eval_date=prev_date: current_price 为 T-1 收盘，双轨止损用 T-1 开盘价
+            signals = self._generate_signals(predictions, today, eval_date=prev_date)
 
             # Step 4: 执行卖出（用今天开盘价）
             self._execute_sells(signals.get("sell", []), today)
@@ -185,11 +186,19 @@ class LSTMBacktestEngine:
 
     def _generate_signals(
         self, predictions: list[tuple[str, float]], date_str: str,
+        eval_date: str | None = None,
     ) -> dict:
         """生成买卖信号。
 
         卖出: 使用 simulation/rules.py 的 evaluate_exit (13条规则 + LSTM因子 + min_hold)
         买入: 取预测收益率最高的 TOP_N 只
+
+        Args:
+            predictions: (symbol, pred_return) 列表。
+            date_str: 当日（执行日）。
+            eval_date: 评估基准日（即 current_price 对应日 = T-1）。
+                硬止损双轨触发（2026-08-12，与实盘 SimEngine 口径一致）需要
+                T-1 开盘价参与止损判定；None=仅收盘确认（旧行为）。
         """
         import json
         from pathlib import Path
@@ -231,6 +240,8 @@ class LSTMBacktestEngine:
                     symbol_df=df.tail(60) if df is not None else None,
                     index_df=idx_df.tail(60) if idx_df is not None else None,
                     today_opened=False,
+                    # 双轨止损：T-1 开盘价也参与硬止损判定（跳空破线当天即触发）
+                    day_open=self._get_open_price(symbol, eval_date) if eval_date else None,
                 )
                 if result.should_exit:
                     signals["sell"].append(symbol)
