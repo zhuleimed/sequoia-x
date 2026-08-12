@@ -686,6 +686,9 @@ $PY scripts/analyze_monthly_ic.py       # 逐月 IC 分析
 | 对话入口 | 微信里新出现的 ClawBot 好友 |
 | 权限模式 | `--dangerously-skip-permissions`（全权限，与服务器会话一致） |
 | 服务管理 | `cd ~/.claude/skills/wechat-claude-code && npm run daemon -- status/restart/logs` |
+| **常驻保障** | **已开启 `loginctl enable-linger zhulei`（2026-08-12）**——daemon 是 systemd 用户服务，
+  未开 linger 时用户注销（退出 SSH 会话）会连带终止 daemon → 手机断连；
+  开启后注销不再影响，**退出服务器会话手机仍可用**。检查: `loginctl show-user zhulei --property=Linger` |
 
 ## 32. 微信端命令
 
