@@ -3,12 +3,13 @@
 流程（与 LLM 模拟盘同一套 T+1 执行引擎，独立数据库 sim_v2.db）：
   1. V2 模拟盘日操作：SimEngine(sim_v2.db).run_daily()
      - 先执行待卖出（T 日开盘价）→ 释放仓位
-     - 再执行待买入（T 日开盘价）→ 递补
+     - 再执行待买入（T 日开盘价）→ 递补（allow_same_day=True：重训日=交易日时，
+       凌晨重训信号当天晚上以当日开盘价买入，与回测"次月首日开盘买入"口径一致）
      - 收盘价更新估值 + 13 条卖出规则评估 → 标记 pending_sell
-  2. 月末清仓（模式 A，2026-08-17 定稿）：月末最后交易日标记全部持仓
-     "月末清仓（换仓）" → 下月首日开盘先卖后买 → 满仓新 TOP10
-     （与回测 M4+TOP_N=10 的"月末强制清仓 + 月初满仓换仓"口径完全一致）
-  3. V2 组合日报推送（复用 reporter，wxpusher）
+  2. 月末清仓（模式 A，2026-08-17 定稿）：月末最后交易日（akshare 交易日历判定，
+     不固定 30/31 日）以**当日收盘价**卖出全部持仓（liquidate_all_at_close）
+     → 重训后首个交易日满仓新 TOP10（与回测"月末强制清仓 + 月初满仓换仓"口径一致）
+  3. V2 组合日报推送（复用 reporter，wxpusher；月末清仓记录入"今日卖出"）
   4. 月末检测：今天是否月末最后交易日 → 日志提示重训 cron（每月 1 日 03:00）
 
 用法：
@@ -37,7 +38,6 @@ from sequoia_x.simulation.models import (
     get_account_summary,
     get_all_positions,
     get_realized_unrealized_pnl,
-    mark_position_for_sell,
 )
 from sequoia_x.simulation.reporter import build_daily_summary_text, push_daily_summary
 
@@ -105,6 +105,7 @@ def main() -> None:
         db_path=SIM_V2_DB,
         max_positions=10,
         per_stock_budget=100_000,
+        allow_same_day=True,  # 重训信号凌晨产生，交易日当晚以当日开盘价买入（回测口径）
     )
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
     logger.info(f"V2 模拟盘更新完成: {result}")
@@ -112,24 +113,19 @@ def main() -> None:
     # 月末判定（akshare 交易日历优先，失败回退旧逻辑；一天只调一次）
     is_eom = is_last_trading_day_of_month(settings)
 
-    # ── 2. 月末清仓标记（模式 A：与回测 M4+TOP_N=10 月末清仓口径一致）──
-    #    月末最后交易日：把未标记的全部持仓标记"月末清仓（换仓）"，
-    #    下月首个交易日 run_daily 自动先卖后买 → 满仓新 TOP10。
-    #    T+1 保护：当日新买入（today_opened=1）不标记；已标记（规则触发）保持原原因。
+    # ── 2. 月末清仓（模式 A：月末最后交易日以当日收盘价卖出全部持仓）──
+    #    与回测"月末强制清仓 + 月初满仓换仓"口径一致；不固定 30/31 日，
+    #    以 akshare 交易日历判定月末最后交易日；清仓后重写日结（upsert）。
     if is_eom:
-        positions = get_all_positions(SIM_V2_DB)
-        eom_marked: list[dict] = []
-        for p in positions:
-            if p.get("today_opened") or p.get("pending_sell_reason"):
-                continue
-            mark_position_for_sell(SIM_V2_DB, p["id"], "月末清仓（换仓）")
-            eom_marked.append({"symbol": p["symbol"], "reason": "月末清仓（换仓）"})
-        if eom_marked:
+        eom_sold = sim.liquidate_all_at_close(today, reason="月末清仓（换仓）")
+        if eom_sold:
             logger.info(
-                f"📌 月末最后交易日：标记 {len(eom_marked)} 只持仓月末清仓 → "
-                f"下月首日开盘卖出后买入新信号（模式 A 月度换仓）"
+                f"📌 月末最后交易日：以收盘价清仓 {len(eom_sold)} 只 → "
+                f"下月重训后首日满仓新 TOP10（模式 A 月度换仓）"
             )
-            result["marked_sell"] = (result.get("marked_sell") or []) + eom_marked
+            result["sold"] = (result.get("sold") or []) + eom_sold
+        else:
+            logger.info("📌 今天是月末最后交易日（无持仓可清仓）")
 
     # ── 3. V2 组合日报推送 ──
     if not args.no_push:

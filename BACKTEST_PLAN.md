@@ -1593,3 +1593,12 @@ env -u KMP_AFFINITY -u OMP_NUM_THREADS nohup python -u worker.py > logs/x.log 2>
 5. 备注：本次 A 结果 +988.1% vs 旧记录 +944.8%（8/2）——差异来自 prediction_cache
    8/10 更新（后复权 feature_version=3 口径重建），口径更新影响（+4.5%）大于 A/B 模式差异
 
+### 29.4 模拟盘落地口径（2026-08-17 用户明确）
+
+模拟盘实现模式 A 时，用户明确两处执行时点（与回测的细微差异是有意的）：
+- **清仓**：月末**最后交易日**（akshare 交易日历判定，不固定 30/31 日）以**当日收盘价**卖出全部持仓
+  （回测用最后交易日开盘价；模拟盘 18:10 运行时收盘价已知且更真实）——`SimEngine.liquidate_all_at_close`
+- **买入**：重训日（1 日 03:00）若为交易日 → **当天晚上以当日开盘价**买入（信号凌晨已就绪，不延迟一天）；
+  非交易日顺延首个交易日——`allow_same_day=True` 机制（`get_pending_signals`/`SimEngine` 参数，
+  LLM 模拟盘默认 False=严格 T+1 不变）。与回测"次月首日开盘买入"口径一致（回测无额外 T+1 延迟）
+

@@ -192,12 +192,16 @@ def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
     return count
 
 
-def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list[dict]:
+def get_pending_signals(db_path: str, target_date: Optional[str] = None,
+                        allow_same_day: bool = False) -> list[dict]:
     """获取待执行的买入信号（仅限 target_date 之前写入的），按 LLM 评分降序排列。
-    今天写入的信号不会在今天执行，符合 T+1 模型。
+    今天写入的信号不会在今天执行，符合 T+1 模型（allow_same_day=True 例外）。
 
     Args:
         target_date: 要执行的日期（默认为今天），信号 buy_date < target_date。
+        allow_same_day: True 时信号 buy_date <= target_date（当天信号当天执行）。
+            V2 模拟盘专用：月度重训信号凌晨（03:00）产生，若重训日=交易日，
+            当晚以当日开盘价买入（与回测"次月首日开盘买入"口径一致）。
 
     Returns:
         [{"id": 1, "symbol": "600519", "strategy_from": "...", "llm_score": 4.5}, ...]
@@ -208,7 +212,7 @@ def get_pending_signals(db_path: str, target_date: Optional[str] = None) -> list
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, symbol, strategy_from, llm_score, buy_date FROM sim_buy_signals "
-            "WHERE status = 'pending' AND buy_date < ? "
+            f"WHERE status = 'pending' AND buy_date {'<=' if allow_same_day else '<'} ? "
             "ORDER BY llm_score IS NOT NULL DESC, llm_score DESC, buy_date ASC, id ASC",
             (target_date,),
         ).fetchall()

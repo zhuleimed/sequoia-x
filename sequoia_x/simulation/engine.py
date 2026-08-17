@@ -98,6 +98,7 @@ class SimEngine:
         db_path: str | None = None,
         max_positions: int | None = None,
         per_stock_budget: float | None = None,
+        allow_same_day: bool = False,
     ) -> None:
         self.settings = settings
         self.engine = DataEngine(settings)
@@ -106,6 +107,9 @@ class SimEngine:
         # 持仓参数可实例级覆盖（V2=10只×10万，LLM 默认 20只×5万 不变）
         self.max_positions = max_positions or MAX_POSITIONS
         self.per_stock_budget = per_stock_budget or PER_STOCK_BUDGET
+        # V2 专用：True 时当日信号当日执行（重训信号凌晨产生，交易日当晚以当日开盘价买入；
+        # LLM 模拟盘默认 False=严格 T+1 不变）
+        self.allow_same_day = allow_same_day
         init_sim_tables(self.db_path)
 
     # ════════════════════════════════════════════════════════
@@ -281,8 +285,53 @@ class SimEngine:
 
         return sold
 
+    def liquidate_all_at_close(self, date_str: str,
+                               reason: str = "月末清仓（换仓）") -> list[dict]:
+        """月末清仓（模式 A）：以指定日收盘价卖出全部持仓。
+
+        与回测"月末强制清仓"口径对应——但模拟盘在月末最后交易日收盘后（18:10 运行）
+        以**当日收盘价**直接卖出（回测用当日开盘价，晚 18:10 时收盘价更真实）。
+        T+1 保护：当日新买入（today_opened=1）跳过，次日再处理。
+
+        Returns:
+            已卖出交易列表（供日报"今日卖出"显示）。
+        """
+        sold: list[dict] = []
+        for pos in get_all_positions(self.db_path):
+            if pos.get("today_opened"):
+                logger.info(f"sim 月末清仓 {pos['symbol']}: 当日买入 T+1 保护，跳过")
+                continue
+            today_data = self._get_today_data(pos["symbol"], date_str)
+            if today_data is None:
+                logger.warning(f"sim 月末清仓 {pos['symbol']}: 无 {date_str} 行情，跳过（保留持仓）")
+                continue
+            close_price = today_data["close"]
+            if close_price <= 0:
+                logger.warning(f"sim 月末清仓 {pos['symbol']}: 收盘价无效，跳过")
+                continue
+            trade = self._execute_sell(
+                pos_id=pos["id"],
+                symbol=pos["symbol"],
+                shares=pos["shares"],
+                buy_price=pos["buy_price"],
+                buy_date=pos["buy_date"],
+                sell_price=close_price,        # ← 关键：以当日收盘价卖出
+                hold_days=pos["hold_days"],
+                total_cost=pos["total_cost"],
+                strategy_from=pos.get("strategy_from", ""),
+                exit_reason=reason,
+            )
+            if trade:
+                sold.append(trade)
+                push_trade_report(self.settings, trade)
+        if sold:
+            # 清仓后重写日结（upsert 不重复；run_daily 的日结是清仓前状态）
+            self._write_account_daily(date_str)
+            logger.info(f"sim 月末清仓完成: {len(sold)} 只，以 {date_str} 收盘价卖出")
+        return sold
+
     def _execute_pending_buys(self, today_str: str) -> list[dict]:
-        """执行待买入信号（T-1 日 LLM 推荐）。
+        """执行待买入信号（T-1 日 LLM 推荐；V2 重训信号可当日执行）。
 
         用今日 OPEN 价买入。检查涨停/停牌/仓位上限/资金。
         超出仓位的信号取消（不留存）。
@@ -294,7 +343,7 @@ class SimEngine:
         _MAX_POS = self.max_positions
         _PER_BUDGET = self.per_stock_budget
 
-        signals = get_pending_signals(self.db_path)
+        signals = get_pending_signals(self.db_path, allow_same_day=self.allow_same_day)
         if not signals:
             return [], []
 

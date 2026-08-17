@@ -108,12 +108,16 @@ A +988.1% vs B（不清仓补空位）+953.7%，A 略优 3.5%——详见 BACKTE
 - ETF 择时模拟盘（`scripts/sim_etf_timing.py`）为独立体系，不走 SimEngine、无个股硬止损概念
 
 **月末清仓（模式 A，2026-08-17 定稿，V2 模拟盘专用）**：
-- 月末最后交易日（`is_last_trading_day_of_month`，akshare 交易日历优先 + 旧逻辑回退）标记全部持仓
-  "月末清仓（换仓）" → 下月首日开盘先卖后买 → 满仓新 TOP10（与回测 M4+TOP_N=10 口径一致）
-- 实现：`scripts/v2_simulation_daily.py` 月末分支；T+1 保护（today_opened=1 跳过）+ 已标记持仓不覆盖
+- **清仓**：月末**最后交易日**（`is_last_trading_day_of_month`，akshare 交易日历优先，非固定 30/31 日）
+  以**当日收盘价**卖出全部持仓（`SimEngine.liquidate_all_at_close`，T+1 保护：today_opened=1 跳过；
+  清仓后重写日结）→ 满仓空位 10
+- **买入**：重训日（1 日 03:00）若为交易日 → **当天晚上以当日开盘价**买入新 TOP10（信号凌晨已就绪，
+  `allow_same_day=True` 机制）；非交易日顺延首个交易日——与回测"次月首日开盘买入"口径一致
+- 实现：`scripts/v2_simulation_daily.py` 月末分支；`engine.py` 新增 `liquidate_all_at_close` +
+  `allow_same_day` 参数；`models.py get_pending_signals` 新增 `allow_same_day`（默认 False=LLM 严格 T+1 不变）
 - 回测引擎 `monthly_engine.py` 新增 `keep_survivors` 参数（True=模式 B 实验用，默认 False=模式 A 不变）；
   A/B 对比实验见 `experiments/compare_eom_modes.py` + BACKTEST_PLAN §29（A +988.1% vs B +953.7%）
-- LLM 模拟盘不受影响（月末清仓仅 V2 模拟盘启用）
+- LLM 模拟盘不受影响（月末清仓与 allow_same_day 仅 V2 模拟盘启用）
 
 ## 重要：研究状态管理（铁律七，2026-08-07）
 
