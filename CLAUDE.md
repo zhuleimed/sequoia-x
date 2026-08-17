@@ -2,7 +2,11 @@
 
 本文件为 004_sequoia-x 项目的 Claude Code 工作指南。父级规则见 `../CLAUDE.md`。
 
-## 当前状态（2026-08-12 19:08 更新）
+## 当前状态（2026-08-17 更新）
+
+**V2 模拟盘月末清仓模式 A 定稿**：月末最后交易日标记全部持仓"月末清仓（换仓）" → 下月首日
+开盘先卖后买 → 满仓新 TOP10（与回测 M4+TOP_N=10 口径一致）。A/B 回测实证（70 个月）：
+A +988.1% vs B（不清仓补空位）+953.7%，A 略优 3.5%——详见 BACKTEST_PLAN §29。
 
 **60 个月扩展回测已完成**，V2/V3 体系稳定运行中。
 
@@ -102,6 +106,14 @@
 - **新增策略必须复用 SimEngine** 才能自动继承全部卖出规则；绕开 SimEngine 自建执行引擎 = 丢失规则，代码审查必须检查
 - 回测引擎（`model_selection*/backtest/*` 三处）2026-08-12 已同步双轨（传 T-1 开盘价），与实盘模拟口径一致；改造执行时点需同步传 day_open
 - ETF 择时模拟盘（`scripts/sim_etf_timing.py`）为独立体系，不走 SimEngine、无个股硬止损概念
+
+**月末清仓（模式 A，2026-08-17 定稿，V2 模拟盘专用）**：
+- 月末最后交易日（`is_last_trading_day_of_month`，akshare 交易日历优先 + 旧逻辑回退）标记全部持仓
+  "月末清仓（换仓）" → 下月首日开盘先卖后买 → 满仓新 TOP10（与回测 M4+TOP_N=10 口径一致）
+- 实现：`scripts/v2_simulation_daily.py` 月末分支；T+1 保护（today_opened=1 跳过）+ 已标记持仓不覆盖
+- 回测引擎 `monthly_engine.py` 新增 `keep_survivors` 参数（True=模式 B 实验用，默认 False=模式 A 不变）；
+  A/B 对比实验见 `experiments/compare_eom_modes.py` + BACKTEST_PLAN §29（A +988.1% vs B +953.7%）
+- LLM 模拟盘不受影响（月末清仓仅 V2 模拟盘启用）
 
 ## 重要：研究状态管理（铁律七，2026-08-07）
 

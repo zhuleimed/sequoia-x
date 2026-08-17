@@ -238,6 +238,7 @@ class MonthlyBacktestEngine:
         max_pool_size: int = 0,  # 0=全量，>0=限制股票池大小（快速测试）
         prediction_cache: dict | None = None,  # 月度预测缓存，提供则跳过训练+预测
         fusion_method: str = "pred_std",  # "pred_std"=原启发式 | "ic_weighted"=滚动IC加权（§25 方案1）
+        keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
     ):
         self.cfg = cfg or get_config()
         self.engine = engine or DataEngine(Settings())
@@ -248,6 +249,7 @@ class MonthlyBacktestEngine:
         self.max_pool_size = max_pool_size
         self.prediction_cache = prediction_cache  # {month: {symbols, t2, t1, t3}}
         self.fusion_method = fusion_method
+        self.keep_survivors = keep_survivors
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -416,12 +418,17 @@ class MonthlyBacktestEngine:
             )
             logger.info(f"  信号: {len(signals)} 只 (原始 TOP_N={self.top_n})")
 
-            # 4f. 月末强制卖出全部持仓
-            if self.positions:
+            # 4f. 月末强制卖出全部持仓（模式 B: 幸存者不清仓，留给次月）
+            if self.positions and not self.keep_survivors:
                 self._sell_all_positions(cycle.sell_date, reason="月末强制清仓")
 
             # 4g. 次月开盘买入
+            # 模式 B: 只买空位（top_n - 当前持仓），与实盘 SimEngine 仓位上限语义一致；
+            # 模式 A: 月初空仓 → 空位=top_n，行为不变
             if signals:
+                if self.keep_survivors:
+                    slots = max(0, self.top_n - len(self.positions))
+                    signals = signals[:slots]
                 self._execute_monthly_buy(signals, cycle.buy_date)
 
             # 4h. 日级别持仓管理循环
@@ -989,6 +996,9 @@ class MonthlyBacktestEngine:
 
         for sig in signals:
             sym = sig["symbol"]
+            # 模式 B: 幸存者可能再次被选中 → 已在持仓中的跳过（与 SimEngine"已在持仓中"取消语义一致）
+            if sym in self.positions:
+                continue
             weight = sig.get("weight", 1.0)
 
             open_price = self._get_price(sym, buy_date, price_col="open")
@@ -1157,16 +1167,20 @@ class MonthlyBacktestEngine:
             self._mark_to_market(today)
             self._record_daily(today)
 
-        # 月末：清仓所有剩余持仓 + 待卖出
+        # 月末：处理最后一日仍未执行的待卖出；模式 A 额外强制清仓所有剩余持仓
         for sym in list(pending_sells):
             if sym in self.positions:
                 self._sell_position(sym, cycle.sell_date, reason="规则触发(月末)")
-        self._sell_all_positions(cycle.sell_date, reason="月末强制清仓")
+        if not self.keep_survivors:
+            self._sell_all_positions(cycle.sell_date, reason="月末强制清仓")
 
     def _settle_month(self, cycle: MonthlyCycle) -> float:
         """月末结算：记录月度收益率。"""
-        # 持仓应已全部清仓
-        total_value = self.cash  # 全部为现金
+        # 模式 A: 持仓应已全部清仓（全部为现金）；
+        # 模式 B: 月末仍有幸存持仓，按总资产（现金+市值）计算
+        total_value = self.cash + sum(
+            p.market_value for p in self.positions.values()
+        ) if self.keep_survivors else self.cash
         # 计算本月收益
         if len(self.daily_records) > 0:
             month_start_value = self._get_month_start_value(cycle)

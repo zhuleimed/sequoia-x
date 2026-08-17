@@ -5,8 +5,11 @@
      - 先执行待卖出（T 日开盘价）→ 释放仓位
      - 再执行待买入（T 日开盘价）→ 递补
      - 收盘价更新估值 + 13 条卖出规则评估 → 标记 pending_sell
-  2. V2 组合日报推送（复用 reporter，wxpusher）
-  3. 月末检测：今天是否月末最后交易日 → 日志提示重训 cron（每月 1 日 03:00）
+  2. 月末清仓（模式 A，2026-08-17 定稿）：月末最后交易日标记全部持仓
+     "月末清仓（换仓）" → 下月首日开盘先卖后买 → 满仓新 TOP10
+     （与回测 M4+TOP_N=10 的"月末强制清仓 + 月初满仓换仓"口径完全一致）
+  3. V2 组合日报推送（复用 reporter，wxpusher）
+  4. 月末检测：今天是否月末最后交易日 → 日志提示重训 cron（每月 1 日 03:00）
 
 用法：
   python scripts/v2_simulation_daily.py            # 日常（pipeline 调用）
@@ -34,6 +37,7 @@ from sequoia_x.simulation.models import (
     get_account_summary,
     get_all_positions,
     get_realized_unrealized_pnl,
+    mark_position_for_sell,
 )
 from sequoia_x.simulation.reporter import build_daily_summary_text, push_daily_summary
 
@@ -44,12 +48,32 @@ SIM_V2_DB = str(PROJECT_DIR / "data" / "sim_v2.db")
 
 
 def is_last_trading_day_of_month(settings) -> bool:
-    """判断今天是否为月末最后交易日（查主库 stock_daily，用于重训定时提示）。
+    """判断今天是否为月末最后交易日。
 
-    注意：数据只同步到今天，MAX(date) 恒等于 today，不能单独作为月末依据；
-    必须叠加"今天已是当月下旬（≥25 日）"条件，否则月初（如 8-3）会误判。
+    用途：月末清仓标记（模式 A）+ 重训定时提示。
+    优先用 akshare 交易日历（准确，覆盖 2 月春节前 <25 日的月末交易日）；
+    失败回退旧逻辑（≥25 日 + 今日已同步）——网络异常不阻断清仓判定主链路。
+
+    旧逻辑局限：数据只同步到今天，MAX(date) 恒等于 today，不能单独作为月末依据；
+    必须叠加"今天已是当月下旬（≥25 日）"，否则月初（如 8-3）会误判。
+    春节前最后交易日 <25 日（如 2023-01-20）会漏判 → 回退逻辑已知局限。
     """
     today = datetime.now().strftime("%Y-%m-%d")
+
+    # 方案 1：akshare 交易日历（准确）
+    try:
+        import akshare as ak
+        cal = ak.tool_trade_date_hist_sina()
+        dates = [str(d)[:10] for d in cal["trade_date"]]
+        if today in dates:
+            idx = dates.index(today)
+            if idx < len(dates) - 1:
+                return dates[idx + 1][:7] != today[:7]
+            return True  # 今天是日历最后一天
+    except Exception:
+        logger.warning("akshare 交易日历获取失败，回退旧判定逻辑")
+
+    # 方案 2：回退（≥25 日 + 今日已同步）
     if int(today[8:10]) < 25:
         return False
     conn = sqlite3.connect(settings.db_path)  # stock_daily 在主库
@@ -85,7 +109,29 @@ def main() -> None:
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
     logger.info(f"V2 模拟盘更新完成: {result}")
 
-    # ── 2. V2 组合日报推送 ──
+    # 月末判定（akshare 交易日历优先，失败回退旧逻辑；一天只调一次）
+    is_eom = is_last_trading_day_of_month(settings)
+
+    # ── 2. 月末清仓标记（模式 A：与回测 M4+TOP_N=10 月末清仓口径一致）──
+    #    月末最后交易日：把未标记的全部持仓标记"月末清仓（换仓）"，
+    #    下月首个交易日 run_daily 自动先卖后买 → 满仓新 TOP10。
+    #    T+1 保护：当日新买入（today_opened=1）不标记；已标记（规则触发）保持原原因。
+    if is_eom:
+        positions = get_all_positions(SIM_V2_DB)
+        eom_marked: list[dict] = []
+        for p in positions:
+            if p.get("today_opened") or p.get("pending_sell_reason"):
+                continue
+            mark_position_for_sell(SIM_V2_DB, p["id"], "月末清仓（换仓）")
+            eom_marked.append({"symbol": p["symbol"], "reason": "月末清仓（换仓）"})
+        if eom_marked:
+            logger.info(
+                f"📌 月末最后交易日：标记 {len(eom_marked)} 只持仓月末清仓 → "
+                f"下月首日开盘卖出后买入新信号（模式 A 月度换仓）"
+            )
+            result["marked_sell"] = (result.get("marked_sell") or []) + eom_marked
+
+    # ── 3. V2 组合日报推送 ──
     if not args.no_push:
         try:
             account = get_account_summary(SIM_V2_DB, today)
@@ -110,14 +156,14 @@ def main() -> None:
         except Exception as e:
             logger.warning(f"V2 日报推送失败: {e}")
 
-    # ── 3. 月末检测：提示重训（cron 每月 1 日 03:00 自动触发）──
-    if is_last_trading_day_of_month(settings):
+    # ── 4. 月末/非月末提示（cron 每月 1 日 03:00 自动触发）──
+    if is_eom:
         logger.info(
             "📌 今天是月末最后交易日——V2 月度重训将在下月 1 日 03:00 自动启动"
             "（cron: 0 3 1 * *（2026-08-10 由 00:00 调整） → v2_monthly_retrain.py）"
         )
     else:
-        logger.info("非月末，无重训安排")
+        logger.info("非月末，无重训/清仓安排")
 
 
 if __name__ == "__main__":
