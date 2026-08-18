@@ -153,6 +153,17 @@ A +988.1% vs B（不清仓补空位）+953.7%，A 略优 3.5%——详见 BACKTE
 
 ## 已知 Bug 与修复
 
+### pctChg 全历史缺失 + 增量口径修正（已修复 2026-08-18）
+**背景**: stock_daily.pctChg 仅最近 11 天有值（8/3 起），全历史 NULL。
+**修复**: 新增 `scripts/backfill_pctchg.py`（baostock adjustflag=3 全量补写，断点续跑，
+同命令恢复）——与腾讯 bfq / 库已有 11 天数据逐日 100% 一致。
+**增量口径**（sync.py 4 处修改）: 腾讯/新浪主路径 pctChg 改用 **腾讯快照 close_yest
+（标准昨收，除权日=除权基准价）** 计算，与 baostock 口径一致（旧逻辑用实际前收自算，
+除权日必错，如 688167 得 -35.9% vs 标准 -7.13%）；`_write_to_db` 的 pctChg 不再
+ffill/fillna(0.0)——**pctChg 缺失一律写 NULL**（0.0 是假数据，消费者自行计算才是兜底）；
+`_fill_ohlcv_gaps` 首行 NaN 同样落 NULL。用户决策：**数据源失败写空值（NULL）**，程序
+运算时自行 `close.pct_change()` 计算。
+
 ### t4_pending 断点续跑 Bug（已修复 2026-07-26）
 **位置**: `evaluate.py:100` | **修复**: 过滤 `t4_pending=true` 的 Fold
 

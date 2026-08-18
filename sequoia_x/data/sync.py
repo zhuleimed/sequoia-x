@@ -192,7 +192,8 @@ class DataSync:
             df = df.sort_values("date")
 
         # 其他数值字段：用上一交易日数据向前填充，仍为空则填0
-        ffill_cols = [c for c in numeric_cols if c != "volume" and c in df.columns]
+        # pctChg 除外：单日属性，前向填充=假数据；缺失必须留 NULL（消费者自行计算）
+        ffill_cols = [c for c in numeric_cols if c not in ("volume", "pctChg") and c in df.columns]
         if ffill_cols:
             df[ffill_cols] = df[ffill_cols].ffill().fillna(0.0)
 
@@ -773,13 +774,14 @@ class DataSync:
                                     latest["symbol"] = sym
                                     rt = _tencent_inst.get_realtime(tc_code)
                                     latest["amount"] = rt["amount"] if rt else 0.0
-                                    latest["pctChg"] = 0.0
-                                    if len(tc_df) >= 2:
-                                        prev_close = tc_df.iloc[-2]["close"]
-                                        if prev_close and prev_close > 0:
-                                            latest["pctChg"] = round(
-                                                (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
-                                            )
+                                    # pctChg：用腾讯快照标准昨收（除权日=除权基准价）计算，
+                                    # 与 baostock adjustflag=3 口径一致；快照不可用留 NaN → 写库 NULL
+                                    if rt and rt.get("close_yest", 0) > 0:
+                                        latest["pctChg"] = round(
+                                            (latest.iloc[0]["close"] - rt["close_yest"]) / rt["close_yest"] * 100, 2
+                                        )
+                                    else:
+                                        latest["pctChg"] = float("nan")
                                     latest["turnover"] = 0.0
                                     # 估值字段：peTTM/pbMRQ 从腾讯实时行情获取；psTTM/pcfNcfTTM 暂无源，填0等baostock恢复
                                     latest["peTTM"] = float(rt["pe"]) if (rt and rt.get("pe") is not None) else 0.0
@@ -797,13 +799,8 @@ class DataSync:
                                 if not latest.empty:
                                     latest["symbol"] = sym
                                     latest["amount"] = 0.0
-                                    latest["pctChg"] = 0.0
-                                    if len(sina_df) >= 2:
-                                        prev_close = sina_df.iloc[-2]["close"]
-                                        if prev_close and prev_close > 0:
-                                            latest["pctChg"] = round(
-                                                (latest.iloc[0]["close"] - prev_close) / prev_close * 100, 2
-                                            )
+                                    # pctChg：默认 NaN（写库 NULL），下方用腾讯快照标准昨收计算覆盖
+                                    latest["pctChg"] = float("nan")
                                     latest["turnover"] = 0.0
                                     # 估值字段：即使OHLCV来自Sina，仍从腾讯实时行情获取peTTM/pbMRQ
                                     try:
@@ -811,6 +808,11 @@ class DataSync:
                                             TencentSource.to_baostock_code(bs_code))
                                         latest["peTTM"] = float(sina_rt["pe"]) if (sina_rt and sina_rt.get("pe") is not None) else 0.0
                                         latest["pbMRQ"] = float(sina_rt["pb"]) if (sina_rt and sina_rt.get("pb") is not None) else 0.0
+                                        # pctChg：腾讯快照昨收（除权日=除权基准价），与 baostock 口径一致
+                                        if sina_rt and sina_rt.get("close_yest", 0) > 0:
+                                            latest["pctChg"] = round(
+                                                (latest.iloc[0]["close"] - sina_rt["close_yest"]) / sina_rt["close_yest"] * 100, 2
+                                            )
                                     except Exception:
                                         latest["peTTM"] = 0.0
                                         latest["pbMRQ"] = 0.0
@@ -1799,12 +1801,13 @@ class DataSync:
                 tc_df = tc_df.copy()
                 tc_df["symbol"] = sym
                 tc_df["amount"] = 0.0
-                # 计算 pctChg
+                # 计算 pctChg（自算=实际前收口径，补缺路径可接受；主路径用腾讯快照标准昨收）
+                # 首行无前收 → NaN 落库 NULL，不填 0 造假数据
                 if "close" in tc_df.columns and len(tc_df) >= 2:
                     tc_df["pctChg"] = tc_df["close"].pct_change() * 100
-                    tc_df["pctChg"] = tc_df["pctChg"].fillna(0.0).round(2)
+                    tc_df["pctChg"] = tc_df["pctChg"].round(2)
                 else:
-                    tc_df["pctChg"] = 0.0
+                    tc_df["pctChg"] = float("nan")
                 tc_df["turnover"] = 0.0
                 tc_df["peTTM"] = None
                 tc_df["pbMRQ"] = None

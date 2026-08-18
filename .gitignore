@@ -40,3 +40,4 @@ hypothesis/
 # Kronos 3b 微调产物（模型权重/微调数据 CSV 不入库）
 experiments/kronos/finetune_csv/finetuned/
 experiments/kronos/finetune_csv/data/*.csv
+scripts/tmp/
