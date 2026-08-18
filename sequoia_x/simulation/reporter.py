@@ -233,10 +233,16 @@ def build_daily_summary_text(
 # ════════════════════════════════════════════════════════════
 
 
-def push_trade_report(settings: Settings, trade: dict) -> None:
-    """推送单股平仓报告到微信。"""
+def push_trade_report(settings: Settings, trade: dict, tag: str = "") -> None:
+    """推送单股平仓报告到微信。
+
+    Args:
+        tag: 分组序号前缀（如【LLM 1】），空串=不加前缀（向后兼容）。
+    """
     try:
         text = build_trade_report_text(trade)
+        if tag:
+            text = f"{tag}\n{text}"
         from wxpusher import WxPusher
         result = WxPusher.send_message(
             content=text,

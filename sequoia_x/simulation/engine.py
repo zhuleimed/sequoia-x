@@ -99,6 +99,7 @@ class SimEngine:
         max_positions: int | None = None,
         per_stock_budget: float | None = None,
         allow_same_day: bool = False,
+        push_tag: str = "",
     ) -> None:
         self.settings = settings
         self.engine = DataEngine(settings)
@@ -110,7 +111,20 @@ class SimEngine:
         # V2 专用：True 时当日信号当日执行（重训信号凌晨产生，交易日当晚以当日开盘价买入；
         # LLM 模拟盘默认 False=严格 T+1 不变）
         self.allow_same_day = allow_same_day
+        # 推送分组标识（"LLM"/"V2"）：消息加【组名 序号】前缀，微信端乱序时可识别归属。
+        # 空串=不加前缀（LSTM 等未启用场景，行为不变）
+        self.push_tag = push_tag
+        self._push_seq = 0  # 组内序号（卖出报告/清仓报告计数，日报为最后一条）
         init_sim_tables(self.db_path)
+
+    def _push_trade_report(self, trade: dict) -> None:
+        """推送交易报告（带分组序号前缀）。"""
+        self._push_seq += 1
+        push_trade_report(self.settings, trade, tag=self._push_tag_prefix(self._push_seq))
+
+    def _push_tag_prefix(self, seq: int) -> str:
+        """分组序号前缀，如【LLM 1】；push_tag 为空时返回空串。"""
+        return f"【{self.push_tag} {seq}】" if self.push_tag else ""
 
     # ════════════════════════════════════════════════════════
     #  主入口
@@ -281,7 +295,7 @@ class SimEngine:
             )
             if trade:
                 sold.append(trade)
-                push_trade_report(self.settings, trade)
+                self._push_trade_report(trade)
 
         return sold
 
@@ -323,7 +337,7 @@ class SimEngine:
             )
             if trade:
                 sold.append(trade)
-                push_trade_report(self.settings, trade)
+                self._push_trade_report(trade)
         if sold:
             # 清仓后重写日结（upsert 不重复；run_daily 的日结是清仓前状态）
             self._write_account_daily(date_str)
@@ -701,6 +715,10 @@ class SimEngine:
                 unrealized_pnl=unrealized,
             )
             if text:
+                # 日报是组内最后一条：序号=交易报告数+1，总数=序号（如【LLM 3/3】）
+                if self.push_tag:
+                    n = self._push_seq + 1
+                    text = f"【{self.push_tag} {n}/{n}】\n{text}"
                 from wxpusher import WxPusher
                 WxPusher.send_message(
                     content=text,

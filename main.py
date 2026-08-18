@@ -147,7 +147,7 @@ def main() -> None:
             from sequoia_x.simulation.reporter import push_sim_alert
             try:
                 from sequoia_x.simulation.engine import SimEngine
-                sim = SimEngine(settings)
+                sim = SimEngine(settings, push_tag="LLM")
                 result = sim.run_daily()
                 status = result.get("status", "error")
                 actions = result.get("actions", [])

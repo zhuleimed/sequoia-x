@@ -106,6 +106,7 @@ def main() -> None:
         max_positions=10,
         per_stock_budget=100_000,
         allow_same_day=True,  # 重训信号凌晨产生，交易日当晚以当日开盘价买入（回测口径）
+        push_tag="V2",  # 消息加【V2 N/N】前缀，与 LLM 模拟盘分组区分
     )
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
     logger.info(f"V2 模拟盘更新完成: {result}")
@@ -147,6 +148,9 @@ def main() -> None:
                 unrealized_pnl=unrealized,
             )
             header = f"【V2 模型模拟盘日报 {today}】\n"
+            # 组内序号：卖出报告（sold 逐笔，含月末清仓；买入不推消息）之后，日报为最后一条
+            n_trades = len(result.get("sold") or [])
+            header = f"【V2 {n_trades + 1}/{n_trades + 1}】\n" + header
             push_daily_summary(settings, header + text)
             logger.info("V2 组合日报已推送")
         except Exception as e:
