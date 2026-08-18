@@ -1656,6 +1656,11 @@ class DataSync:
             logger.info("sync_index_daily: 非交易日，跳过")
             return {"status": "skipped", "index_count": 0, "error": ""}
 
+        # 2026-08-18: baostock 禁用时指数暂不更新（等恢复或后续用腾讯实现）
+        if os.environ.get("USE_BAOSTOCK", "0") != "1":
+            logger.warning("sync_index_daily: baostock 已禁用，指数暂不更新")
+            return {"status": "skipped", "index_count": 0, "error": "baostock 禁用，指数暂跳过"}
+
         if not self._bs_login():
             return {"status": "error", "index_count": 0, "error": "baostock 登录失败"}
 
