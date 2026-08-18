@@ -5,6 +5,7 @@ DataSync 专注于数据同步管线，持有 DataEngine 实例以复用查询�
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -674,7 +675,10 @@ class DataSync:
         #     前复权价随拉取日基准漂移，补拉除权日前历史会产生断层；不复权=实际成交价，永不漂移。
         #   - ⚠️ baostock 为 TCP 长连接（端口 10070），不允许多进程同时拉取 → 本函数必须单进程串行
         #   - 异常时自动降级：连续失败 5 次 → 排到最后；每 50 只试探恢复一级
-        SOURCE_NAMES = ["baostock", "tencent", "sina"]
+        # 2026-08-18: 用户要求消除 baostock 不稳定依赖（见记忆 lstm-model-selection-strategy）。
+        # 默认禁用 baostock（慢/限流/不稳定），用腾讯+新浪；确需用时 USE_BAOSTOCK=1 环境变量启用。
+        USE_BAOSTOCK = os.environ.get("USE_BAOSTOCK", "0") == "1"
+        SOURCE_NAMES = ["tencent", "sina"] + (["baostock"] if USE_BAOSTOCK else [])
         source_failures: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
         source_successes: dict[str, int] = {s: 0 for s in SOURCE_NAMES}
         FAILOVER_THRESHOLD = 5           # 连续失败 N 次 → 降级到最后
@@ -2006,9 +2010,10 @@ class DataSync:
         # Phase 3: baostock 估值字段补充（peTTM/pbMRQ/psTTM/pcfNcfTTM）
         # 策略暂未用到估值字段，baostock 能拉就拉，不能拉跳过
         elapsed_before_baostock_fill = time.time() - t0
-        if elapsed_before_baostock_fill > 7200:  # 已运行超 2h 则跳过
+        # 2026-08-18: USE_BAOSTOCK=0（默认）时跳过 baostock 估值补充（用户要求消除 baostock 不稳定依赖）
+        if elapsed_before_baostock_fill > 7200 or os.environ.get("USE_BAOSTOCK", "0") != "1":
             logger.warning(
-                f"run_full: 已运行 {elapsed_before_baostock_fill:.0f}s，跳过 Phase 3 baostock 补充"
+                f"run_full: 跳过 Phase 3 baostock 估值补充（禁用 baostock 或已运行 {elapsed_before_baostock_fill:.0f}s）"
             )
             r3 = {"status": "skipped", "filled": 0}
         else:
