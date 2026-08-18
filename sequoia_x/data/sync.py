@@ -85,14 +85,9 @@ class DataSync:
     def _bs_login(self) -> bool:
         """登录 baostock，设置 _bs_logged_in 标志。
 
-        2026-08-18: USE_BAOSTOCK=0（默认）时直接返回 False，不尝试连接
-        （baostock 慢/断网/限流，用户要求不用；各调用点走"不可用"降级分支）。
-
         Returns:
             True 表示登录成功。
         """
-        if os.environ.get("USE_BAOSTOCK", "0") != "1":
-            return False
         if self._bs_logged_in:
             return True
         import baostock as bs
@@ -296,8 +291,8 @@ class DataSync:
             logger.info(f"is_trade_day: {date_str} 是周末，非交易日")
             return False
 
-        # 第2层：baostock 在线精确判断（2026-08-18: USE_BAOSTOCK=0 时跳过，直接用离线日历，避免 baostock 卡顿）
-        if os.environ.get("USE_BAOSTOCK", "0") == "1" and self._bs_login():
+        # 第2层：baostock 在线精确判断
+        if self._bs_login():
             import baostock as bs
             try:
                 rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
@@ -655,14 +650,8 @@ class DataSync:
             }
 
         # Bug 修复 #2：由 _bs_login 统一管理会话，不再重复 login
-        # 2026-08-18: 默认禁用 baostock（行情源 tencent/sina），无需 baostock 登录
-        if os.environ.get("USE_BAOSTOCK", "0") == "1" and not self._bs_login():
-            return {
-                "status": "error",
-                "stock_count": 0,
-                "is_trade_day": True,
-                "error": "baostock 登录失败",
-            }
+        # 2026-08-18: 行情源为 tencent/sina（SOURCE_NAMES 不含 baostock），无需 baostock 登录；
+        # baostock 仅用于股票列表/交易日/估值（get_active_stocks/is_trade_day/_fill_valuation_gaps）
 
         # 批量写入优化：打开持久化 SQLite 连接
         self._open_db()
@@ -939,37 +928,29 @@ class DataSync:
         dt_start: datetime = dt_latest - timedelta(days=days * 2)
         start_str: str = dt_start.strftime("%Y-%m-%d")
 
-        # 获取检查区间内的理论交易日列表
+        # 获取检查区间内的理论交易日列表（baostock 拉取交易日期，用户确认保留）
+        if not self._bs_login():
+            logger.error("check_missing: baostock 登录失败")
+            return {
+                "status": "error",
+                "latest_date": latest_date,
+                "trade_days_expected": 0,
+                "total_missing": 0,
+                "missing_by_symbol": {},
+            }
+
+        import baostock as bs
         trade_days: list[str] = []
-        if os.environ.get("USE_BAOSTOCK", "0") == "1":
-            if not self._bs_login():
-                logger.error("check_missing: baostock 登录失败")
-                return {
-                    "status": "error",
-                    "latest_date": latest_date,
-                    "trade_days_expected": 0,
-                    "total_missing": 0,
-                    "missing_by_symbol": {},
-                }
-            import baostock as bs
-            try:
-                rs = bs.query_trade_dates(start_date=start_str, end_date=latest_date)
-                if rs.error_code == "0":
-                    data = self._bs_get_data(rs)
-                    if not data.empty:
-                        trade_days = data.loc[
-                            data["is_trading_day"] == "1", "calendar_date"
-                        ].tolist()
-            except Exception as e:
-                logger.warning(f"check_missing: 交易日查询异常: {e}，假定全为交易日")
-        else:
-            # 2026-08-18: 禁用 baostock，用 chinese_calendar 离线生成交易日（避免 baostock 卡顿）
-            from chinese_calendar import is_workday
-            cursor: datetime = dt_start
-            while cursor <= dt_latest:
-                if is_workday(cursor):
-                    trade_days.append(cursor.strftime("%Y-%m-%d"))
-                cursor += timedelta(days=1)
+        try:
+            rs = bs.query_trade_dates(start_date=start_str, end_date=latest_date)
+            if rs.error_code == "0":
+                data = self._bs_get_data(rs)
+                if not data.empty:
+                    trade_days = data.loc[
+                        data["is_trading_day"] == "1", "calendar_date"
+                    ].tolist()
+        except Exception as e:
+            logger.warning(f"check_missing: 交易日查询异常: {e}，假定全为交易日")
         # 回退：query_trade_dates 异常或返回错误码时，生成区间内所有日历日
         if not trade_days:
             cursor: datetime = dt_start
@@ -1656,15 +1637,9 @@ class DataSync:
             logger.info("sync_index_daily: 非交易日，跳过")
             return {"status": "skipped", "index_count": 0, "error": ""}
 
-        # 2026-08-18: baostock 禁用时指数暂不更新（等恢复或后续用腾讯实现）
-        if os.environ.get("USE_BAOSTOCK", "0") != "1":
-            logger.warning("sync_index_daily: baostock 已禁用，指数暂不更新")
-            return {"status": "skipped", "index_count": 0, "error": "baostock 禁用，指数暂跳过"}
-
-        if not self._bs_login():
-            return {"status": "error", "index_count": 0, "error": "baostock 登录失败"}
-
-        import baostock as bs
+        # 2026-08-18: 指数改用 mootdx（通达信）拉取，替代 baostock（用户确认）
+        from mootdx.quotes import Quotes
+        _mootdx = Quotes.factory(market='std', server=('180.153.18.170', 7709), timeout=10)
 
         today_str: str = date.today().strftime("%Y-%m-%d")
         index_count: int = 0
@@ -1691,24 +1666,25 @@ class DataSync:
 
                 data = None
 
-                # 尝试 baostock（优先）
+                # 尝试 mootdx（优先，替代 baostock）
                 source_used: str = ""
                 try:
-                    rs = bs.query_history_k_data_plus(
-                        bs_code,
-                        "date,open,high,low,close,volume,amount,pctChg",
-                        start_date=start_date,
-                        end_date=today_str,
-                        frequency="d",
-                        adjustflag="3",
-                    )
-                    if rs.error_code == "0":
-                        bs_data = self._bs_get_data(rs)
-                        if bs_data is not None and not bs_data.empty:
-                            data = bs_data
-                            source_used = "baostock"
+                    mtdx_code: str = bs_code.split(".")[1]  # sh.000001 -> 000001
+                    mdf = _mootdx.index(symbol=mtdx_code, frequency=9, offset=30)
+                    if mdf is not None and not mdf.empty:
+                        out = pd.DataFrame({
+                            "date": mdf["datetime"].astype(str).str[:10],
+                            "open": mdf["open"], "high": mdf["high"],
+                            "low": mdf["low"], "close": mdf["close"],
+                            "volume": mdf["volume"], "amount": mdf["amount"],
+                        })
+                        out["pctChg"] = out["close"].pct_change().fillna(0.0)
+                        out = out[out["date"].between(start_date, today_str)].copy()
+                        if not out.empty:
+                            data = out
+                            source_used = "mootdx"
                 except Exception as e:
-                    logger.debug(f"sync_index_daily {name}: baostock 异常 {e}")
+                    logger.debug(f"sync_index_daily {name}: mootdx 异常 {e}")
 
                 # baostock 不可用 → Tencent 降级
                 if data is None:
@@ -2029,10 +2005,9 @@ class DataSync:
         # Phase 3: baostock 估值字段补充（peTTM/pbMRQ/psTTM/pcfNcfTTM）
         # 策略暂未用到估值字段，baostock 能拉就拉，不能拉跳过
         elapsed_before_baostock_fill = time.time() - t0
-        # 2026-08-18: USE_BAOSTOCK=0（默认）时跳过 baostock 估值补充（用户要求消除 baostock 不稳定依赖）
-        if elapsed_before_baostock_fill > 7200 or os.environ.get("USE_BAOSTOCK", "0") != "1":
+        if elapsed_before_baostock_fill > 7200:  # 已运行超 2h 则跳过（baostock 估值保留，用户确认方案 B）
             logger.warning(
-                f"run_full: 跳过 Phase 3 baostock 估值补充（禁用 baostock 或已运行 {elapsed_before_baostock_fill:.0f}s）"
+                f"run_full: 已运行 {elapsed_before_baostock_fill:.0f}s，跳过 Phase 3 baostock 补充"
             )
             r3 = {"status": "skipped", "filled": 0}
         else:
