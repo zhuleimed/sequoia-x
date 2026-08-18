@@ -333,6 +333,13 @@ class MarketAnalyst:
             for syms in strategies_results.values():
                 freq.update(syms)
             recommended = [sym for sym, _ in freq.most_common(2)]
+            # LLM 未输出 RECOMMEND 行（模型格式漂移）→ 把回退推荐附加到报告末尾，
+            # 消息始终显示最终推荐（展示与"能否买入"无关）
+            if recommended:
+                report = report.rstrip() + (
+                    f"\n\n📌 最终推荐: {', '.join(recommended)}\n"
+                    f"RECOMMEND: {','.join(recommended)}"
+                )
 
         logger.info(f"MarketAnalyst: 分析完成, 推荐 {recommended}, 总耗时 {time.time()-t0:.0f}秒")
         return report, recommended

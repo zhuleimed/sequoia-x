@@ -165,6 +165,16 @@ A +988.1% vs B（不清仓补空位）+953.7%，A 略优 3.5%——详见 BACKTE
 
 ## 已知 Bug 与修复
 
+### LLM 格式漂移致推送无推荐 + 信号丢失（已修复 2026-08-18）
+**现象**: AI 综合研判消息底部不再显示两个最终推荐（8/14、8/17）；
+连带 sim_buy_signals 无信号写入（日志"无推荐股票，跳过"）。
+**根因**: DeepSeek 输出不再含 RECOMMEND 行（格式漂移，非持仓上限）——推送的是
+report 原文所以底部无推荐；save_llm_recommendations 二次解析失败即丢信号。
+**修复**: ① `analyst.py::analyze` 解析失败回退频率推荐后，把
+`📌 最终推荐: ...` + `RECOMMEND: ...` 附加到报告末尾（消息始终显示最终推荐，
+与能否买入无关）；② `save_llm_recommendations` 新增 `recommended` 参数，
+main.py 直接传 analyze 的返回值（避免二次解析不一致）。
+
 ### pctChg 全历史缺失 + 增量口径修正（已修复 2026-08-18）
 **背景**: stock_daily.pctChg 仅最近 11 天有值（8/3 起），全历史 NULL。
 **修复**: 新增 `scripts/backfill_pctchg.py`（baostock adjustflag=3 全量补写，断点续跑，

@@ -376,6 +376,7 @@ def main() -> None:
                             strategies_results,
                             llm_report=report,
                             top_n=2,
+                            recommended=recommended,  # analyze 已解析/回退，避免二次解析不一致
                         )
                     except Exception as sim_e:
                         logger.warning(f"保存模拟盘信号失败: {sim_e}")

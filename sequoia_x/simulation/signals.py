@@ -143,6 +143,7 @@ def save_llm_recommendations(
     strategies_results: dict[str, list[str]],
     llm_report: Optional[str] = None,
     top_n: int = 2,
+    recommended: Optional[list[str]] = None,
 ) -> int:
     """将 LLM 推荐结果写入买入信号表。
 
@@ -153,6 +154,8 @@ def save_llm_recommendations(
         strategies_results: 各策略选股结果。
         llm_report: LLM 返回的报告文本（可选）。
         top_n: 最多推荐几只。
+        recommended: 已解析好的推荐（analyze 返回值，避免二次解析不一致；
+            模型格式漂移时 analyze 已回退频率推荐）。
 
     Returns:
         写入的信号数量。
@@ -163,13 +166,14 @@ def save_llm_recommendations(
     init_sim_tables(db_path)
 
     # 获取推荐股票
-    recommended: list[str] = []
-    if llm_report:
-        recommended = parse_llm_report(llm_report)
-        # LLM 已运行但未推荐任何股票（0 支），尊重 LLM 判断，不回退
-    if not recommended and not llm_report:
-        # LLM 未运行（如未配置 API Key），用多策略频率作为后备
-        recommended = get_top_by_strategy_frequency(strategies_results, top_n)
+    if recommended is None:
+        recommended = []
+        if llm_report:
+            recommended = parse_llm_report(llm_report)
+            # LLM 已运行但未推荐任何股票（0 支），尊重 LLM 判断，不回退
+        if not recommended and not llm_report:
+            # LLM 未运行（如未配置 API Key），用多策略频率作为后备
+            recommended = get_top_by_strategy_frequency(strategies_results, top_n)
 
     # 构建信号列表
     signals: list[dict] = []
