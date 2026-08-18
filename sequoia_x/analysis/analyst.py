@@ -1088,7 +1088,9 @@ RECOMMEND: 600519,000858
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 8192,  # 推理模型需预留推理+正文空间；4096 常被推理耗尽致 content 为空
+            # 16384: 推理模型推理+正文共用输出预算；8192 实测会被顶满截断，
+            # 正文末尾的 RECOMMEND 行最先丢失（2026-08-13 起连发，已实测 API 接受 16384）
+            "max_tokens": 16384,
         }
 
         # 重试一次：content 为空（推理耗尽 max_tokens 截断）时再调一次
@@ -1104,11 +1106,19 @@ RECOMMEND: 600519,000858
                 result = resp.json()
                 content = result["choices"][0]["message"].get("content") or ""
                 usage = result.get("usage", {})
+                completion_tokens = usage.get("completion_tokens", 0) or 0
                 logger.info(
                     f"DeepSeek API 调用完成: "
                     f"输入 {usage.get('prompt_tokens', '?')} tokens / "
-                    f"输出 {usage.get('completion_tokens', '?')} tokens"
+                    f"输出 {completion_tokens} tokens"
                 )
+                # 顶满检测：输出接近 max_tokens 上限 = 正文可能被截断（RECOMMEND 行风险）
+                if completion_tokens >= 16384 * 0.95:
+                    logger.warning(
+                        f"DeepSeek 输出顶满 max_tokens ({completion_tokens}/16384)："
+                        f"正文末尾（RECOMMEND 行）可能被截断，"
+                        f"finish_reason={result['choices'][0].get('finish_reason')}"
+                    )
                 if content.strip() or attempt == 1:
                     return content
                 logger.warning(
