@@ -85,9 +85,14 @@ class DataSync:
     def _bs_login(self) -> bool:
         """登录 baostock，设置 _bs_logged_in 标志。
 
+        2026-08-18: USE_BAOSTOCK=0（默认）时直接返回 False，不尝试连接
+        （baostock 慢/断网/限流，用户要求不用；各调用点走"不可用"降级分支）。
+
         Returns:
             True 表示登录成功。
         """
+        if os.environ.get("USE_BAOSTOCK", "0") != "1":
+            return False
         if self._bs_logged_in:
             return True
         import baostock as bs
@@ -291,8 +296,8 @@ class DataSync:
             logger.info(f"is_trade_day: {date_str} 是周末，非交易日")
             return False
 
-        # 第2层：baostock 在线精确判断
-        if self._bs_login():
+        # 第2层：baostock 在线精确判断（2026-08-18: USE_BAOSTOCK=0 时跳过，直接用离线日历，避免 baostock 卡顿）
+        if os.environ.get("USE_BAOSTOCK", "0") == "1" and self._bs_login():
             import baostock as bs
             try:
                 rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
@@ -650,7 +655,8 @@ class DataSync:
             }
 
         # Bug 修复 #2：由 _bs_login 统一管理会话，不再重复 login
-        if not self._bs_login():
+        # 2026-08-18: 默认禁用 baostock（行情源 tencent/sina），无需 baostock 登录
+        if os.environ.get("USE_BAOSTOCK", "0") == "1" and not self._bs_login():
             return {
                 "status": "error",
                 "stock_count": 0,
@@ -934,28 +940,36 @@ class DataSync:
         start_str: str = dt_start.strftime("%Y-%m-%d")
 
         # 获取检查区间内的理论交易日列表
-        if not self._bs_login():
-            logger.error("check_missing: baostock 登录失败")
-            return {
-                "status": "error",
-                "latest_date": latest_date,
-                "trade_days_expected": 0,
-                "total_missing": 0,
-                "missing_by_symbol": {},
-            }
-
-        import baostock as bs
         trade_days: list[str] = []
-        try:
-            rs = bs.query_trade_dates(start_date=start_str, end_date=latest_date)
-            if rs.error_code == "0":
-                data = self._bs_get_data(rs)
-                if not data.empty:
-                    trade_days = data.loc[
-                        data["is_trading_day"] == "1", "calendar_date"
-                    ].tolist()
-        except Exception as e:
-            logger.warning(f"check_missing: 交易日查询异常: {e}，假定全为交易日")
+        if os.environ.get("USE_BAOSTOCK", "0") == "1":
+            if not self._bs_login():
+                logger.error("check_missing: baostock 登录失败")
+                return {
+                    "status": "error",
+                    "latest_date": latest_date,
+                    "trade_days_expected": 0,
+                    "total_missing": 0,
+                    "missing_by_symbol": {},
+                }
+            import baostock as bs
+            try:
+                rs = bs.query_trade_dates(start_date=start_str, end_date=latest_date)
+                if rs.error_code == "0":
+                    data = self._bs_get_data(rs)
+                    if not data.empty:
+                        trade_days = data.loc[
+                            data["is_trading_day"] == "1", "calendar_date"
+                        ].tolist()
+            except Exception as e:
+                logger.warning(f"check_missing: 交易日查询异常: {e}，假定全为交易日")
+        else:
+            # 2026-08-18: 禁用 baostock，用 chinese_calendar 离线生成交易日（避免 baostock 卡顿）
+            from chinese_calendar import is_workday
+            cursor: datetime = dt_start
+            while cursor <= dt_latest:
+                if is_workday(cursor):
+                    trade_days.append(cursor.strftime("%Y-%m-%d"))
+                cursor += timedelta(days=1)
         # 回退：query_trade_dates 异常或返回错误码时，生成区间内所有日历日
         if not trade_days:
             cursor: datetime = dt_start
