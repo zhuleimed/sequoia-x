@@ -416,6 +416,19 @@ def _push_ai_report(settings, report: str) -> None:
 
     logger = get_logger(__name__)
 
+    # 篇幅裁剪兜底：LLM 未遵守 prompt 限长时，保留头部+尾部推荐，中间省略
+    # （用户最关注最后推荐；裁剪不影响 save_llm_recommendations 用的完整 report）
+    MAX_CHARS = 4000
+    if len(report) > MAX_CHARS:
+        head_len = 2500
+        tail_len = 800  # 尾部含 RECOMMEND 行
+        report = (
+            report[:head_len]
+            + f"\n\n...（中间省略 {len(report) - head_len - tail_len} 字）...\n\n"
+            + report[-tail_len:]
+        )
+        logger.info(f"AI 报告超长裁剪: {len(report)} 字符 → 保留头部+推荐")
+
     try:
         result = WxPusher.send_message(
             content=report,
