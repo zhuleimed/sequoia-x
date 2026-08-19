@@ -2005,11 +2005,11 @@ class DataSync:
         # Phase 3: baostock 估值字段补充（peTTM/pbMRQ/psTTM/pcfNcfTTM）
         # 策略暂未用到估值字段，baostock 能拉就拉，不能拉跳过
         elapsed_before_baostock_fill = time.time() - t0
-        # 2026-08-19: SKIP_ESTIMATION=1 时跳过 baostock 估值回填（baostock 慢/限流时快速过，
-        # 行情不变，选股不依赖估值字段；估值可后续单独补）
-        if os.environ.get("SKIP_ESTIMATION", "0") == "1" or elapsed_before_baostock_fill > 7200:
+        # 2026-08-19: 默认跳过 baostock 估值回填（baostock 慢/限流频繁，行情不变，选股不用估值字段）。
+        # DO_ESTIMATION=1 才回填（估值仅在有需要时手动补，避免每天被 baostock 拖死管线）。
+        if os.environ.get("DO_ESTIMATION", "0") != "1" or elapsed_before_baostock_fill > 7200:
             logger.warning(
-                f"run_full: 跳过 Phase 3 baostock 估值补充（SKIP_ESTIMATION 或已运行 {elapsed_before_baostock_fill:.0f}s）"
+                f"run_full: 默认跳过 Phase 3 baostock 估值补充（DO_ESTIMATION=1 才回填；已运行 {elapsed_before_baostock_fill:.0f}s）"
             )
             r3 = {"status": "skipped", "filled": 0}
         else:
