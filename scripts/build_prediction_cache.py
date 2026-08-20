@@ -878,7 +878,7 @@ def build_cache(
         for month in pending_months
     ]
 
-    from multiprocessing import Pool
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     if n_workers == 1:
         # ── 单月任务：主进程直接执行（2026-08-02）──
         # multiprocessing.Pool 的 worker 是 daemon 进程，禁止创建子进程——
@@ -888,17 +888,18 @@ def build_cache(
             _process_and_save(*args)
             _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
     else:
-        with Pool(processes=n_workers) as pool:
-            async_result = pool.starmap_async(_process_and_save, task_args)
-            pool.close()
-
-            # 轮询 temp 文件（5s 间隔）
-            while not async_result.ready():
-                async_result.wait(timeout=5)
+        # ── 多月并行：用 ProcessPoolExecutor 而非 multiprocessing.Pool（2026-08-20 修复）──
+        # multiprocessing.Pool 的 worker 是 daemon 进程，禁止创建子进程；
+        # 而每月 worker 内部 Step5 特征构建(ProcessPoolExecutor)需开子进程 →
+        # Pool 会报 "daemonic processes are not allowed to have children"，全部月份失败。
+        # ProcessPoolExecutor 的 worker 非 daemon，可嵌套子进程。
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(_process_and_save, *args) for args in task_args]
+            # 渐进合并：as_completed + 每完成一个月份即 merge 该月 temp 文件
+            for tot in as_completed(futures):
+                tot.result()  # 抛出 worker 异常（若有）
                 _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
-
-            # 收尾
-            async_result.get()  # 抛出 worker 异常（如有）
+            # 收尾 merge（确保所有月份入库）
             _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
 
     import shutil
