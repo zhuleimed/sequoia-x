@@ -2,7 +2,7 @@
 
 本文件为 004_sequoia-x 项目的 Claude Code 工作指南。父级规则见 `../CLAUDE.md`。
 
-## 当前状态（2026-08-17 更新）
+## 当前状态（2026-08-20 更新）
 
 **V2 模拟盘月末清仓模式 A 定稿**：月末最后交易日标记全部持仓"月末清仓（换仓）" → 下月首日
 开盘先卖后买 → 满仓新 TOP10（与回测 M4+TOP_N=10 口径一致）。A/B 回测实证（70 个月）：
@@ -16,6 +16,14 @@ A +988.1% vs B（不清仓补空位）+953.7%，A 略优 3.5%——详见 BACKTE
 - 脚本：`scripts/download_mootdx_finance.py`（断点续跑，同命令恢复）
 - 远超现有 finance（同花顺 10 维）+ holders（东财 2 维），一源覆盖全部基本面
 - **暂不接入特征工程**（用户指令），后续接入时筛选 585→N 维
+
+**V4 迁移（2026-08-20，feature_version=4，129维）——详见 `THS_MOOTDX_MIGRATION_PLAN.md`**：
+- **目标**：彻底摆脱 baostock 限流困扰，同花顺 Financial-API + mootdx 互补
+- **已完成**：① 估值快照换同花顺（HithinkValuationSource，负值保留/补ps-pcf/无限流）② 历史 peTTM 用 finance 重建（rolling-TTM，20只对拍验证，方案A：PB 保留 baostock）③ finance 10→16维 ④ 砍 forecast ⑤ 新增 龙虎榜/涨停 情绪维度 ⑥ is_trade_day 换同花顺日历 ⑦ `feature_version` 3→4
+- **维度**：88 + 41 = **129 维**（fund_flow6/finance16/holders2/consensus5/news3/xdxr3/dragon_tiger3/limit_up3）
+- **落地节点**：8/31 月末链（19:00 采集+重建 → 9/1 03:00 重训选股正式切 V4）
+- **新增数据面采集**：`scripts/fetch_hithink_sentiment.py`（龙虎榜/涨停，近一年日榜）、`scripts/rebuild_valuation_history.py`（历史 peTTM）
+- **微信通知**：`scripts/notify_wechat.py`（wxpusher，get_settings 同源）
 
 **后台任务查询**：`ps -eo pid,etime,pcpu,args | grep python`
 
@@ -211,8 +219,10 @@ ffill/fillna(0.0)——**pctChg 缺失一律写 NULL**（0.0 是假数据，消�
 |------|------|------|
 | v1 (旧) | 80 | 原始特征，padding 到 80 |
 | v2 (新) | 88 | 新增 8 维市场状态特征（大盘涨跌/波动/回撤/均线/上涨占比），padding 到 88 |
+| v3 | 121 | 88 + 33 扩展（fund_flow6/finance10/holders2/consensus5/news3/xdxr3/forecast4） |
+| **v4 (当前)** | **129** | **88 + 41 扩展**——finance 10→16、砍 forecast4、新增 龙虎榜3+涨停3（2026-08-20 V4迁移，见 THS_MOOTDX_MIGRATION_PLAN.md） |
 
-缓存路径: `data/cache/v2_dataset/<hash>/`，特征版本变更自动重建（`feature_version` 在 hash key 中）。
+缓存路径: `data/cache/v2_dataset/<hash>/`，特征版本变更自动重建（`feature_version` 在 hash key 中；v4 现值为 4）。
 
 ## 断点续跑机制
 
@@ -249,15 +259,21 @@ ffill/fillna(0.0)——**pctChg 缺失一律写 NULL**（0.0 是假数据，消�
 **数据源**：
 | 数据 | 主源 | 特点 |
 |------|------|------|
-| fund_flow | 东财 push2his **直连**（间隔≥1s 限流）| 120 天五档；主力=大单+超大单 |
-| finance | 同花顺 akshare | 102 期全历史（1998 起），混合列已清洗 |
-| holders/reports/news | 东财各子域**直连**（datacenter-web/reportapi/search-api）| 限频靠重试+failed 清单补偿；reportapi 间歇封禁→串行 |
+| fund_flow | 新浪/东财 | 120 天五档；主力=大单+超大单 |
+| finance | 同花顺 akshare → mootdx 降级 | 102 期全历史；**v4 扩展为 16 维**（10 维 + ROE摊薄/营收增速变化/流动/速动/存货/应收周转） |
+| holders/reports/news | 东财各子域**直连** | 限频靠重试+failed 清单补偿 |
 | xdxr | mootdx（通达信直连）| 全历史分红，独立数据面 |
-| forecast | baostock | 业绩预告事件（类型/增幅/发布日），单进程强制 |
+| **dragon_tiger** | **同花顺 Financial-API** | 龙虎榜日榜→近一年事件（net_buy/net_rate/hot_rank），2026-08-20 新增 |
+| **limit_up** | **同花顺 Financial-API** | 涨停日榜→近一年事件（lianban/seal/cnt30d），2026-08-20 新增 |
 | news_cls（备源） | 财联社 api3.cls.cn | 快讯流+关联股票，签名无盐，rn≤5，并入月末拉取 |
-| 实盘资金流 | mootdx 逐笔 DDE 自算 | 复刻东财口径，摆脱东财依赖 |
+| 实盘资金流 | mootdx 逐笔 DDE 自算 | 复刻东财口径 |
+
+> **forecast（业绩预告）已于 2026-08-20 移除**——ths/mootdx 均无此接口，信息量由 finance16 + 龙虎榜/涨停替代。
+> **估值数据**：历史 peTTM 用 finance 重建（`rebuild_valuation_history.py`，rolling-TTM）；PB 保留 baostock 历史；
+> 新增日用 HithinkValuationSource（同花顺快照，`_fill_valuation_gaps` Phase 3b）。`feature_version=4`。
 
 **mootdx 服务器修复**：内置 HQ_HOSTS K线已失效 → 指定 `('180.153.18.170', 7709)`；TDXSource 已修复（`tencent_source.py`，含 offset=5 bug）。
+**同花顺 API**：`HITHINK_FINANCE_API_KEY` 环境变量；估值 `valuations/snapshot`（快照，无限流、负值保留、补ps/pcf）、短线情绪 `special-data/dragon-tiger-list|limit-up-pool`、财务 `financials/*`。
 
 ## 目录速查
 
