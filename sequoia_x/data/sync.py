@@ -352,11 +352,48 @@ class DataSync:
 
     # ── 股票列表同步 ──
 
-    def get_active_stocks(self) -> dict:
-        """通过 baostock query_stock_basic 获取全量 A 股并对比本地变化。
+    def _hithink_all_a_share(self) -> dict[str, str] | None:
+        """同花顺全量 A 股 (ticker → name)，分页 1000/页。失败/无 Key 返回 None。
 
-        仅保留沪深 A 股（sh.6 / sz.0 / sz.3 开头），与本地 stock_daily
-        已有 symbol 做差集计算，输出新增和退市列表。
+        2026-08-20 替换 baostock query_stock_basic 作为 get_active_stocks 主源。
+        覆盖沪深+北交全部 asset_type=a-share，含代码与名称。
+        """
+        if not os.environ.get("HITHINK_FINANCE_API_KEY"):
+            return None
+        import requests as _req
+        tickers: dict[str, str] = {}
+        offset = 0
+        try:
+            while True:
+                r = _req.get(
+                    "https://fuyao.aicubes.cn/api/meta/tickers/list",
+                    params={"asset_type": "a-share", "limit": 1000, "offset": offset},
+                    headers={"X-api-key": os.environ["HITHINK_FINANCE_API_KEY"]},
+                    timeout=20,
+                )
+                j = r.json()
+                if j.get("code") != 0:
+                    if tickers:
+                        break  # 已有足够数据，容忍单页失败
+                    return None
+                items = j.get("data", {}).get("item", [])
+                for it in items:
+                    tk = it.get("ticker")
+                    if tk:
+                        tickers[tk] = it.get("name") or ""
+                if len(items) < 1000:
+                    break
+                offset += 1000
+            return tickers
+        except Exception as e:
+            logger.debug(f"_hithink_all_a_share 异常: {e}")
+            return tickers or None
+
+    def get_active_stocks(self) -> dict:
+        """获取全量 A 股并对比本地变化（同花顺主源, baostock 后备）。
+
+        2026-08-20: 主源改为同花顺 tickers/list（摆脱 baostock 依赖）;
+        baostock 作为失败后备，确保容错。返回契约不变。
 
         Returns:
             dict:
@@ -364,73 +401,75 @@ class DataSync:
                 - new_listed (list[str]): 远程有但本地无的新上市股票
                 - delisted (list[str]): 本地有但远程无的退市股票
                 - count (int): 远程股票总数
+                - names (dict[str,str]): code → name
         """
-        if not self._bs_login():
-            logger.error("get_active_stocks: baostock 登录失败")
-            return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+        local_symbols: list[str] = self.engine.get_local_symbols()
 
-        import baostock as bs
+        # ── 主源：同花顺 tickers/list（全 A 股, 分页）──
+        remote_symbols: list[str] = []
+        names: dict[str, str] = {}
         try:
-            rs = bs.query_stock_basic(code_name="", code="")
-            if rs.error_code != "0":
-                logger.error(
-                    f"get_active_stocks: query_stock_basic 失败 "
-                    f"code={rs.error_code}"
-                )
-                return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
-
-            raw = self._bs_get_data(rs)
-            if raw.empty:
-                logger.warning("get_active_stocks: 查询结果为空")
-                return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
-
-            # 仅保留沪深 A 股：sh.6 / sz.0 / sz.3 开头，且 type="1"(股票) status="1"(上市)
-            mask = (
-                raw["code"].str.startswith(("sh.6", "sz.0", "sz.3"))
-                & (raw["type"] == "1")
-                & (raw["status"] == "1")
-            )
-            filtered = raw.loc[mask, "code"]
-
-            remote_symbols: list[str] = filtered.str.split(".").str[1].tolist()
-            local_symbols: list[str] = self.engine.get_local_symbols()
-
-            remote_set: set[str] = set(remote_symbols)
-            local_set: set[str] = set(local_symbols)
-
-            new_listed: list[str] = sorted(remote_set - local_set)
-            delisted: list[str] = sorted(local_set - remote_set)
-
-            # 提取股票名称映射（code → name），供 sync_stock_list 写入本地缓存
-            names: dict[str, str] = {}
-            if "code_name" in raw.columns:
-                for _, row in filtered.items() if hasattr(filtered, 'items') else raw.iterrows():
-                    pass
-            # 用更简单的方式：从 filtered Series 对应的 raw 行提取
-            try:
-                name_map = dict(zip(
-                    raw.loc[mask, "code"].str.split(".").str[1],
-                    raw.loc[mask, "code_name"]
-                ))
-                names = {k: v for k, v in name_map.items() if isinstance(k, str)}
-            except Exception:
-                pass
-
-            logger.info(
-                f"get_active_stocks: 远程 {len(remote_symbols)} 只，"
-                f"本地 {len(local_symbols)} 只，"
-                f"新增 {len(new_listed)} 只，退市 {len(delisted)} 只"
-            )
-            return {
-                "symbols": remote_symbols,
-                "new_listed": new_listed,
-                "delisted": delisted,
-                "count": len(remote_symbols),
-                "names": names,
-            }
+            hl = self._hithink_all_a_share()
+            if hl:
+                remote_symbols = sorted(hl.keys())
+                names = {k: v for k, v in hl.items() if isinstance(k, str)}
+                logger.info(f"get_active_stocks: 同花顺 {len(remote_symbols)} 只")
+            else:
+                logger.warning("get_active_stocks: 同花顺列表不可用, 切换 baostock")
         except Exception as e:
-            logger.error(f"get_active_stocks 异常: {e}")
+            logger.error(f"get_active_stocks 同花顺异常: {e}")
+
+        # ── 后备：baostock query_stock_basic（仅当同花顺失败）──
+        if not remote_symbols:
+            if not self._bs_login():
+                logger.error("get_active_stocks: baostock 登录失败")
+                return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+            import baostock as bs
+            try:
+                rs = bs.query_stock_basic(code_name="", code="")
+                if rs.error_code != "0":
+                    logger.error("get_active_stocks: query_stock_basic 失败")
+                    return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+                raw = self._bs_get_data(rs)
+                if not raw.empty:
+                    mask = (
+                        raw["code"].str.startswith(("sh.6", "sz.0", "sz.3"))
+                        & (raw["type"] == "1") & (raw["status"] == "1")
+                    )
+                    remote_symbols = raw.loc[mask, "code"].str.split(".").str[1].tolist()
+                    try:
+                        names = {
+                            k: v for k, v in dict(zip(
+                                raw.loc[mask, "code"].str.split(".").str[1],
+                                raw.loc[mask, "code_name"])).items() if isinstance(k, str)
+                        }
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"get_active_stocks baostock 异常: {e}")
+                return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+
+        if not remote_symbols:
+            logger.warning("get_active_stocks: 全源为空")
             return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+
+        # ── 通用：对比本地, 输出新增/退市/名称 ──
+        remote_set: set[str] = set(remote_symbols)
+        local_set: set[str] = set(local_symbols)
+        new_listed: list[str] = sorted(remote_set - local_set)
+        delisted: list[str] = sorted(local_set - remote_set)
+        logger.info(
+            f"get_active_stocks: 远程 {len(remote_symbols)} 只，"
+            f"本地 {len(local_symbols)} 只，"
+            f"新增 {len(new_listed)} 只，退市 {len(delisted)} 只"
+        )
+        return {
+            "symbols": remote_symbols,
+            "new_listed": new_listed,
+            "delisted": delisted,
+            "count": len(remote_symbols),
+            "names": names,
+        }
 
     def sync_stock_list(self) -> dict:
         """将活跃股票列表持久化到 SQLite stock_list 表。
