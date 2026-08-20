@@ -10,6 +10,10 @@ cd "$PROJ"
 log(){ echo "[$(date '+%F %T')] $1"; }
 notify(){ "$PY" scripts/notify_wechat.py "$1" 2>/dev/null || true; }
 
+# 2026-08-20: 固定 sample_end=2026-08-19 复用现有129维缓存(回测到6月无需8/20数据),
+#   避免 DB 已是 08-20 导致 resolve 失配需重建缓存
+export V4_SAMPLE_END_FIX="2026-08-19"
+
 # ── 进度监控器（后台）: 按系统时间分级推送（2026-08-20 用户要求） ──
 #   白天 07:00~23:00 每小时一次;  夜间 06:00 汇总一次(覆盖 23~06);  其余时刻不推
 MONITOR_PID=""

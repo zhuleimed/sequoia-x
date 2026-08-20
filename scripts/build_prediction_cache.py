@@ -788,9 +788,17 @@ def build_cache(
 
     # 0. sample_end 动态化（2026-08-07 月末自动链）: 与缓存重建同口径（DB 最后交易日),
     #     否则 hash 含写死的 sample_end → 9/1 重训与 8/31 重建 hash 失配
-    from sequoia_x.model_selection_v2.labels import resolve_sample_end
-    cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
-    logger.info(f"采样截止日（动态）: {cfg.sample_end}")
+    # 2026-08-20: 允许 V4_SAMPLE_END_FIX 固定 sample_end——70月回测到6月, DB已是8/20,
+    #   resolve 到 08-20 会失配现有 08-19 缓存; 固定 08-19 复用缓存, 无需重建/重做已完成的月份。
+    import os as _os
+    _se_fix = _os.environ.get("V4_SAMPLE_END_FIX", "")
+    if _se_fix:
+        cfg.sample_end = _se_fix
+        logger.info(f"采样截止日（固定 V4_SAMPLE_END_FIX）: {cfg.sample_end}")
+    else:
+        from sequoia_x.model_selection_v2.labels import resolve_sample_end
+        cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
+        logger.info(f"采样截止日（动态）: {cfg.sample_end}")
 
     # 1. 一次 baostock 获取标准股票池（写入文件供 worker 读取）
     stock_pool_path = output_path.parent / ".stock_pool.json"
