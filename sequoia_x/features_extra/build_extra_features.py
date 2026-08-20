@@ -271,7 +271,7 @@ def _xdxr_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) -> pd.D
 
 # ════════════════════════════════════════════════════════════
 #  2026-08-20 新增：同花顺短线情绪维度（事件日 asof）
-#  龙虎榜 / 涨停池 / 热榜——采集见 scripts/fetch_hithink_sentiment.py（近一年日榜→每股parquet）
+#  龙虎榜 / 涨停池——采集见 scripts/fetch_hithink_sentiment.py（近一年日榜→每股parquet）
 # ════════════════════════════════════════════════════════════
 
 
@@ -335,21 +335,6 @@ def _limit_up_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     return res
 
 
-def _hot_rank_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
-    """热榜(事件, 近一年): 榜单排名(越小越热)/近30日入榜次数"""
-    df = _load("hot_rank", code)
-    cols = ["hr_rank", "hr_cnt_30d"]
-    if df is None or len(df) == 0:
-        return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    aligned, avail = _latest_event_state(df, dates, ["hr_rank"])
-    if aligned is None:
-        return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    res = pd.DataFrame(index=dates)
-    res["hr_rank"] = aligned["hr_rank"].fillna(0.0)
-    res["hr_cnt_30d"] = _event_count_30d(avail, dates)
-    return res
-
-
 # ════════════════════════════════════════════════════════════
 #  主入口
 # ════════════════════════════════════════════════════════════
@@ -364,9 +349,10 @@ FEATURE_GROUPS = {
     # 2026-08-20: forecast(业绩预告) 移除——ths/mootdx 均无此接口，信息量可由
     # finance 16维 + 短线情绪维度替代（feature_version→4）
     # 2026-08-20: 新增同花顺短线情绪维度
+    # hot_rank 移除(2026-08-20): 热榜仅 30 只稳定股票、全市场覆盖 0.6%，
+    #   特征对 99%+ 股票恒 0 → 无信息量（数据源本身是稳定 Top30 榜）
     "dragon_tiger": _dragon_tiger_features,
     "limit_up": _limit_up_features,
-    "hot_rank": _hot_rank_features,
 }
 
 # 各组固定列名模板（异常兜底时全 0 填充, 保证输出恒 33 列 → 拼接维度一致）
@@ -384,7 +370,6 @@ _EMPTY_COLS = {
     "xdxr": ["xd_yield", "xd_div_cnt_3y", "xd_song_cnt_3y"],
     "dragon_tiger": ["dt_net_buy", "dt_net_rate", "dt_cnt_30d"],
     "limit_up": ["lu_lianban", "lu_seal", "lu_cnt_30d"],
-    "hot_rank": ["hr_rank", "hr_cnt_30d"],
 }
 
 
@@ -407,7 +392,7 @@ KEY_GROUPS = ("fund_flow", "finance", "holders")
 EXTRA_COVERAGE_THRESHOLD = 0.05
 _PREFIX_TO_GROUP = {"ff": "fund_flow", "fin": "finance", "hd": "holders",
                     "cs": "consensus", "nw": "news", "xd": "xdxr",
-                    "dt": "dragon_tiger", "lu": "limit_up", "hr": "hot_rank"}
+                    "dt": "dragon_tiger", "lu": "limit_up"}
 
 
 def build_extra_with_flag(dates: pd.DatetimeIndex, close: pd.Series,
