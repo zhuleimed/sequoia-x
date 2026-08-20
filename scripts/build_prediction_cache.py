@@ -863,9 +863,13 @@ def build_cache(
         logger.info("所有月份已完成")
         return cache
 
-    # 并行：24 进程 Pool + 文件通信（特征提取单线程 → 24 核并行；n_jobs=1 避免训练线程争抢）
-    n_workers = min(24, len(pending_months))
-    logger.info(f"并行构建: {len(pending_months)} 个月, {n_workers} 进程")
+    # 并行：多进程 + 文件通信（特征提取单线程 → 并行核；n_jobs=1 避免训练线程争抢）
+    # 2026-08-20: 默认 24 → 可经 V4_BT_WORKERS 覆盖并降为 12；每 worker 内部再开 8 特征worker
+    #   （24×8=192 并发峰值易触发 worker 被终止/BrokenProcessPool），降并发更稳。
+    import os as _os
+    _bt_w = int(_os.environ.get("V4_BT_WORKERS", "12"))
+    n_workers = min(_bt_w, len(pending_months))
+    logger.info(f"并行构建: {len(pending_months)} 个月, {n_workers} 进程 (V4_BT_WORKERS={_bt_w})")
 
     # ⚠️ 2026-08-09: tmp_dir 按 output 文件名隔离（多任务并行互不干扰）
     tmp_dir = (output_path.parent / f".cache_tmp_{output_path.stem}").resolve()
