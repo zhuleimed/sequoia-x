@@ -52,6 +52,11 @@ PERIODS = [
     ("2026年", "2026-01", "2026-06"),
     ("全周期", "2025-08", "2026-06"),
 ]
+# 2026-08-20: V4 129维 70 个月完整回测（2020-09~2026-06，与旧 121 维 70 月同口径对比）。
+# 用 `--period full` 选择此完整全周期段。
+FULL_PERIODS = [
+    ("全周期70月", "2020-09", "2026-06"),
+]
 RISK_MODES = [
     ("M0", "裸融合"),
     ("M1", "+T1过滤"),
@@ -239,7 +244,8 @@ def main():
     # 确定运行范围
     if args.all:
         top_n_list = TOP_N_LIST
-        periods = PERIODS
+        # 2026-08-20: --period full 用完整 70 月段（V4 129维 与旧 121维 70月 同口径对比）
+        periods = FULL_PERIODS if args.period == "full" else PERIODS
         modes = RISK_MODES
     elif args.top_n and args.mode:
         top_n_list = [args.top_n]
