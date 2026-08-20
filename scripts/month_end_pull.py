@@ -59,13 +59,13 @@ def _extra_coverage_ok() -> tuple[bool, str]:
     """覆盖率检查（2026-08-07 修正: 区分关键面/语义可缺失面）。
 
     关键面 fund_flow/finance/holders（每只股票理应都有）: ≥90% 才允许重建 121 维;
-    语义可缺失面 consensus/news/xdxr/forecast（缺失合法, 特征层 fillna(0)）:
+    语义可缺失面 consensus/news/xdxr（缺失合法, 特征层 fillna(0); forecast 2026-08-20 移除）:
     只报告实际覆盖率, 不阻断——如 consensus 实测 ~64%（A 股约 36% 无研报覆盖,
     要求 ≥90% 会永久降级 88 维, 与设计矛盾）。
     """
     total = 5206
     KEY = ("fund_flow", "finance", "holders")
-    SOFT = ("consensus", "news", "xdxr", "forecast")
+    SOFT = ("consensus", "news", "xdxr")  # forecast 2026-08-20 移除
 
     def cov(subset: str) -> float:
         d = PROJECT_DIR / "data/extra_features" / subset
@@ -242,7 +242,7 @@ def main():
     #   原 40 天阈值 > 月末间隔 ~30 天 → 永远判定"新鲜"跳过 → 数据停留在筑基快照）
     cmd = [sys.executable, str(PROJECT_DIR / "scripts/collect_extra_features.py"),
            "--codes", str(PROJECT_DIR / "scripts/all_a_codes.txt"),
-           "--data", "fund_flow,finance,holders,consensus,xdxr,news,forecast",
+           "--data", "fund_flow,finance,holders,consensus,xdxr,news",  # forecast 2026-08-20 移除
            "--refresh-days", "0"]
     r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=12 * 3600)
     print(f"[{today}] 扩展维度拉取结束, exit={r.returncode}")

@@ -21,6 +21,9 @@ from sequoia_x.data.engine import DataEngine
 
 logger = get_logger(__name__)
 
+# 2026-08-20: 同花顺交易日历模块级缓存（is_trade_day 当日复用，避免反复打接口）
+_HITHINK_TRADE_DAYS: set[str] | None = None
+
 
 class DataSync:
     """数据同步模块，负责 baostock → SQLite 的全量/增量数据同步。
@@ -273,8 +276,8 @@ class DataSync:
 
         判断策略（三层）：
         1. 周末过滤 — 周六/周日一定不开盘（最快路径）
-        2. baostock query_trade_dates — 在线时精确判断（含节假日）
-        3. chinese_calendar 离线库 — baostock 不可用时回退
+        2. 同花顺交易日历 — 在线精确判断（含节假日，覆盖近一年窗口）
+        3. chinese_calendar 离线库 — 同花顺不可用时回退
         4. fail-open — 以上均失败时假定为交易日，避免漏数据
 
         Args:
@@ -292,18 +295,15 @@ class DataSync:
             logger.info(f"is_trade_day: {date_str} 是周末，非交易日")
             return False
 
-        # 第2层：baostock 在线精确判断
-        if self._bs_login():
-            import baostock as bs
+        # 第2层：同花顺交易日历（2026-08-20 替换 baostock；近一年窗口覆盖当日）
+        if os.environ.get("HITHINK_FINANCE_API_KEY"):
             try:
-                rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
-                if rs.error_code == "0":
-                    data = self._bs_get_data(rs)
-                    if data is not None and not data.empty:
-                        is_trading = data["is_trading_day"].iloc[0]
-                        return is_trading == "1"
+                import requests as _req
+                td = self._hithink_trade_days()
+                if td is not None:
+                    return date_str.replace("-", "") in td
             except Exception as e:
-                logger.debug(f"is_trade_day: baostock 查询异常 {e}，尝试离线判断")
+                logger.debug(f"is_trade_day: 同花顺日历异常 {e}，尝试离线判断")
 
         # 第3层：chinese_calendar 离线节假日判断
         try:
@@ -322,6 +322,33 @@ class DataSync:
         # 第4层：fail-open，假定为交易日
         logger.warning(f"is_trade_day: {date_str} 所有数据源均不可用，假定为交易日")
         return True
+
+    def _hithink_trade_days(self) -> set[str] | None:
+        """同花顺交易日历（近一年窗口, yyyyMMdd 集合）。失败/无Key返回 None。
+
+        2026-08-20 替换 baostock query_trade_dates 作为 is_trade_day 第2层。
+        模块级缓存避免每次判断都打接口（当日多次调用复用）。
+        """
+        global _HITHINK_TRADE_DAYS
+        if _HITHINK_TRADE_DAYS is not None:
+            return _HITHINK_TRADE_DAYS
+        if not os.environ.get("HITHINK_FINANCE_API_KEY"):
+            return None
+        try:
+            import requests as _req
+            r = _req.get(
+                "https://fuyao.aicubes.cn/api/a-share/calendar/trading-days",
+                headers={"X-api-key": os.environ["HITHINK_FINANCE_API_KEY"]},
+                timeout=15,
+            )
+            j = r.json()
+            if j.get("code") != 0:
+                return None
+            _HITHINK_TRADE_DAYS = {it["date"] for it in j.get("data", {}).get("item", [])}
+            return _HITHINK_TRADE_DAYS
+        except Exception as e:
+            logger.debug(f"_hithink_trade_days 异常: {e}")
+            return None
 
     # ── 股票列表同步 ──
 

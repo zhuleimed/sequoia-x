@@ -280,7 +280,7 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str], include_market_state:
         "sample_start": cfg.sample_start,
         "sample_end": cfg.sample_end,
         "window": cfg.window,
-        "feature_version": 3,  # 2026-08-10: v3=特征/标签层后复权(补丁②, DB为不复权价)
+        "feature_version": 4,  # 2026-08-20: v4=特征层换源(finance16维+砍forecast+短线情绪), 与v3不兼容→缓存/重训全量重建
         "market_state": include_market_state,  # T4=80维(False), T2/T1/T3=88维(True)
     }
     # 2026-08-07: 88+33=121维扩展特征——仅 True 时加 key（False 时 hash 与现有 88 维缓存一致,
@@ -369,7 +369,7 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
         "n_stocks": len(symbols),
         "sample_start": cfg.sample_start,
         "window": cfg.window,
-        "feature_version": 3,
+        "feature_version": 4,
         "market_state": include_market_state,
     }
     if include_extra:
@@ -555,7 +555,7 @@ def build_training_dataset(
         "sample_start": str(cfg.sample_start),
         "sample_end": str(dates[-1] if dates else cfg.sample_end),
         "window": cfg.window,
-        "feature_version": 3,
+        "feature_version": 4,
         "market_state": include_market_state,
     }
     if include_extra:

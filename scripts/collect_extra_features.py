@@ -31,7 +31,7 @@ import pandas as pd
 DEFAULT_OUT = "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/data/extra_features"
 DEFAULT_POOL = "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/output/backtest_v2/.stock_pool.json"
 REQUEST_INTERVAL = 0.15  # 秒, 东财限频保护
-SUBSETS = ("fund_flow", "finance", "holders", "consensus", "news", "xdxr", "forecast")
+SUBSETS = ("fund_flow", "finance", "holders", "consensus", "news", "xdxr")  # forecast 2026-08-20 移除
 
 
 def code_market(code: str) -> str:
@@ -319,35 +319,6 @@ def fetch_news(code: str) -> pd.DataFrame:
     return df
 
 
-def fetch_forecast(code: str) -> pd.DataFrame:
-    """业绩预告(baostock, 全历史事件数据) — 2026-08-07 新增第7类
-
-    字段: profitForcastExpPubDate(预告发布日期, 天然披露日=asof对齐零成本)
-          profitForcastType(略增/预增/预减/扭亏/首亏...) → 事件类型因子
-          profitForcastChgPctUp/Dwn(净利润增幅上下限) → 预增信号
-    注意: baostock 阻塞式 API, 单进程强制(见 CONCURRENCY_LIMIT)
-    """
-    import baostock as bs
-    lg = bs.login()
-    if lg.error_code != "0":
-        raise RuntimeError(f"baostock login 失败: {lg.error_msg}")
-    try:
-        bs_code = f"{code_market(code)}.{code}"
-        rs = bs.query_forecast_report(bs_code, start_date="1998-01-01", end_date="2026-12-31")
-        rows = []
-        while rs.next():
-            rows.append(rs.get_row_data())
-        if not rows:
-            return None  # 无业绩预告记录(业绩稳定公司正常现象)
-        df = pd.DataFrame(rows, columns=rs.fields)
-        if "code" in df.columns:
-            df = df.rename(columns={"code": "bs_code"})  # baostock 自带 code(sh.600519)
-        df.insert(0, "code", code)
-        return df
-    finally:
-        bs.logout()
-
-
 # mootdx 客户端(延迟加载, 复用修复版服务器配置)
 _MOOTDX_CLIENT = None
 
@@ -381,7 +352,6 @@ FETCHERS = {
     "consensus": fetch_consensus,
     "news": fetch_news,
     "xdxr": fetch_xdxr,
-    "forecast": fetch_forecast,
 }
 
 
@@ -512,9 +482,8 @@ def main():
     # 2026-08-07 实测教训: 不同数据面风控差异大, 按子域固化并发上限
     #   mootdx(xdxr): 并发>1 时服务器拒绝(返回空) → 必须串行
     #   push2his(fund_flow)/reportapi(reports): 高频触发 IP 时间性封禁 → 预防性串行
-    #   baostock(forecast): 阻塞式全局连接 API → 必须单进程
     #   datacenter-web(holders)/search-api(news): 4 并发实测 OK
-    CONCURRENCY_LIMIT = {"fund_flow": 1, "reports": 1, "xdxr": 1, "forecast": 1}
+    CONCURRENCY_LIMIT = {"fund_flow": 1, "reports": 1, "xdxr": 1}
 
     summary = {}
     for s in subsets:

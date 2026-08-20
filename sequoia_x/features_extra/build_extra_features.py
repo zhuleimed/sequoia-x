@@ -9,7 +9,7 @@
   - 日频:   fund_flow / news(发布时间) / news_cls → 直接对齐
   - 季频:   finance(报告期→法定披露日 Q1:4/30 H1:8/31 Q3:10/31 年报:次年4/30)
             holders(公告日 HOLD_NOTICE_DATE) → asof 前向填充
-  - 事件:   forecast(发布日) / xdxr(事件日) → asof 前向填充
+  - 事件:   xdxr(事件日) → asof 前向填充  (forecast 2026-08-20 移除)
   - 快照:   consensus(无日期, 可用日=文件 mtime 采集日) → 仅采集日后有效
             (回测早期样本无此特征, 树模型自动忽略; 3-6月积累后形成历史序列)
 
@@ -269,37 +269,6 @@ def _xdxr_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) -> pd.D
     return out
 
 
-def _forecast_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
-    """业绩预告(事件, 发布日对齐): 近12月类型分/最大增幅/次数/新鲜度"""
-    df = _load("forecast", code)
-    cols = ["fc_type_12m", "fc_max_chg_12m", "fc_cnt_12m", "fc_freshness"]
-    if df is None or len(df) == 0:
-        return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    TYPE_SCORE = {"预增": 1.0, "略增": 0.5, "扭亏": 0.8, "续盈": 0.3, "预盈": 0.6,
-                  "预减": -1.0, "略减": -0.5, "首亏": -0.8, "续亏": -1.0, "增亏": -0.6}
-    ev = pd.DataFrame({
-        "avail": pd.to_datetime(df["profitForcastExpPubDate"], errors="coerce"),
-        "score": df["profitForcastType"].map(TYPE_SCORE).fillna(0.0),
-        "chg": pd.to_numeric(df["profitForcastChgPctUp"], errors="coerce").fillna(0.0) / 100.0,
-    })
-    ev = ev.dropna(subset=["avail"]).sort_values("avail")
-    if len(ev) == 0:
-        return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    # 2026-08-11 修复: out 必须初始化为固定 4 列——若该股票全部预告事件都在
-    # ref_date 之后(早期采样日常见), 循环永不赋值, 空 DataFrame(0 列) 会破坏
-    # 33 列拼接契约(121维全历史重建实测: 117 列崩)。
-    out = pd.DataFrame(0.0, index=dates, columns=cols)
-    for i, d in enumerate(dates):
-        w = ev[ev["avail"] <= d]
-        if len(w) == 0:
-            continue
-        w12 = w[w["avail"] >= d - pd.Timedelta(days=365)]
-        out.loc[d, "fc_type_12m"] = w12["score"].sum() / max(len(w12), 1)
-        out.loc[d, "fc_max_chg_12m"] = w12["chg"].max()
-        out.loc[d, "fc_cnt_12m"] = len(w12)
-        out.loc[d, "fc_freshness"] = 1.0 / (1.0 + (d - w["avail"].iloc[-1]).days)  # 距最近预告
-    return out
-
 
 # ════════════════════════════════════════════════════════════
 #  主入口
@@ -312,7 +281,8 @@ FEATURE_GROUPS = {
     "consensus": _consensus_features,
     "news": _news_features,
     "xdxr": _xdxr_features,
-    "forecast": _forecast_features,
+    # 2026-08-20: forecast(业绩预告) 移除——ths/mootdx 均无此接口，信息量可由
+    # finance 16维 + 短线情绪维度替代（feature_version→4）
 }
 
 # 各组固定列名模板（异常兜底时全 0 填充, 保证输出恒 33 列 → 拼接维度一致）
@@ -328,7 +298,6 @@ _EMPTY_COLS = {
     "consensus": ["cs_buy_ratio", "cs_org_num", "cs_pred_pe", "cs_aim_dev", "cs_aim_spread"],
     "news": ["nw_cnt_5d", "nw_cnt_20d", "nw_src_div"],
     "xdxr": ["xd_yield", "xd_div_cnt_3y", "xd_song_cnt_3y"],
-    "forecast": ["fc_type_12m", "fc_max_chg_12m", "fc_cnt_12m", "fc_freshness"],
 }
 
 
@@ -342,8 +311,7 @@ def _zero_features(group: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
 #  关键数据面(缺失=数据问题, 应剔除):
 #    fund_flow/finance/holders — 每只股票理应都有(成交/财报/股东)
 #  语义可缺失面(缺失=合法信息, 不剔除):
-#    consensus(46% A股无研报覆盖) / forecast(业绩稳定无预告)
-#    news(小盘股无新闻) / xdxr(次新股无分红记录)
+#    consensus(46% A股无研报覆盖) / news(小盘股无新闻) / xdxr(次新股无分红记录)
 # ════════════════════════════════════════════════════════════
 KEY_GROUPS = ("fund_flow", "finance", "holders")
 # 阈值 5%: 区分"窗口限制"与"数据缺失"
@@ -351,7 +319,7 @@ KEY_GROUPS = ("fund_flow", "finance", "holders")
 #   数据面完全未采到 → 覆盖 0% (缺失 → incomplete)
 EXTRA_COVERAGE_THRESHOLD = 0.05
 _PREFIX_TO_GROUP = {"ff": "fund_flow", "fin": "finance", "hd": "holders",
-                    "cs": "consensus", "nw": "news", "xd": "xdxr", "fc": "forecast"}
+                    "cs": "consensus", "nw": "news", "xd": "xdxr"}
 
 
 def build_extra_with_flag(dates: pd.DatetimeIndex, close: pd.Series,
