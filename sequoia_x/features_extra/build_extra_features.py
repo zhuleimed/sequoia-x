@@ -120,31 +120,40 @@ def _finance_get(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def _finance_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
-    """财务摘要(季频, 披露日对齐): ROE/毛利率/净利率/负债率/增速/现金流质量
+    """财务摘要(季频, 披露日对齐): 16 维财务基本面特征。
 
     2026-08-07 修复: 金融股(银行/保险/券商)无毛利率等列 → 逐列容错(_finance_get),
-    缺失列填 0, 保证输出恒 10 列（固定列契约, 拼接维度一致）。
+    缺失列填 0, 保证输出恒定列数（固定列契约, 拼接维度一致）。
+    2026-08-20 扩展(10→16): 新增 摊薄ROE/营收增速变化/流动比率/速动比率/存货周转天数/应收周转天数
     """
     df = _load("finance", code)
     if df is None or len(df) == 0:
-        return pd.DataFrame(index=dates, columns=[f"fin_{c}" for c in
-                             ["roe", "gp_margin", "np_margin", "debt_ratio", "rev_yoy",
-                              "profit_yoy", "profit_yoy_chg", "cf_quality", "eps", "bps"]],
-                            dtype=float)
-    ev = pd.DataFrame({
-        "avail": [str(_disclose_date(r)) for r in df["报告期"]],
-        "roe": _finance_get(df, "净资产收益率"),
-        "gp_margin": _finance_get(df, "销售毛利率"),
-        "np_margin": _finance_get(df, "销售净利率"),
-        "debt_ratio": _finance_get(df, "资产负债率"),
-        "rev_yoy": _finance_get(df, "营业总收入同比增长率"),
-        "profit_yoy": _finance_get(df, "净利润同比增长率"),
-        "eps": _finance_get(df, "基本每股收益"),
-        "bps": _finance_get(df, "每股净资产"),
-        "ocf": _finance_get(df, "每股经营现金流"),
-    })
-    for c in ["roe", "gp_margin", "np_margin", "debt_ratio", "rev_yoy", "profit_yoy", "eps", "bps", "ocf"]:
-        ev[c] = pd.to_numeric(ev[c], errors="coerce") / (100.0 if "ratio" in c or "margin" in c or c == "debt_ratio" else 1.0)
+        return pd.DataFrame(index=dates, columns=_EMPTY_COLS["finance"], dtype=float)
+    # 百分比口径列(数值为 %, 存为 0.xx): 折算 /100
+    pct_cols = ["roe", "gp_margin", "np_margin", "debt_ratio", "rev_yoy",
+                "profit_yoy", "roe_tb"]
+    pct_conf = {
+        "roe": "净资产收益率", "gp_margin": "销售毛利率", "np_margin": "销售净利率",
+        "debt_ratio": "资产负债率", "rev_yoy": "营业总收入同比增长率",
+        "profit_yoy": "净利润同比增长率", "roe_tb": "净资产收益率-摊薄",
+    }
+    # 比率/天数口径列(数值即倍数/天, 不折算)
+    raw_cols = {
+        "eps": "基本每股收益",       # 元/股
+        "bps": "每股净资产",         # 元/股
+        "ocf": "每股经营现金流",     # 元/股
+        "undist_rps": "每股未分配利润",  # 元/股
+        "cap_rps": "每股资本公积金",     # 元/股
+        "current_ratio": "流动比率",
+        "quick_ratio": "速动比率",
+        "inv_turn_days": "存货周转天数",
+        "ar_turn_days": "应收账款周转天数",
+    }
+    ev = pd.DataFrame({"avail": [str(_disclose_date(r)) for r in df["报告期"]]})
+    for k, col in pct_conf.items():
+        ev[k] = pd.to_numeric(_finance_get(df, col), errors="coerce") / 100.0
+    for k, col in raw_cols.items():
+        ev[k] = pd.to_numeric(_finance_get(df, col), errors="coerce")
     aligned = _asof_align(dates, ev, "avail", [c for c in ev.columns if c != "avail"])
     out = pd.DataFrame(index=dates)
     out["fin_roe"] = aligned["roe"].fillna(0.0)
@@ -153,10 +162,17 @@ def _finance_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     out["fin_debt_ratio"] = aligned["debt_ratio"].fillna(0.0)
     out["fin_rev_yoy"] = aligned["rev_yoy"].fillna(0.0)
     out["fin_profit_yoy"] = aligned["profit_yoy"].fillna(0.0)
-    out["fin_profit_yoy_chg"] = aligned["profit_yoy"].diff().fillna(0.0)  # 加速/减速
+    out["fin_profit_yoy_chg"] = aligned["profit_yoy"].diff().fillna(0.0)  # 净利增速加速/减速
     out["fin_cf_quality"] = (aligned["ocf"] / aligned["eps"].replace(0, np.nan)).fillna(0.0)
     out["fin_eps"] = aligned["eps"].fillna(0.0)
     out["fin_bps"] = aligned["bps"].fillna(0.0)
+    # ── 2026-08-20 新增 6 维 ──
+    out["fin_roe_tb"] = aligned["roe_tb"].fillna(0.0)                    # 摊薄ROE
+    out["fin_rev_yoy_chg"] = aligned["rev_yoy"].diff().fillna(0.0)      # 营收增速变化
+    out["fin_current_ratio"] = aligned["current_ratio"].fillna(0.0)     # 流动比率
+    out["fin_quick_ratio"] = aligned["quick_ratio"].fillna(0.0)         # 速动比率
+    out["fin_inv_turn_days"] = aligned["inv_turn_days"].fillna(0.0)     # 存货周转天数
+    out["fin_ar_turn_days"] = aligned["ar_turn_days"].fillna(0.0)       # 应收周转天数
     return out
 
 
@@ -305,7 +321,9 @@ _EMPTY_COLS = {
                   "ff_main_amt_20d", "ff_main_momentum", "ff_xbig_ratio_5d"],
     "finance": ["fin_roe", "fin_gp_margin", "fin_np_margin", "fin_debt_ratio",
                 "fin_rev_yoy", "fin_profit_yoy", "fin_profit_yoy_chg",
-                "fin_cf_quality", "fin_eps", "fin_bps"],
+                "fin_cf_quality", "fin_eps", "fin_bps",
+                "fin_roe_tb", "fin_rev_yoy_chg", "fin_current_ratio",
+                "fin_quick_ratio", "fin_inv_turn_days", "fin_ar_turn_days"],
     "holders": ["hd_num_chg", "hd_avg_mcap"],
     "consensus": ["cs_buy_ratio", "cs_org_num", "cs_pred_pe", "cs_aim_dev", "cs_aim_spread"],
     "news": ["nw_cnt_5d", "nw_cnt_20d", "nw_src_div"],
