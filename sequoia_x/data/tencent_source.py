@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import time
 import logging
 from typing import Optional
@@ -516,6 +517,138 @@ class TDXSource:
             except Exception:
                 pass
             self._client = None
+
+
+class HithinkValuationSource:
+    """同花顺 Financial-API（hithink-finance）估值快照数据源。
+
+    替代 baostock / TDX(mootdx) 作为估值字段的实时来源。
+    2026-08-20 实测（详见 probes/hithink 系列）：
+      - 口径对齐 baostock（茅台 pe_ttm 19.87 vs 20.08，差 ~1% = 盘中实时 vs 前收）
+      - 亏损股保留负值（万科 pe_ttm -0.42，不抹 0）——优于 mootdx/TDX 的抹 0
+      - 额外提供 ps_ttm / pcf_ttm（baostock 库常为 0.0 占位）+ pe_mrq（新口径）
+      - 每请求最多 100 个 thscode → 全市场 ~5200 只 ≈ 52 请求 ≈ 8 秒
+      - 实测连环 30 次 + 100 只/批×20 批均未触发 4001 限流
+
+    限制（官方契约）：仅"当前估值快照"，**不提供历史估值** → 只能补新增日，
+    历史段仍需 baostock（过去已入库值）或财务重建。
+
+    API Key：从环境变量 ``HITHINK_FINANCE_API_KEY`` 读取（不写入代码/git）。
+    """
+
+    BASE = "https://fuyao.aicubes.cn"
+    SNAPSHOT_PATH = "/api/a-share/valuations/snapshot"
+
+    def __init__(self, timeout: float = 15.0):
+        self._timeout = timeout
+        self._api_key = os.environ.get("HITHINK_FINANCE_API_KEY", "")
+        self._success_count = 0
+        self._fail_count = 0
+
+    def available(self) -> bool:
+        """是否已配置 API Key（无 Key 则直接不可用，不报错）。"""
+        return bool(self._api_key and len(self._api_key) >= 8)
+
+    @staticmethod
+    def _to_thscode(symbol: str) -> str:
+        """DB 6 位代码 → 同花顺 thscode（带交易所后缀）。"""
+        code = symbol.split(".")[-1]
+        if len(code) != 6:
+            return code
+        if code[0] in ("6", "9"):
+            return f"{code}.SH"
+        if code[0] in ("0", "3"):
+            return f"{code}.SZ"
+        return f"{code}.BJ"  # 4/8
+
+    @staticmethod
+    def _code_from_thscode(thscode: str) -> str:
+        """同花顺 thscode → DB 6 位纯数字代码。"""
+        return thscode.split(".")[0]
+
+    @classmethod
+    def _safe_float(cls, v) -> float | None:
+        """同花顺值 → float；None/空 → None（原样缺省，不补 0）。"""
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _req(self, thscodes: list[str]) -> dict | None:
+        """请求估值快照，返回 data.item 列表，失败返回 None。"""
+        if not thscodes:
+            return {"code": 0, "item": []}
+        # 每请求上限 100 个，超了分段
+        all_items = []
+        for i in range(0, len(thscodes), 100):
+            batch = thscodes[i:i + 100]
+            try:
+                r = requests.get(
+                    f"{self.BASE}{self.SNAPSHOT_PATH}",
+                    params={"thscodes": ",".join(batch)},
+                    headers={"X-api-key": self._api_key},
+                    timeout=self._timeout,
+                )
+                j = r.json()
+            except Exception:
+                self._fail_count += 1
+                return None
+            if j.get("code") != 0:
+                self._fail_count += 1
+                return None
+            all_items.extend(j.get("data", {}).get("item", []))
+        return {"code": 0, "item": all_items}
+
+    def batch_valuation(self, symbols: list[str]) -> dict[str, dict]:
+        """批量查询多只股票的估值。
+
+        Args:
+            symbols: DB 6 位纯数字代码列表。
+
+        Returns:
+            dict[code -> dict]，含 peTTM/pbMRQ/psTTM/pcfNcfTTM 与原始 pe_ttm/pe_mrq 等。
+            缺失/失败股票不出现在返回中（与 baostock 空值不覆盖原值语义一致）。
+        """
+        if not self.available():
+            return {}
+        thscodes = [self._to_thscode(s) for s in symbols]
+        resp = self._req(thscodes)
+        if resp is None or resp.get("code") != 0:
+            return {}
+        out: dict[str, dict] = {}
+        for it in resp.get("item", []):
+            code = self._code_from_thscode(it.get("thscode", ""))
+            if not code:
+                continue
+            out[code] = {
+                "peTTM": self._safe_float(it.get("pe_ttm")),
+                "pbMRQ": self._safe_float(it.get("pb_mrq")),
+                "psTTM": self._safe_float(it.get("ps_ttm")),
+                "pcfNcfTTM": self._safe_float(it.get("pcf_ttm")),
+                # 原始同花顺字段（含 MRQ 新口径）
+                "pe_mrq": self._safe_float(it.get("pe_mrq")),
+                "_name": it.get("name"),
+                "_thscode": it.get("thscode"),
+            }
+            self._success_count += 1
+        return out
+
+    def get_valuation(self, symbol: str) -> dict | None:
+        """兼容 TDXSource 接口：单只查询。返回 None 表示该股本次不可用。"""
+        vals = self.batch_valuation([symbol])
+        return vals.get(symbol.split(".")[-1])
+
+    def close(self):
+        """无持有连接，静默通过（接口无状态）。"""
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 # ──────────────────────────────────────────────

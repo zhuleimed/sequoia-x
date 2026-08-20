@@ -14,7 +14,8 @@ from pathlib import Path
 import pandas as pd
 
 from sequoia_x.core.config import Settings
-from sequoia_x.data.tencent_source import SinaSource, TencentSource, TDXSource, to_sina_code
+from sequoia_x.data.tencent_source import (HithinkValuationSource, SinaSource,
+                                           TencentSource, to_sina_code)
 from sequoia_x.core.logger import get_logger
 from sequoia_x.data.engine import DataEngine
 
@@ -1461,13 +1462,14 @@ class DataSync:
         return count
 
     def _fill_valuation_gaps(self, days: int = 5) -> dict:
-        """回填估值字段（baostock 主力，TDX 后备）。
+        """回填估值字段（baostock 主力历史段，同花顺快照补新增/缺口）。
 
         2026-08-03 优化（估值失真事故后，全量修复见 scripts/backfill_valuation_full.py）:
-          1. 优先级反转: baostock 优先（返回当日真实历史估值，亏损股为负值）
-             → TDX 后备（财务快照推算，仅补 peTTM/pbMRQ，ps/pcf 不动）
+          1. Phase 3a baostock 优先（返回当日真实历史估值，亏损股为负值）
           2. 缺失判定含 =0（0 视为缺失；负值是亏损股真实语义，不补）
           3. baostock 按股票一次拉全区间批量更新（原逐条查询，提速 ~1500 倍）
+        2026-08-20 改为: Phase 3b 用同花顺估值快照替换原 TDX 后备——只补缺失字段
+          （含 psTTM/pcfNcfTTM、亏损股负值保留），不覆盖 baostock 已填真值。
         """
         today_str: str = date.today().strftime("%Y-%m-%d")
         start_date: str = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -1551,75 +1553,86 @@ class DataSync:
                     f"耗时 {elapsed:.0f}s"
                 )
             else:
-                logger.warning("_fill_valuation_gaps: baostock 登录失败，切换 TDX 后备")
+                # 2026-08-20: baostock 失败不再"切 TDX"，Phase 3b 同花顺仍会运行补缺口
+                logger.warning("_fill_valuation_gaps: baostock 登录失败（Phase 3a 贡献 0，同花顺 Phase 3b 继续）")
         except Exception as e:
-            logger.warning(f"_fill_valuation_gaps: baostock 异常({e})，切换 TDX 后备")
+            logger.warning(f"_fill_valuation_gaps: baostock 异常({e})（Phase 3a 贡献 0，同花顺 Phase 3b 继续）")
 
-        # ── Phase 3b: TDX 后备（baostock 不可用时，仅补 peTTM/pbMRQ）──
-        tdx_filled = 0
-        if not bs_available:
-            try:
-                tdx = TDXSource()
-                # 快速探测 TDX 是否可用
-                test_val = tdx.get_valuation('000001')
-                if test_val is not None:
-                    logger.info("_fill_valuation_gaps: TDX 后备回填（仅 peTTM/pbMRQ）")
-
-                    # 按股票分组，每只股票只查一次 finance
-                    symbols = list(set(row[0] for row in null_rows))
-                    tdx_cache: dict[str, dict] = {}
-                    for i, sym in enumerate(symbols):
-                        val = tdx.get_valuation(sym)
-                        if val is not None:
-                            tdx_cache[sym] = val
-                        if (i + 1) % 100 == 0:
-                            logger.info(
-                                f"  TDX 进度: {i+1}/{len(symbols)} 只 "
-                                f"(成功={len(tdx_cache)}, {time.time()-t0:.0f}s)"
-                            )
-
-                    # 只更新 peTTM/pbMRQ（ps/pcf 不动——推算值会覆盖 baostock 真实值）
-                    for sym, dt, price in null_rows:
-                        if sym in tdx_cache:
-                            v = tdx_cache[sym]
-                            price_f = float(price) if price else 0.0
-                            eps = v.get('_eps', 0)
-                            bvps = v.get('_bvps', 0)
-                            pe = round(price_f / eps, 2) if eps > 0 and price_f > 0 else 0.0
-                            pb = round(price_f / bvps, 2) if bvps > 0 and price_f > 0 else 0.0
-                            try:
-                                self._db_conn.execute(
-                                    "UPDATE stock_daily SET peTTM=?, pbMRQ=? "
-                                    "WHERE symbol=? AND date=?",
-                                    (pe, pb, sym, dt)
-                                )
-                                tdx_filled += 1
-                            except Exception:
-                                tdx_filled += 1  # 有异常也算尝试了
-
-                    self._db_conn.commit()
-                    tdx.close()
-                    elapsed = time.time() - t0
+        # ── Phase 3b: 同花顺估值快照（新增日 + ps/pcf 缺口；负值保留）──
+        # 2026-08-20: 以同花顺替换 TDX/mootdx 后备。优势（实测，见 HithinkValuationSource）：
+        #   口径对齐 baostock、亏损股负值保留、补 psTTM/pcfNcfTTM（baostock 常为 0）、
+        #   100只/请求 ≈52请求/全市场，无限流。限制：仅当前快照，不补历史段（baostock 负责）。
+        # 注意：不覆盖 baostock 历史已填真值——null_rows 仅含缺失/0 行，此处只填这些行。
+        hithink_filled = 0
+        try:
+            hk = HithinkValuationSource()
+            if hk.available():
+                symbols = sorted(set(row[0] for row in null_rows))
+                cache = hk.batch_valuation(symbols)
+                if cache:
                     logger.info(
-                        f"_fill_valuation_gaps TDX 后备: 完成 {tdx_filled} 条, "
-                        f"耗时 {elapsed:.0f}s"
+                        f"_fill_valuation_gaps: 同花顺快照 {len(cache)}/{len(symbols)} 只 "
+                        f"(耗时 {time.time()-t0:.0f}s)"
+                    )
+                    # 先批量读出缺失行当前值，避免逐行 SELECT（分块规避 SQLite 变量上限）
+                    curs = self._db_conn.cursor()
+                    cur_map: dict[tuple, tuple] = {}
+                    if null_rows:
+                        for i in range(0, len(null_rows), 300):
+                            chunk = null_rows[i:i + 300]
+                            ph = ",".join(["(?,?)"] * len(chunk))
+                            q = (f"SELECT symbol, date, peTTM, pbMRQ, psTTM, pcfNcfTTM "
+                                 f"FROM stock_daily WHERE (symbol, date) IN ({ph})")
+                            for r in curs.execute(q, [x for row in chunk for x in (row[0], row[1])]):
+                                cur_map[(r[0], r[1])] = (r[2], r[3], r[4], r[5])
+
+                    updates = []
+                    for sym, dt, price in null_rows:
+                        v = cache.get(sym)
+                        if not v:
+                            continue
+                        cur = cur_map.get((sym, dt))
+                        if not cur:
+                            continue
+                        cur_pe, cur_pb, cur_ps, cur_pcf = cur
+                        # 只为当前仍缺失(=NULL/0)的字段填快照值；已有值(含 baostock 已填)的字段不动
+                        new_pe = v["peTTM"] if (cur_pe is None or cur_pe == 0) else cur_pe
+                        new_pb = v["pbMRQ"] if (cur_pb is None or cur_pb == 0) else cur_pb
+                        new_ps = v["psTTM"] if (cur_ps is None or cur_ps == 0) else cur_ps
+                        new_pcf = v["pcfNcfTTM"] if (cur_pcf is None or cur_pcf == 0) else cur_pcf
+                        if (new_pe, new_pb, new_ps, new_pcf) == (cur_pe, cur_pb, cur_ps, cur_pcf):
+                            continue  # 该行已无缺口（baostock 已填），同花顺不重写
+                        updates.append((new_pe, new_pb, new_ps, new_pcf, sym, dt))
+                    if updates:
+                        self._db_conn.executemany(
+                            "UPDATE stock_daily SET peTTM=?, pbMRQ=?, psTTM=?, pcfNcfTTM=? "
+                            "WHERE symbol=? AND date=?",
+                            updates,
+                        )
+                    self._db_conn.commit()
+                    hithink_filled = len(updates)
+                    logger.info(
+                        f"_fill_valuation_gaps 同花顺: 完成 {hithink_filled} 条, "
+                        f"耗时 {time.time()-t0:.0f}s"
                     )
                 else:
-                    logger.warning("_fill_valuation_gaps: TDX 探测失败，估值保持原值")
-            except Exception as e:
-                logger.warning(f"_fill_valuation_gaps: TDX 后备异常: {e}")
+                    logger.warning("_fill_valuation_gaps: 同花顺批量估值返回空，估值保持原值")
+            else:
+                logger.info("_fill_valuation_gaps: 未配置 HITHINK_FINANCE_API_KEY，跳过同花顺 Phase 3b")
+        except Exception as e:
+            logger.warning(f"_fill_valuation_gaps: 同花顺后备异常: {e}")
 
         self._close_db()
-        total_filled = bs_filled + tdx_filled
+        total_filled = bs_filled + hithink_filled
         total_null = len(null_rows)
         total_failed = total_null - total_filled if total_null > total_filled else 0
         logger.info(
             f"_fill_valuation_gaps: 总计 {total_filled} 条 "
-            f"(baostock={bs_filled}, TDX={tdx_filled}), "
+            f"(baostock={bs_filled}, 同花顺={hithink_filled}), "
             f"失败={total_failed}"
         )
         return {"status": "ok", "filled": total_filled, "failed": total_failed,
-                "baostock_filled": bs_filled, "tdx_filled": tdx_filled}
+                "baostock_filled": bs_filled, "hithink_filled": hithink_filled}
 
     def sync_index_daily(self, force: bool = False) -> dict:
         """同步 6 大指数日线数据到 index_daily 表。
