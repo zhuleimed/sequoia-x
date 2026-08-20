@@ -269,6 +269,86 @@ def _xdxr_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) -> pd.D
     return out
 
 
+# ════════════════════════════════════════════════════════════
+#  2026-08-20 新增：同花顺短线情绪维度（事件日 asof）
+#  龙虎榜 / 涨停池 / 热榜——采集见 scripts/fetch_hithink_sentiment.py（近一年日榜→每股parquet）
+# ════════════════════════════════════════════════════════════
+
+
+def _latest_event_state(df, dates, value_cols):
+    """事件 asof 前向填充 value_cols + 返回 avail 序列（用于算滚动事件次数）。
+
+    Returns (aligned_df[value_cols], avail: DatetimeIndex)
+    """
+    sub = df.dropna(subset=value_cols, how="all")
+    if sub.empty:
+        return None, None
+    ev = pd.DataFrame({"avail": pd.to_datetime(sub["date"])})
+    for c in value_cols:
+        ev[c] = pd.to_numeric(sub[c], errors="coerce")
+    ev = ev.dropna(subset=["avail"]).drop_duplicates(subset="avail", keep="last")
+    if ev.empty:
+        return None, None
+    aligned = _asof_align(dates, ev, "avail", value_cols)
+    return aligned, ev["avail"].drop_duplicates()
+
+
+def _event_count_30d(avail, dates):
+    """近30日事件次数（无事件→0）。avail: 事件日 Series(DatetimeIndex 值)。"""
+    if avail is None or len(avail) == 0:
+        return pd.Series(0.0, index=dates)
+    # 转 DatetimeIndex 事件序列，再滚动 30D 计数
+    ev = pd.Series(1.0, index=pd.DatetimeIndex(avail)).sort_index()
+    cnt = ev.rolling("30D", min_periods=1).count()
+    return cnt.reindex(dates).fillna(0.0).astype(float)
+
+
+def _dragon_tiger_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """龙虎榜(事件, 近一年): 净买入(亿)/净买入率/近30日上榜次数"""
+    df = _load("dragon_tiger", code)
+    cols = ["dt_net_buy", "dt_net_rate", "dt_cnt_30d"]
+    if df is None or len(df) == 0:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    aligned, avail = _latest_event_state(df, dates, ["dt_net_buy", "dt_net_rate"])
+    if aligned is None:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    res = pd.DataFrame(index=dates)
+    res["dt_net_buy"] = (aligned["dt_net_buy"] / 1e8).fillna(0.0)   # 亿
+    res["dt_net_rate"] = aligned["dt_net_rate"].fillna(0.0)         # 净买入率(小数)
+    res["dt_cnt_30d"] = _event_count_30d(avail, dates)
+    return res
+
+
+def _limit_up_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """涨停(事件, 近一年): 连板数/封单额(亿)/近30日涨停次数"""
+    df = _load("limit_up", code)
+    cols = ["lu_lianban", "lu_seal", "lu_cnt_30d"]
+    if df is None or len(df) == 0:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    aligned, avail = _latest_event_state(df, dates, ["lu_lianban", "lu_seal"])
+    if aligned is None:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    res = pd.DataFrame(index=dates)
+    res["lu_lianban"] = aligned["lu_lianban"].fillna(0.0)     # 连板数
+    res["lu_seal"] = (aligned["lu_seal"] / 1e8).fillna(0.0)   # 封单额(亿)
+    res["lu_cnt_30d"] = _event_count_30d(avail, dates)
+    return res
+
+
+def _hot_rank_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """热榜(事件, 近一年): 榜单排名(越小越热)/近30日入榜次数"""
+    df = _load("hot_rank", code)
+    cols = ["hr_rank", "hr_cnt_30d"]
+    if df is None or len(df) == 0:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    aligned, avail = _latest_event_state(df, dates, ["hr_rank"])
+    if aligned is None:
+        return pd.DataFrame(index=dates, columns=cols, dtype=float)
+    res = pd.DataFrame(index=dates)
+    res["hr_rank"] = aligned["hr_rank"].fillna(0.0)
+    res["hr_cnt_30d"] = _event_count_30d(avail, dates)
+    return res
+
 
 # ════════════════════════════════════════════════════════════
 #  主入口
@@ -283,6 +363,10 @@ FEATURE_GROUPS = {
     "xdxr": _xdxr_features,
     # 2026-08-20: forecast(业绩预告) 移除——ths/mootdx 均无此接口，信息量可由
     # finance 16维 + 短线情绪维度替代（feature_version→4）
+    # 2026-08-20: 新增同花顺短线情绪维度
+    "dragon_tiger": _dragon_tiger_features,
+    "limit_up": _limit_up_features,
+    "hot_rank": _hot_rank_features,
 }
 
 # 各组固定列名模板（异常兜底时全 0 填充, 保证输出恒 33 列 → 拼接维度一致）
@@ -298,6 +382,9 @@ _EMPTY_COLS = {
     "consensus": ["cs_buy_ratio", "cs_org_num", "cs_pred_pe", "cs_aim_dev", "cs_aim_spread"],
     "news": ["nw_cnt_5d", "nw_cnt_20d", "nw_src_div"],
     "xdxr": ["xd_yield", "xd_div_cnt_3y", "xd_song_cnt_3y"],
+    "dragon_tiger": ["dt_net_buy", "dt_net_rate", "dt_cnt_30d"],
+    "limit_up": ["lu_lianban", "lu_seal", "lu_cnt_30d"],
+    "hot_rank": ["hr_rank", "hr_cnt_30d"],
 }
 
 
@@ -319,7 +406,8 @@ KEY_GROUPS = ("fund_flow", "finance", "holders")
 #   数据面完全未采到 → 覆盖 0% (缺失 → incomplete)
 EXTRA_COVERAGE_THRESHOLD = 0.05
 _PREFIX_TO_GROUP = {"ff": "fund_flow", "fin": "finance", "hd": "holders",
-                    "cs": "consensus", "nw": "news", "xd": "xdxr"}
+                    "cs": "consensus", "nw": "news", "xd": "xdxr",
+                    "dt": "dragon_tiger", "lu": "limit_up", "hr": "hot_rank"}
 
 
 def build_extra_with_flag(dates: pd.DatetimeIndex, close: pd.Series,
