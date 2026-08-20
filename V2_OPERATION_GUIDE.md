@@ -347,13 +347,17 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 
 | 数据 | 主源 | 覆盖 | 用途 |
 |------|------|------|------|
-| fund_flow | **新浪 MoneyFlow**（sync_fund_flow_history.py） | 2018-05 起全历史 | 33 维中的 6 个资金流特征 |
-| finance | 同花顺 akshare | 102 期全历史 | 10 个财务特征 |
+| fund_flow | **新浪 MoneyFlow**（sync_fund_flow_history.py） | 2018-05 起全历史 | 41 维中的 6 个资金流特征 |
+| finance | 同花顺 akshare | 102 期全历史 | **16 个财务特征**（V4 从 10 扩到 16：+ROE摊薄/营收增速变化/流动/速动/存货/应收周转） |
 | holders | 东财 datacenter | 2013 起 | 2 个股东结构特征 |
 | consensus | 东财报告 | 近期快照 | 5 个一致预期特征 |
 | news | 东财 search-api | 近期 | 3 个新闻特征 |
 | xdxr | mootdx 通达信 | 全历史分红 | 3 个分红特征 + 后复权因子 |
-| forecast | baostock | 全历史预告 | 4 个业绩预告特征 |
+| **dragon_tiger** | **同花顺 Financial-API** | 近一年 | 3 个龙虎榜特征（net_buy/net_rate/cnt30d）——2026-08-20 V4 新增 |
+| **limit_up** | **同花顺 Financial-API** | 近一年 | 3 个涨停特征（lianban/seal/cnt30d）——2026-08-20 V4 新增 |
+
+> **forecast（业绩预告）已于 2026-08-20 移除**（ths/mootdx 均无此接口）。扩展维度 33 → 41（88+41=**129 维**，feature_version=4）。
+> **估值**：历史 peTTM 用 finance 重建（`rebuild_valuation_history.py` rolling-TTM）；PB 保留 baostock 历史；新增日用 HithinkValuationSource（同花顺快照）。详见 `THS_MOOTDX_MIGRATION_PLAN.md`。
 
 **fund_flow 切换说明（2026-08-11）**：东财 push2his 仅返回近 ~120 天（接口硬限制）→ 121 维
 采样日被锁死 10 天。新浪 MoneyFlow 全历史（实测 2018-05 起 2000 行）→ 采样日可达 143 天。
@@ -375,13 +379,16 @@ baostock/Sina 返回"股"无需转换。新增数据源先确认单位。
 
 # 第四部分：特征与模型
 
-## 10. 特征体系（80 / 88 / 121 维）
+## 10. 特征体系（80 / 88 / 121 / **129 维**）
 
 | 版本 | 维度 | 内容 |
 |------|------|------|
 | 80 | 量价 | 收益/均线/量能/技术指标/波动率/大盘关联（T4 LSTM 用，LSTM 自学市场模式） |
 | 88 | 80 + 8 | + 市场状态特征（指数涨跌/波动/回撤/均线/上涨占比，树模型用） |
 | 121 | 88 + 33 | + 扩展维度（fund_flow 6 + finance 10 + holders 2 + consensus 5 + news 3 + xdxr 3 + forecast 4） |
+| **129 (V4)** | **88 + 41** | **+ 扩展维度（fund_flow 6 + finance 16 + holders 2 + consensus 5 + news 3 + xdxr 3 + dragon_tiger 3 + limit_up 3）**——2026-08-20 V4：finance扩到16、砍forecast、新增龙虎榜/涨停 |
+
+> **V4（feature_version=4，2026-08-20）**：见 `THS_MOOTDX_MIGRATION_PLAN.md`。与 v3 不兼容 → 缓存/重训全量重建。
 
 **后复权补丁（feature_version=3）**：DB 为不复权价，特征计算前 `adjust.py::apply_adjust`
 对 OHLCV 原地后复权（除权日假断层会污染收益/均线/技术指标）；extra 特征用原始价构建。
