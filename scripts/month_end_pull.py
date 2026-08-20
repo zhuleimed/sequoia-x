@@ -257,6 +257,24 @@ def main():
                 f"collect exit={r.returncode}, news_cls exit={r2.returncode} → 自动链中止, 需人工介入")
         sys.exit(1)
 
+    # 2026-08-20 新增: 短线情绪维度采集（龙虎榜/涨停, 近一年日榜→每股parquet, 断点续跑）
+    print(f"[{today}] ★ 短线情绪维度刷新（龙虎榜/涨停, ~3-6min）...")
+    r3 = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts/fetch_hithink_sentiment.py"),
+                         "--days", "365"], cwd=str(PROJECT_DIR), timeout=2 * 3600)
+    # 无 HITHINK API Key 时跳过（不阻断，情绪维度缺失合法)
+    if r3.returncode not in (0, 1, 2):
+        _notify("⚠️ 短线情绪维度采集失败", f"exit={r3.returncode}, 情绪维度缺(合法), 继续")
+    print(f"[{today}] 短线情绪维度采集结束, exit={r3.returncode}")
+
+    # 2026-08-20 新增: 历史 peTTM 重建（方案A: PE 彻底摆脱 baostock, PB 保留 baostock 历史）
+    # 必须在缓存重建前执行——peTTM 喂给 88 维特征
+    print(f"[{today}] ★ 历史 peTTM 重建（finance rolling-TTM, 全历史, ~10-30min）...")
+    r4 = subprocess.run([sys.executable, str(PROJECT_DIR / "scripts/rebuild_valuation_history.py")],
+                        cwd=str(PROJECT_DIR), timeout=6 * 3600)
+    if r4.returncode != 0:
+        _notify("⚠️ 历史 peTTM 重建异常", "peTTM 部分未重建, 88维该特征可能受影响；但 PE 阶段容忍")
+    print(f"[{today}] 历史 peTTM 重建结束, exit={r4.returncode}")
+
     ok = auto_rebuild_and_verify(today)
     sys.exit(0 if ok else 1)
 
