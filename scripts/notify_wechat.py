@@ -15,44 +15,36 @@ PROJ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJ))
 
 
-def load_env(file: Path) -> None:
-    """极简 .env 解析（避免依赖 dotenv）。"""
-    if not file.exists():
-        return
-    for line in file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-
-
 def main():
+    """独立 wxpusher 推送（与生产 _notify 同源: get_settings() 加载 token/topic）。
+
+    2026-08-20: 复用项目标准配置路径，而非手动 parse .env——
+    与 month_end_pull._notify / v2_monthly_retrain 荐股推送同源一致。
+    """
     if len(sys.argv) < 2:
         print("用法: notify_wechat.py '<消息>'")
         sys.exit(2)
     msg = sys.argv[1]
-    load_env(PROJ / ".env")
-    token = os.environ.get("WXPUSHER_TOKEN", "")
-    topic_ids = os.environ.get("WXPUSHER_TOPIC_IDS", "[]")
-    if not token:
-        print("❌ 缺 WXPUSHER_TOKEN (.env)")
+    try:
+        from sequoia_x.core.config import get_settings
+        from wxpusher import WxPusher
+    except Exception as e:
+        print(f"❌ 导入失败: {e}")
         sys.exit(1)
     try:
-        import json
-        topic_ids_l = json.loads(topic_ids)
-    except Exception:
-        topic_ids_l = [39277]
-    from wxpusher import WxPusher
-    resp = WxPusher.send_message(
-        content=msg,
-        token=token,
-        topic_ids=topic_ids_l,
-        summary="V4迁移进度",
-        content_type=1,
-    )
+        s = get_settings()
+        resp = WxPusher.send_message(
+            content=msg,
+            token=s.wxpusher_token,
+            topic_ids=s.wxpusher_topic_ids,
+            summary="V4迁移进度",
+            content_type=1,
+        )
+    except Exception as e:
+        print(f"⚠️ 推送失败(不阻断): {e}")
+        sys.exit(1)
     ok = resp.get("code") == 1000
-    print(f"{'✅' if ok else '⚠️'} 微信推送 {resp}")
+    print(f"{'✅' if ok else '⚠️'} 微信推送 code={resp.get('code')}")
     sys.exit(0 if ok else 1)
 
 
