@@ -10,26 +10,38 @@ cd "$PROJ"
 log(){ echo "[$(date '+%F %T')] $1"; }
 notify(){ "$PY" scripts/notify_wechat.py "$1" 2>/dev/null || true; }
 
-# ── 进度监控器（后台）: 每 15min 统计已完成月份 temp 文件数 → 推送 ──
+# ── 进度监控器（后台）: 按系统时间分级推送（2026-08-20 用户要求） ──
+#   白天 07:00~23:00 每小时一次;  夜间 06:00 汇总一次(覆盖 23~06);  其余时刻不推
 MONITOR_PID=""
 if [ "${SKIP_PROGRESS:-0}" != "1" ]; then
     (
-        TOTAL=70   # 2020-09~2026-06 = 70个月, 与旧体系最终最优配置同口径对比
+        TOTAL=70
+        LAST_PUSH_HOUR=$(date +%-H)   # 初始化为当前小时 → 启动时不立即推(等下一个非当前小时才推)
         while true; do
-            sleep 900   # 15min
-            DONE=$(ls "$TMPDIR"/month_*.json 2>/dev/null | wc -l)
-            ERR=$(ls "$TMPDIR"/month_*.error 2>/dev/null | wc -l)
-            if [ "$DONE" -ge "$TOTAL" ]; then break; fi
-            pct=$(( DONE * 100 / TOTAL ))
-            notify "⏳ V4 70月回测进度: 已构建 $DONE/$TOTAL 个月 ($pct%)，失败月份 $ERR。（断点续跑，继续中）"
-            # 避免推送过密——若已无进展则不重复推（脚本退出后结束）
+            H=$(date +%-H)      # 当前小时 0-23
+            PUSH=0
+            if [ "$H" -ge 7 ] && [ "$H" -le 23 ]; then PUSH=1; fi   # 白天每小时
+            if [ "$H" -eq 6 ]; then PUSH=2; fi                       # 6点夜间汇总
+            if [ "$PUSH" != "0" ] && [ "$H" != "$LAST_PUSH_HOUR" ]; then
+                DONE=$(ls "$TMPDIR"/month_*.json 2>/dev/null | wc -l)
+                ERR=$(ls "$TMPDIR"/month_*.error 2>/dev/null | wc -l)
+                pct=$(( DONE * 100 / TOTAL ))
+                if [ "$PUSH" = "2" ]; then
+                    notify "🌙 V4 70月回测【夜间汇总 06:00】: 已构建 $DONE/$TOTAL 个月 ($pct%)，失败 $ERR。覆盖夜间 23点~6点。"
+                else
+                    notify "⏳ V4 70月回测【整点 ${H}:00】: 已构建 $DONE/$TOTAL 个月 ($pct%)，失败 $ERR。断点续跑中。"
+                fi
+                LAST_PUSH_HOUR="$H"
+            fi
+            if [ "$DONE" -ge "$TOTAL" ]; then break; fi   # 全部完成 → 停监控
+            sleep 60
         done
     ) &
     MONITOR_PID=$!
-    log "进度监控器启动 PID=$MONITOR_PID"
+    log "进度监控器启动 PID=$MONITOR_PID（白天07-23每小时 + 6点夜间汇总）"
 fi
 
-notify "🚀 V4 129维 70个月回测启动（2020-09~2026-06，与旧体系同口径）。后端预测缓存构建+并行回测，每15分钟推进度，完成后推最终结果。"
+notify "🚀 V4 129维 70个月回测启动（2020-09~2026-06，与旧体系同口径）。进度推送：白天(07-23)每小时1次 + 早上6点夜间汇总1次。完成后推最终结果。"
 
 # ── 阶段1: 构建 70 个月 V4 预测缓存（多进程24/断点续跑）──
 log "阶段1: 构建 70 个月 V4 预测缓存 -> $OUT"
