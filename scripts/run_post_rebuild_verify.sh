@@ -10,10 +10,11 @@ PY=/home/zhulei/anaconda3/envs/zhulei_py312/bin/python
 cd "$PROJ"
 log(){ echo "[$(date '+%F %T')] $1"; }
 
-# 等待缓存重建进程 (rebuild_dataset_cache) 结束
+# 等待缓存重建进程 (rebuild_dataset_cache --only-88) 结束
+# ⚠️ 用 pgrep -f 精确匹配 + grep -v 排除自身；勿用裸 grep（会匹配本脚本命令行里的同名字符串）
 log "等待缓存重建进程结束..."
-while ps -e | grep -q "rebuild_dataset_cache"; do sleep 30; done
-sleep 10
+while pgrep -f "rebuild_dataset_cache\.py --only-88" > /dev/null 2>&1; do sleep 30; done
+sleep 15
 log "缓存重建进程已结束"
 
 # ── 1. 确认 fv=4 缓存生成且完整 ──
@@ -30,8 +31,10 @@ for d in data/cache/v2_dataset/*/; do
 done
 if [ "$FOUND" = "1" ]; then
   log "  ✅ fv=4 缓存已生成"
+  "$PY" scripts/notify_wechat.py "✅ 129维缓存重建完成(fv=4)。开始接续验证(新特征覆盖率+单月干跑)..." 2>/dev/null || true
 else
   log "  ❌ 未找到 fv=4 缓存 (可能重建未完成或失败), 中止接续链"
+  "$PY" scripts/notify_wechat.py "❌ 129维缓存重建失败——未找到fv=4缓存, 需人工排查 logs/v4_cache_rebuild*.log" 2>/dev/null || true
   exit 1
 fi
 
@@ -63,9 +66,12 @@ PYTHONPATH=$PROJ "$PY" -u scripts/build_prediction_cache.py \
 RC=$?
 if [ $RC -eq 0 ] && [ -f "$DRY" ]; then
   log "  ✅ 干跑验证通过: $DRY"
+  PUSH_MSG="✅ V4迁移接续验证全部通过！129维新体系就绪(fv=4, 129维)。下一步(手动): 60月回测(6月基准)后 8/31 月末链正式跑。详看 logs/post_rebuild_verify.log"
 else
   log "  ❌ 干跑失败 exit=$RC (129维预测链路有问题, 需人工排查)"
+  PUSH_MSG="⚠️ V4迁移：缓存重建完成但干跑验证失败(exit=$RC)，129维预测链路可能有问题，需排查 logs/post_rebuild_verify.log"
 fi
+"$PY" scripts/notify_wechat.py "$PUSH_MSG" 2>/dev/null || true
 
 log "═══ 接续链完成 ═══"
 log "下一步(手动): 60月回测验证(6月基准), 确认129维收益不劣化"
