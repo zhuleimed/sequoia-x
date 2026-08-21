@@ -275,8 +275,15 @@ def _xdxr_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) -> pd.D
 # ════════════════════════════════════════════════════════════
 
 
-def _latest_event_state(df, dates, value_cols):
+def _latest_event_state(df, dates, value_cols, next_day: bool = False):
     """事件 asof 前向填充 value_cols + 返回 avail 序列（用于算滚动事件次数）。
+
+    Args:
+        next_day: True=事件在"下一交易日"才生效（消除前视）。
+            ⚠️ 2026-08-21 修复: 龙虎榜/涨停是"收盘后/当日"才知的事件, 若当日生效则
+            回测在月末采样(ref_date=上榜日)用到"当天还没公布的龙虎榜/涨停"→ 前视,
+            系统性抢跑虚增收益(920156 4-30上榜被当天4-30使用, 实测确认)。必须次日生效。
+            fund_flow 等当日资金流不属此类, 保持当日(False)。
 
     Returns (aligned_df[value_cols], avail: DatetimeIndex)
     """
@@ -289,6 +296,20 @@ def _latest_event_state(df, dates, value_cols):
     ev = ev.dropna(subset=["avail"]).drop_duplicates(subset="avail", keep="last")
     if ev.empty:
         return None, None
+    if next_day:
+        # 事件移到下一交易日生效: avail = 涨停/上榜日的下一交易日（pandas 原生, 无 numpy 类型陷阱）
+        # dates 是当前股票的交易日序列(DatetimeIndex)。对每个上榜日 d:
+        #   searchsorted(左边界) 给 >=d 的首位置; 若该位就是 d(上榜日也是交易日) → 取下一位。
+        # 保证 event 最早从"次日"起可用, 消除"当天上榜被当天选股使用"的前视。
+        @np.vectorize
+        def _next_td(d):
+            d_ts = pd.Timestamp(d)
+            pos = dates.searchsorted(d_ts, side="left")
+            if pos < len(dates) and dates[pos] == d_ts:
+                pos += 1
+            return dates[pos] if pos < len(dates) else pd.NaT
+        ev["avail"] = [pd.Timestamp(x) for x in _next_td(ev["avail"].values)]
+        ev = ev.dropna(subset=["avail"]).drop_duplicates(subset="avail", keep="last")
     aligned = _asof_align(dates, ev, "avail", value_cols)
     return aligned, ev["avail"].drop_duplicates()
 
@@ -309,7 +330,7 @@ def _dragon_tiger_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     cols = ["dt_net_buy", "dt_net_rate", "dt_cnt_30d"]
     if df is None or len(df) == 0:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    aligned, avail = _latest_event_state(df, dates, ["dt_net_buy", "dt_net_rate"])
+    aligned, avail = _latest_event_state(df, dates, ["dt_net_buy", "dt_net_rate"], next_day=True)  # 龙虎榜盘后才公布, 次日生效防前视
     if aligned is None:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
     res = pd.DataFrame(index=dates)
@@ -325,7 +346,7 @@ def _limit_up_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
     cols = ["lu_lianban", "lu_seal", "lu_cnt_30d"]
     if df is None or len(df) == 0:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    aligned, avail = _latest_event_state(df, dates, ["lu_lianban", "lu_seal"])
+    aligned, avail = _latest_event_state(df, dates, ["lu_lianban", "lu_seal"], next_day=True)  # 涨停当日才最终确认, 次日生效防前视
     if aligned is None:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
     res = pd.DataFrame(index=dates)
