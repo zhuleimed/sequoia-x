@@ -967,7 +967,14 @@ class MarketAnalyst:
         market: dict,
         stocks_detail: list[dict],
     ) -> str:
-        """构建 prompt，所有数据均为实时采集，LLM 只需分析无需回忆。"""
+        """构建 prompt，所有数据均为实时采集，LLM 只需分析无需回忆。
+
+        结构（2026-08-21 优化：模板前置以最大化 DeepSeek 上下文缓存命中）：
+          [固定模板] 系统人设 + 分析要求 + 输出格式 —— 每天逐字一致，
+                     作 prompt 前缀 → DeepSeek 缓存"共同前缀检测"会把它持久化，
+                     命中后模板段按缓存价（约正常输入 1/100）计费，费用趋近于零。
+          [实时数据] 大盘 + 个股 + 策略 —— 每次动态，置于模板之后。
+        """
         today_str = date.today().strftime("%Y-%m-%d")
 
         # ── 大盘概况 ──
@@ -1022,24 +1029,16 @@ class MarketAnalyst:
                 names = [f"{_get_stock_name(c)}({c})" for c in symbols]
                 strategy_lines.append(f"▸ {sname}: {', '.join(names)}")
 
-        # ── 完整 prompt ──
-        prompt = f"""你是一位经验丰富的 A 股市场分析师。以下是 {today_str} 的实时市场数据和候选股票信息，全部是实时采集的（来源：知兔 API + 新浪行情 API + 本地数据库），请基于这些数据进行分析，**不要依赖你自己的训练知识**。
-
-## 📊 今日市场实时数据
-{" ".join(market_lines)}
-
-## 🎯 候选股票（量化策略选出，附实时数据）
-{" ".join(stock_lines)}
-
-## 🔗 策略与股票对应关系
-{" ".join(strategy_lines)}
+        # ── 固定模板（前置做缓存前缀，必须【不含易变内容】以命中跨天缓存）──
+        #    注意：不得在此模板内嵌 today_str 等日期——日期每天变，会切断缓存前缀。
+        fixed_head = f"""你是一位经验丰富的 A 股市场分析师。以下是今日的实时市场数据和候选股票信息，全部是实时采集的（来源：知兔 API + 新浪行情 API + 本地数据库），请基于这些数据进行分析，**不要依赖你自己的训练知识**。
 
 ## 分析要求
-请对上述候选股票进行多维度综合分析，必须严格基于上面提供的实时数据：
+请根据下面的实时市场数据和候选股票，进行多维度综合分析，必须严格基于提供的实时数据：
 
-1. **大盘与市场情绪** — 调用上面的指数数据、趋势和全市场涨跌比
-2. **实时行情与基本面** — 调用上面的行情/估值数据（PE/PB/60日涨幅等）
-3. **新闻公告** — 调用上面的公告标题，判断是否有重大事项
+1. **大盘与市场情绪** — 调用下面的指数数据、趋势和全市场涨跌比
+2. **实时行情与基本面** — 调用下面的行情/估值数据（PE/PB/60日涨幅等）
+3. **新闻公告** — 调用下面的公告标题，判断是否有重大事项
 4. **综合研判** — 综合所有数据，给出最终推荐
 
 **篇幅硬性限制（务必遵守）**：
@@ -1051,20 +1050,20 @@ class MarketAnalyst:
 ## 输出格式
 请严格按照以下格式输出（不要添加额外说明）：
 
-📊 Sequoia-X AI 综合研判 | {today_str}
+📊 Sequoia-X AI 综合研判
 
 ### 📈 大盘环境
-[根据上面提供的实时指数数据和趋势，1-2句话总结]
+[根据下面提供的实时指数数据和趋势，1-2句话总结]
 
 ### 🔍 个股深度分析
 
 **1. [股票名称] ([代码]) — [对应策略名]**
 - 综合评分: ⭐X.X/5
 - 核心逻辑: [一句话]
-- 实时行情分析: [引用上面的行情数据]
-- 基本面与估值: [引用上面的 PE/PB/市值等数据]
-- 趋势分析: [引用上面的 60日/年初至今涨跌幅]
-- 新闻公告: [引用上面的公告标题]
+- 实时行情分析: [引用下面的行情数据]
+- 基本面与估值: [引用下面的 PE/PB/市值等数据]
+- 趋势分析: [引用下面的 60日/年初至今涨跌幅]
+- 新闻公告: [引用下面的公告标题]
 - 风险提示: [1-2个]
 
 [对每只候选股重复上述格式]
@@ -1075,7 +1074,19 @@ class MarketAnalyst:
 - 风险提醒: [整体风险提示]
 
 [最后一行，仅用于程序自动读取，不要改动格式]
-RECOMMEND: 600519,000858
+RECOMMEND: 600519,000858"""
+
+        # ── 完整 prompt：固定模板(前缀,不含日期) + 实时数据(含当日日期) ──
+        prompt = fixed_head + f"""
+
+## 📊 今日市场实时数据（{today_str}）
+{" ".join(market_lines)}
+
+## 🎯 候选股票（量化策略选出，附实时数据）
+{" ".join(stock_lines)}
+
+## 🔗 策略与股票对应关系
+{" ".join(strategy_lines)}
 
 请开始分析："""
         return prompt
@@ -1113,10 +1124,14 @@ RECOMMEND: 600519,000858
                 content = result["choices"][0]["message"].get("content") or ""
                 usage = result.get("usage", {})
                 completion_tokens = usage.get("completion_tokens", 0) or 0
+                # 缓存命中统计（DeepSeek 上下文缓存，模板固定前缀优化后用于实测命中率）
+                _cache_hit = usage.get("prompt_cache_hit_tokens", 0) or 0
+                _cache_miss = usage.get("prompt_cache_miss_tokens", 0) or 0
                 logger.info(
                     f"DeepSeek API 调用完成: "
                     f"输入 {usage.get('prompt_tokens', '?')} tokens / "
                     f"输出 {completion_tokens} tokens"
+                    f"（cache 命中 {_cache_hit} / 未命中 {_cache_miss}）"
                 )
                 # 顶满检测：输出接近 max_tokens 上限 = 正文可能被截断（RECOMMEND 行风险）
                 if completion_tokens >= 16384 * 0.95:
