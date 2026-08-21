@@ -24,6 +24,38 @@ logger = get_logger(__name__)
 # 2026-08-20: 同花顺交易日历模块级缓存（is_trade_day 当日复用，避免反复打接口）
 _HITHINK_TRADE_DAYS: set[str] | None = None
 
+# 2026-08-21: 本地交易日历快照（baostock 全历史拉取, 见 scripts/download_trade_days.py）。
+# 同花顺日历仅 1 年窗口, 撑不起 2020-09 起的历史回测; 本地快照覆盖全历史, is_trade_day 优先查它。
+# _LOCAL_SNAPSHOT_MAX = 快照覆盖的最新 yyyyMMdd, 用于判断某日期是否超出快照窗口(新增交易日)。
+_LOCAL_TRADE_DAYS: set[str] | None = None
+_LOCAL_SNAPSHOT_MAX: str = ""
+
+
+def _load_local_trade_days() -> set[str] | None:
+    """加载本地交易日历快照 (data/trade_days.json)。失败/不存在返回 None。模块级缓存。
+
+    路径绝对化: sync.py 位于 sequoia_x/data/sync.py → 项目根 = parent*3。
+    """
+    global _LOCAL_TRADE_DAYS, _LOCAL_SNAPSHOT_MAX
+    if _LOCAL_TRADE_DAYS is not None:
+        return _LOCAL_TRADE_DAYS
+    try:
+        import json as _json
+        proj_root = Path(__file__).resolve().parent.parent.parent
+        path = proj_root / "data" / "trade_days.json"
+        if path.exists():
+            data = _json.loads(path.read_text())
+            days = data.get("days", [])
+            _LOCAL_TRADE_DAYS = set(days)
+            _LOCAL_SNAPSHOT_MAX = max(days) if days else ""
+            logger.debug(f"_load_local_trade_days: {len(_LOCAL_TRADE_DAYS)} 个交易日, "
+                         f"max={_LOCAL_SNAPSHOT_MAX}")
+        else:
+            logger.debug("_load_local_trade_days: 无本地快照 trade_days.json")
+    except Exception:
+        _LOCAL_TRADE_DAYS = set()
+    return _LOCAL_TRADE_DAYS or None
+
 
 class DataSync:
     """数据同步模块，负责 baostock → SQLite 的全量/增量数据同步。
@@ -274,11 +306,13 @@ class DataSync:
     def is_trade_day(self, check_date: date | None = None) -> bool:
         """判断指定日期是否为 A 股交易日。
 
-        判断策略（三层）：
+        判断策略（五层）：
         1. 周末过滤 — 周六/周日一定不开盘（最快路径）
-        2. 同花顺交易日历 — 在线精确判断（含节假日，覆盖近一年窗口）
-        3. chinese_calendar 离线库 — 同花顺不可用时回退
-        4. fail-open — 以上均失败时假定为交易日，避免漏数据
+        2. 本地交易日历快照 — baostock 全历史拉取存本地（data/trade_days.json, 见
+           scripts/download_trade_days.py），覆盖历史回测，离线精确，优先于在线源
+        3. 同花顺交易日历 — 在线补充快照未覆盖的新增交易日（近一年窗口）
+        4. chinese_calendar 离线库 — 同花顺不可用时回退
+        5. fail-open — 以上均失败时假定为交易日，避免漏数据
 
         Args:
             check_date: 待检查日期，默认当天。
@@ -289,13 +323,22 @@ class DataSync:
         if check_date is None:
             check_date = date.today()
         date_str: str = check_date.strftime("%Y-%m-%d")
+        date_compact: str = date_str.replace("-", "")
 
         # 第1层：周末一定不开盘
         if check_date.weekday() >= 5:  # 5=周六, 6=周日
             logger.info(f"is_trade_day: {date_str} 是周末，非交易日")
             return False
 
-        # 第2层：同花顺交易日历（2026-08-20 替换 baostock；近一年窗口覆盖当日）
+        # 第2层：本地交易日历快照（2026-08-21 新增；baostock 全历史, 优先于在线源）。
+        # 若快照存在且 check_date 未超出快照覆盖窗口(_LOCAL_SNAPSHOT_MAX), 直接用它判断:
+        # 历史回测离线且精确(不受同花顺1年窗口/在线波动影响)。超出窗口(新增交易日)落到第3层。
+        local_td = _load_local_trade_days()
+        if local_td and date_compact <= _LOCAL_SNAPSHOT_MAX:
+            return date_compact in local_td
+        # 快照缺失或日期超出快照窗口 → 落到在线源
+
+        # 第3层：同花顺交易日历（2026-08-20 替换 baostock；近一年窗口覆盖新增）
         if os.environ.get("HITHINK_FINANCE_API_KEY"):
             try:
                 import requests as _req
@@ -305,7 +348,7 @@ class DataSync:
             except Exception as e:
                 logger.debug(f"is_trade_day: 同花顺日历异常 {e}，尝试离线判断")
 
-        # 第3层：chinese_calendar 离线节假日判断
+        # 第4层：chinese_calendar 离线节假日判断
         try:
             from chinese_calendar import is_workday
             result = is_workday(check_date)

@@ -87,11 +87,12 @@
 `HithinkValuationSource`（tencent_source.py）+ `_fill_valuation_gaps` Phase 3b 已实现验证。
 **本轮无新增**，只确认月末链 `DO_ESTIMATION=1` 时走新 Phase 3b。
 
-### 3.5 交易日历/股票列表换源（改 `sync.py`）
+### 3.5 交易日历/股票列表换源（改 `sync.py`）✅ 已完成并验证（2026-08-21）
 
-- **is_trade_day 第 2 层**：baostock → ths `/calendar/trading-days`（近期；历史回测用本地快照，另议）
-- **get_active_stocks**：baostock → ths `/meta/tickers/list`（分页 1000/页）+ 本地差异对比
-- 注意：股票池换源后 n_stocks/hash 可能变 → **缓存重建的 pool 一致性**（month_end_pull `_refresh_stock_pool` 同源）
+- **is_trade_day**：本地交易日历快照（`data/trade_days.json`，baostock 全历史 `query_trade_dates` 一次拉 2020-2026，见 `scripts/download_trade_days.py`）+ 同花顺 `/calendar/trading-days` 补新增。历史回测离线精确。
+  - 探测确认：同花顺日历仅 1 年窗口且**不接受 start/end 拉多年** → 必须本地快照。
+- **get_active_stocks**：主源已换 ths `/meta/tickers/list`（分页 1000/页，5559 只全 A 股），baostock 降为失败后备。已验证主源生效。
+- **pool 一致性**：`get_base_stock_pool` **保持 baostock**（需 IPO 日期做次新过滤，ths tickers/list 无此字段；且是低频单次调用，换源会意外改池 hash→全量重建，8/31 前避免）。池源不变 → 缓存 hash 稳定。勿换。
 
 ### 3.6 feature_version 3→4（改 `labels.py` 3 处）
 

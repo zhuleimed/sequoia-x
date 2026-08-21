@@ -23,6 +23,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sqlite3
 import sys
 import time
@@ -31,6 +32,17 @@ from datetime import date, datetime
 from pathlib import Path
 
 import baostock as bs
+
+# 单只查询超时（baostock 服务器偶发挂起不响应，实测会无限阻塞）
+QUERY_TIMEOUT_SECONDS = 60
+
+
+class _QueryTimeout(Exception):
+    """baostock 单次查询超时。"""
+
+
+def _timeout_handler(signum, frame):
+    raise _QueryTimeout(f"查询超时 {QUERY_TIMEOUT_SECONDS}s (signal {signum})")
 
 # ---------------------------------------------------------------------------
 # 路径配置
@@ -108,25 +120,34 @@ def code_to_bs(symbol: str) -> str:
 
 
 def fetch_pctchg(code_bs: str):
-    """拉一只股票全历史 pctChg（不复权），返回 [(date, pctChg), ...]。"""
-    rs = bs.query_history_k_data_plus(
-        code_bs, "date,pctChg",
-        start_date="1990-01-01", end_date=date.today().isoformat(),
-        frequency="d", adjustflag="3",
-    )
-    fields = list(rs.fields)  # 必须在迭代前拷贝！迭代后 fields 被清空
-    rows = []
-    while rs.error_code == "0" and rs.next():
-        rows.append(rs.get_row_data())
-    if len(rows) > 0 and len(rows[0]) != len(fields):
-        raise ValueError(f"字段数异常: fields={len(fields)} row={len(rows[0])} ({code_bs})")
-    out = []
-    for r in rows:
-        try:
-            out.append((r[0], float(r[1])))  # 停牌/无效日 pctChg 为空 → float 抛异常跳过
-        except (ValueError, IndexError):
-            pass
-    return out
+    """拉一只股票全历史 pctChg（不复权），返回 [(date, pctChg), ...]。
+
+    baostock 服务器偶发挂起不响应（socket ESTAB 但无数据）会导致无限阻塞，
+    用 signal.alarm 加硬超时保护。
+    """
+    signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(QUERY_TIMEOUT_SECONDS)
+    try:
+        rs = bs.query_history_k_data_plus(
+            code_bs, "date,pctChg",
+            start_date="1990-01-01", end_date=date.today().isoformat(),
+            frequency="d", adjustflag="3",
+        )
+        fields = list(rs.fields)  # 必须在迭代前拷贝！迭代后 fields 被清空
+        rows = []
+        while rs.error_code == "0" and rs.next():
+            rows.append(rs.get_row_data())
+        if len(rows) > 0 and len(rows[0]) != len(fields):
+            raise ValueError(f"字段数异常: fields={len(fields)} row={len(rows[0])} ({code_bs})")
+        out = []
+        for r in rows:
+            try:
+                out.append((r[0], float(r[1])))  # 停牌/无效日 pctChg 为空 → float 抛异常跳过
+            except (ValueError, IndexError):
+                pass
+        return out
+    finally:
+        signal.alarm(0)  # 取消闹钟
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +238,18 @@ def main():
             # 增量持久化：每 10 只存一次（减少磁盘写）
             if (i + 1) % 10 == 0:
                 save_progress(completed, failed, stats)
+        except _QueryTimeout as e:
+            # 查询超时：baostock 会话可能已损坏 → 重建后继续（该股票记 failed，重跑重试）
+            logger.error("超时 %s: %s → 重建 baostock 会话", sym, e)
+            try:
+                bs.logout()
+            except Exception:
+                pass
+            lg2 = bs.login()
+            if lg2.error_code != "0":
+                logger.error("会话重建失败: %s %s", lg2.error_code, lg2.error_msg)
+            failed[sym] = str(e)[:200]
+            save_progress(completed, failed, stats)
         except Exception as e:
             logger.error("失败 %s: %s", sym, e)
             failed[sym] = str(e)[:200]

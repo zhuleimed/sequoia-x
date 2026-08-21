@@ -1,6 +1,6 @@
 # 研究状态快照（RESEARCH_STATE）
 
-> 自动生成: 2026-08-18 11:28:39 | 生成器: scripts/save_research_state.py | 铁律七
+> 自动生成: 2026-08-21 20:54:50 | 生成器: scripts/save_research_state.py | 铁律七
 > 本文件是研究状态的**单一事实源**——会话启动/恢复时优先读取，1 分钟重建全部状态。
 > 详细过程记录见 `V3研究方向与实验研究记录.md`；教训/规则见 memory/。
 
@@ -16,15 +16,7 @@
 
 ## 二、运行进程
 
-### pctChg 全量补写（2026-08-18 进行中）
-- 进程: `scripts/backfill_pctchg.py`（setsid 脱离会话, PPID=1, 退出 Claude Code 不受影响）
-- 目的: stock_daily.pctChg 全历史补写（baostock adjustflag=3 标准口径）
-- 进度: scripts/tmp/pctchg_backfill_progress.json（completed 数）；日志 logs/pctchg_backfill_run.log
-- 断点续跑: 同命令恢复（已完成自动跳过）
-- 完成后验证: 全库 pctChg 覆盖率 + 除权日抽样（600519/688167/000001 已测基准值）
-- 今日已完成: pctChg 增量口径修正（sync.py 腾讯快照 close_yest + NULL 兜底）、
-  模拟盘推送分组序号（【LLM 1】【V2 3/3】）、LLM 格式漂移修复（回退推荐+max_tokens 16384+限长）
-  （git: fbceac6/6315d1c/8401bba/ac3dcfe/93112dc）
+无相关进程（实验/监督/管线均未运行）
 
 ## 三、监督链状态
 
