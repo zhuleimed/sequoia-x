@@ -49,42 +49,44 @@ def get_target_month() -> str:
 
 
 def _check_extra_coverage() -> None:
-    """扩展维度覆盖率检查: 某类 <90% 时日志告警 + wxpusher 推送（不阻断重训）。"""
-    import json
+    """扩展维度覆盖率检查: 某类 <90% 时日志告警 + wxpusher 推送（不阻断重训）。
+
+    2026-09-01 fix: 改用**实际数据文件数**统计覆盖率，而非 manifest.subsets.success
+    ——后者是"本次采集新增数"，数据新鲜时跳过采集 → success=0 → 误报 0% 覆盖率。
+    实际数据（data/extra_features/{subset}/*.parquet）才是真实覆盖。
+    """
     import os
+    import glob
     extra_dir = PROJECT_DIR / "data/extra_features"
-    manifest_path = extra_dir / "manifest.json"
-    if not manifest_path.exists():
-        logger.warning("Step0: 无 manifest.json, 跳过覆盖率检查")
-        return
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        summary = manifest.get("subsets", {})
-        total = 5206
-        low = []
-        for subset, stat in summary.items():
-            ok = stat.get("success", 0)
-            cov = ok / total * 100
-            if cov < 90:
-                low.append(f"{subset}={cov:.0f}%")
-                logger.warning(f"Step0: {subset} 覆盖率仅 {cov:.0f}% ({ok}/{total})")
-        if low:
-            try:
-                from wxpusher import WxPusher
-                settings = get_settings()
-                WxPusher.send_message(
-                    content=f"⚠️ 扩展维度覆盖率不足: {', '.join(low)}（V2重训 Step0）",
-                    token=settings.wxpusher_token,
-                    topic_ids=settings.wxpusher_topic_ids,
-                    content_type=1,
-                )
-                logger.info(f"Step0: 覆盖率告警已推送: {low}")
-            except Exception as e:
-                logger.warning(f"Step0: 告警推送失败: {e}")
-        else:
-            logger.info("Step0: 扩展维度覆盖率全部达标(≥90%)")
-    except Exception as e:
-        logger.warning(f"Step0: 覆盖率检查异常: {e}")
+    total = 5206
+    low = []
+    subsets = ["fund_flow", "finance", "holders", "consensus", "news", "xdxr"]
+    for subset in subsets:
+        sub_dir = extra_dir / subset
+        if not sub_dir.is_dir():
+            low.append(f"{subset}=0%")
+            logger.warning(f"Step0: {subset} 目录缺失")
+            continue
+        ok = len(glob.glob(str(sub_dir / "*.parquet")))
+        cov = ok / total * 100
+        if cov < 90 and subset != "consensus":  # consensus 允许 64%（数据源限制，报警但差异）
+            low.append(f"{subset}={cov:.0f}%")
+            logger.warning(f"Step0: {subset} 覆盖率仅 {cov:.0f}% ({ok}/{total})")
+    if low:
+        try:
+            from wxpusher import WxPusher
+            settings = get_settings()
+            WxPusher.send_message(
+                content=f"⚠️ 扩展维度覆盖率不足: {', '.join(low)}（V2重训 Step0）",
+                token=settings.wxpusher_token,
+                topic_ids=settings.wxpusher_topic_ids,
+                content_type=1,
+            )
+            logger.info(f"Step0: 覆盖率告警已推送: {low}")
+        except Exception as e:
+            logger.warning(f"Step0: 告警推送失败: {e}")
+    else:
+        logger.info("Step0: 扩展维度覆盖率全部达标(≥90%)")
 
 
 def _notify(title: str, body: str) -> None:
