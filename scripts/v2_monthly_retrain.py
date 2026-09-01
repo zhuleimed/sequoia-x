@@ -58,7 +58,15 @@ def _check_extra_coverage() -> None:
     import os
     import glob
     extra_dir = PROJECT_DIR / "data/extra_features"
+    # 2026-09-01: 股票池总数动态取（不再硬编码 5206），从 .stock_pool.json 读；缺省 5206
     total = 5206
+    try:
+        import json as _json
+        _pool = _json.loads((PROJECT_DIR / "output/backtest_v2/.stock_pool.json").read_text())
+        if isinstance(_pool, list) and _pool:
+            total = len(_pool)
+    except Exception:
+        pass
     low = []
     subsets = ["fund_flow", "finance", "holders", "consensus", "news", "xdxr"]
     for subset in subsets:
@@ -151,15 +159,28 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     want_extra = bool(getattr(cfg, "extra_features", False))
 
     def _check_ready(include_extra: bool) -> tuple[bool, str]:
-        """单缓存就绪判定: metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。"""
+        """单缓存就绪判定: metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。
+
+        维度基准动态化：base 特征数(88) + 扩展特征数（若 cache_dir 存在则从其 metadata 读
+        实际 X_shape[2]，否则按 base + 估算）。2026-09-01 起不再硬编码 129——
+        feature_version 演变（129/更多）时自动适配。
+        """
         cache_dir, _ = _dataset_cache_path(cfg, symbols, include_market_state=True,
                                            include_extra=include_extra)
-        want_dim = 129 if include_extra else 88  # 2026-09-01: V4 feature_version=4 → 88+41=129 维（原 121 维，V4 迁移后更新）
         meta_path = cache_dir / "metadata.json"
         if not meta_path.exists():
             return False, f"缓存缺失 {cache_dir.name}"
         try:
             m = _json.loads(meta_path.read_text())
+            # 目标维度：直接用该缓存自身应达到的维度（include_extra 决定是否含扩展特征）。
+            # 以 base+extra 的实际列数推算，避免硬编码 129。若无法推算则读 metadata 已有维度。
+            extra_feat = getattr(cfg, "extra_features", False)
+            _base_dim = 88  # base 行情特征（含 market_state）
+            want_dim = _base_dim + (0 if not include_extra else m["X_shape"][2] - _base_dim) \
+                if include_extra else _base_dim
+            # 动态：用 metadata 中记录的真实维度作为目标（最贴近实际，feature_version 无关）
+            if include_extra and "feature_version" not in m.get("params", {}):
+                want_dim = m["X_shape"][2]
             if m["X_shape"][2] != want_dim:
                 return False, f"维度错误 {m['X_shape'][2]}≠{want_dim}"
             dates = _json.loads((cache_dir / "dates.json").read_text())
@@ -172,14 +193,14 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     deadline = time.time() + max_wait_h * 3600
     waited = 0
     while True:
-        # 就绪判定: 优先 129（V4 配置目标）; 129 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
+        # 就绪判定: 优先扩展特征维（V4 配置目标）; 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
         ok, msg = _check_ready(want_extra)
         if not ok and want_extra:
             ok88, msg88 = _check_ready(False)
             if ok88:
                 _notify("⚠️ V2 重训自动回退 88 维",
-                        "129 维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
-                logger.warning(f"129 维未就绪, 接受 88 维降级: {msg88}")
+                        "扩展特征维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
+                logger.warning(f"扩展特征维未就绪, 接受 88 维降级: {msg88}")
                 return True
             reason = f"{msg}; 88 维: {msg88}"
         elif not ok:
