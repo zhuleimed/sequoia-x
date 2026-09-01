@@ -126,14 +126,14 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     # 个交易日的日期之前、最接近的采样日（当前=8/07；下月 9/30 时自动变 9/07 左右，动态不硬编码）。
     sample_dates = _get_sample_dates(engine, cfg)
     # 2026-09-01 fix: 覆盖率基准 = "最后一个有完整未来标签窗口(20交易日)的采样日"。
-    # 用某只权重股 get_ohlcv 的交易日列表作近似，往前推 predict_horizon_t2 得 label 完整截止。
+    # 直接用 sqlite 查 DB 交易日（稳健，不依赖单只股票 get_ohlcv——部分股票可能无数据导致 fallback 到 8/21）。
     _all_days = []
     try:
-        _ohlcv = engine.get_ohlcv(symbols[0])
-        if _ohlcv is not None and not _ohlcv.empty:
-            _all_days = [str(d) for d in _ohlcv["date"].astype(str).tolist()
-                         if str(d) <= cfg.sample_end]
-            _all_days.sort()
+        import sqlite3
+        _conn = sqlite3.connect(engine.db_path)
+        raw_days = _conn.execute("SELECT DISTINCT date FROM stock_daily ORDER BY date").fetchall()
+        _conn.close()
+        _all_days = [str(r[0]) for r in raw_days if str(r[0]) <= cfg.sample_end]
     except Exception:
         _all_days = []
     if len(_all_days) > cfg.predict_horizon_t2:
