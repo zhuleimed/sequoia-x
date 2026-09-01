@@ -109,11 +109,37 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     import time
 
     from sequoia_x.model_selection_v2.config import get_config
-    from sequoia_x.model_selection_v2.labels import _dataset_cache_path, resolve_sample_end
+    from sequoia_x.model_selection_v2.labels import (
+        _dataset_cache_path, _get_sample_dates, resolve_sample_end,
+    )
+    from sequoia_x.data.engine import DataEngine
+    from sequoia_x.core.config import Settings as _Settings
 
     cfg = get_config()
-    cfg.sample_end = resolve_sample_end(cfg)  # DB 最后交易日（与月末重建同口径）
-    last_date = cfg.sample_end
+    engine = DataEngine(_Settings())
+    cfg.sample_end = resolve_sample_end(cfg, engine.db_path)  # DB 最后交易日（与月末重建同口径，动态非硬编码）
+    # 2026-09-01 fix: 覆盖率基准 = "最后一个有完整未来标签窗口(20交易日)的采样日"。
+    # 不能要求覆盖到 DB 最后交易日(如8/31)或采样日最后一天(8/21)——它们未来20日窗口不完整，
+    # 该采样日本身在当前数据下 0 样本（如 8/21）。正确 = 在 sample_end 往前推 predict_horizon_t2
+    # 个交易日的日期之前、最接近的采样日（当前=8/07；下月 9/30 时自动变 9/07 左右，动态不硬编码）。
+    sample_dates = _get_sample_dates(engine, cfg)
+    # 2026-09-01 fix: 覆盖率基准 = "最后一个有完整未来标签窗口(20交易日)的采样日"。
+    # 用某只权重股 get_ohlcv 的交易日列表作近似，往前推 predict_horizon_t2 得 label 完整截止。
+    _all_days = []
+    try:
+        _ohlcv = engine.get_ohlcv(symbols[0])
+        if _ohlcv is not None and not _ohlcv.empty:
+            _all_days = [str(d) for d in _ohlcv["date"].astype(str).tolist()
+                         if str(d) <= cfg.sample_end]
+            _all_days.sort()
+    except Exception:
+        _all_days = []
+    if len(_all_days) > cfg.predict_horizon_t2:
+        _cutoff = _all_days[-cfg.predict_horizon_t2]      # 未来窗口起始: 最后第20个交易日前
+        _cands = [d for d in sample_dates if d <= _cutoff]
+        last_date = _cands[-1] if _cands else sample_dates[0]  # 动态最后一个完整 label 采样日
+    else:
+        last_date = sample_dates[-1]
     pool_path = PROJECT_DIR / "output/backtest_v2/.stock_pool.json"
     if not pool_path.exists():
         _notify("❌ V2 重训: .stock_pool.json 缺失",
@@ -126,7 +152,7 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
         """单缓存就绪判定: metadata 存在 + 维度正确 + 采样日覆盖到上月最后交易日。"""
         cache_dir, _ = _dataset_cache_path(cfg, symbols, include_market_state=True,
                                            include_extra=include_extra)
-        want_dim = 121 if include_extra else 88
+        want_dim = 129 if include_extra else 88  # 2026-09-01: V4 feature_version=4 → 88+41=129 维（原 121 维，V4 迁移后更新）
         meta_path = cache_dir / "metadata.json"
         if not meta_path.exists():
             return False, f"缓存缺失 {cache_dir.name}"
@@ -144,14 +170,14 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
     deadline = time.time() + max_wait_h * 3600
     waited = 0
     while True:
-        # 就绪判定: 优先 121（配置目标）; 121 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
+        # 就绪判定: 优先 129（V4 配置目标）; 129 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
         ok, msg = _check_ready(want_extra)
         if not ok and want_extra:
             ok88, msg88 = _check_ready(False)
             if ok88:
                 _notify("⚠️ V2 重训自动回退 88 维",
-                        "121 维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
-                logger.warning(f"121 维未就绪, 接受 88 维降级: {msg88}")
+                        "129 维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
+                logger.warning(f"129 维未就绪, 接受 88 维降级: {msg88}")
                 return True
             reason = f"{msg}; 88 维: {msg88}"
         elif not ok:
