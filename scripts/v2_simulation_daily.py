@@ -101,16 +101,11 @@ def main() -> None:
     # ── 1. V2 模拟盘日操作（T+1 模型，与 LLM 模拟盘同引擎）──
     # V2 规则：持仓上限 10 只 × 每只 10 万（与回测 M4+TOP_N=10 一致，100万满仓）
     #
-    # v1.5(2026-09-05) 9月"纯持有"冻结（一次性整改，见 memory min-hold-bug-and-month-end-hold）：
-    #   9/4 规则误把月度新仓 9/10 抛空(读买入前历史致死叉/负夏普即时触发)，用户定为
-    #   "9月买满→持有到月末→月末清仓"。本月(2026-09)用 hard_stop_only 冻结月内动量卖出
-    #   (仅留 -8% 硬止损护栏) 直到 2026-09-30；10-01 起自动回到 all(全规则)，自清除不污染。
-    sell_rules_mode = "all"
-    sell_rules_until = None
-    if "2026-09-01" <= today <= "2026-09-30":
-        sell_rules_mode = "hard_stop_only"
-        sell_rules_until = "2026-09-30"
-        logger.info(f"🛡️ V2 9月纯持有冻结生效: 月内规则卖出暂停, 仅留 -8% 硬止损, 至 {sell_rules_until}")
+    # v1.5.2(2026-09-05 固化) V4 长期卖出门槛 = hard_stop_only（用户拍板，见 memory
+    #   min-hold-bug-and-month-end-hold 记 70月A/B 裁决）：去掉曾用于"9月一次性整改"的
+    #   日期窗，改为**永久**只保留 -8% 硬止损护栏、停用月内动量规则(死叉/负夏普/相对弱势)
+    #   卖出——与"买满10→持有评估整月→月末清仓"初衷一致；月度全清(模式A)不受影响。
+    #   70 月 A/B: C(只留硬止损-8%) +7865%/夏普2.82 优于 A(月内全规则)+2066%/2.65。
     sim = SimEngine(
         settings,
         db_path=SIM_V2_DB,
@@ -119,8 +114,7 @@ def main() -> None:
         allow_same_day=True,  # 重训信号凌晨产生，交易日当晚以当日开盘价买入（回测口径）
         push_tag="V2",  # 消息加【V2 N/N】前缀，与 LLM 模拟盘分组区分
         equal_weight_cash=True,  # 2026-09-01: V4 等权满仓——每只预算按现金/10 均摊, 随账户资金放大
-        sell_rules_mode=sell_rules_mode,  # v1.5 月内卖出政策(2026-09=hard_stop_only 权重)
-        sell_rules_until=sell_rules_until,
+        sell_rules_mode="hard_stop_only",  # v1.5.2 固化长期 = 只留-8%硬止损 + 月末清仓
     )
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
     logger.info(f"V2 模拟盘更新完成: {result}")
