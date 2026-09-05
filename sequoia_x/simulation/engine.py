@@ -100,21 +100,37 @@ class SimEngine:
         per_stock_budget: float | None = None,
         allow_same_day: bool = False,
         push_tag: str = "",
+        equal_weight_cash: bool = False,
+        sell_rules_mode: str = "all",
+        sell_rules_until: str | None = None,
     ) -> None:
         self.settings = settings
         self.engine = DataEngine(settings)
-        # V2 独立模拟盘：db_path 可自定义（sim_v2.db），与 LLM 模拟盘完全隔离
+        # V4 独立模拟盘：db_path 可自定义（sim_v2.db），与 LLM 模拟盘完全隔离
         self.db_path = db_path or settings.db_path
-        # 持仓参数可实例级覆盖（V2=10只×10万，LLM 默认 20只×5万 不变）
+        # 持仓参数可实例级覆盖（V4=10只×10万，LLM 默认 20只×5万 不变）
         self.max_positions = max_positions or MAX_POSITIONS
         self.per_stock_budget = per_stock_budget or PER_STOCK_BUDGET
-        # V2 专用：True 时当日信号当日执行（重训信号凌晨产生，交易日当晚以当日开盘价买入；
+        # 2026-09-01: V4 等权满仓——True 时买入预算按"当前现金 / 可买空缺数"均摊,
+        #   随账户资金放大(如 100万→200万 时每只预算同步放大), 避免固定预算导致的
+        #   末只超额/资金闲置。仅 V4(sim_v2.db) 开启; LLM 模拟盘默认 False 保持原逻辑。
+        self.equal_weight_cash = equal_weight_cash
+        # V4 专用：True 时当日信号当日执行（重训信号凌晨产生，交易日当晚以当日开盘价买入；
         # LLM 模拟盘默认 False=严格 T+1 不变）
         self.allow_same_day = allow_same_day
         # 推送分组标识（"LLM"/"V2"）：消息加【组名 序号】前缀，微信端乱序时可识别归属。
         # 空串=不加前缀（LSTM 等未启用场景，行为不变）
         self.push_tag = push_tag
         self._push_seq = 0  # 组内序号（卖出报告/清仓报告计数，日报为最后一条）
+        # v1.5(2026-09-05) 月度"纯持有+硬止损"冻结（仅 V2 sim_v2.db 实例开启；默认 all=None 不改 LLM sim）：
+        #   sell_rules_mode = "all"(月内全规则,默认) | "hard_stop_only"(只留 -8% 硬止损,动量规则停用) | "none"(无月内规则)
+        #   sell_rules_until = "YYYY-MM-DD"(含当天) 冻结截止；<=该日期前按 mode 简化规则，
+        #      超过则自动回到 "all"（自清除，避免污染下月）。月末清仓(liquidate_all_at_close)与
+        #      重训买入链不受影响。
+        if sell_rules_mode not in ("all", "none", "hard_stop_only"):
+            raise ValueError(f"sell_rules_mode 必须是 all/none/hard_stop_only, 收到 {sell_rules_mode!r}")
+        self.sell_rules_mode = sell_rules_mode
+        self.sell_rules_until = sell_rules_until
         init_sim_tables(self.db_path)
 
     def _push_trade_report(self, trade: dict) -> None:
@@ -345,7 +361,7 @@ class SimEngine:
         return sold
 
     def _execute_pending_buys(self, today_str: str) -> list[dict]:
-        """执行待买入信号（T-1 日 LLM 推荐；V2 重训信号可当日执行）。
+        """执行待买入信号（T-1 日 LLM 推荐；V4 重训信号可当日执行）。
 
         用今日 OPEN 价买入。检查涨停/停牌/仓位上限/资金。
         超出仓位的信号取消（不留存）。
@@ -353,7 +369,7 @@ class SimEngine:
         Returns:
             [{"symbol": "600519", "shares": 300, "price": 150.00, ...}, ...]
         """
-        # 使用实例级持仓参数（LLM 默认 20只×5万，V2 覆盖为 10只×10万）
+        # 使用实例级持仓参数（LLM 默认 20只×5万，V4 覆盖为 10只×10万）
         _MAX_POS = self.max_positions
         _PER_BUDGET = self.per_stock_budget
 
@@ -373,6 +389,10 @@ class SimEngine:
 
         slots_available = _MAX_POS - len(current_positions)
         cash_balance = self._get_cash()
+
+        # 2026-09-01: V4 等权满仓——均摊预算 = 当前现金 / 可买空缺数(循环前固定计算)。
+        #   使每只买入金额随账户资金放大(消除"末只超额/资金闲置"), 兼顾整手取整的少量残留。
+        _ew_budget = (cash_balance / slots_available) if (self.equal_weight_cash and slots_available > 0) else None
 
         bought: list[dict] = []
         cancelled: list[dict] = []
@@ -422,7 +442,12 @@ class SimEngine:
                 cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue
 
-            budget = min(_PER_BUDGET, cash_balance)
+            if _ew_budget is not None:
+                # V4 等权满仓: 每只预算 = 均摊预算(min 当前现金), 随账户资金放大
+                budget = min(_ew_budget, cash_balance)
+            else:
+                # 原逻辑: 每只固定预算上限
+                budget = min(_PER_BUDGET, cash_balance)
             buy_price = open_price * (1 + SLIPPAGE)
             max_shares = int(budget // buy_price // 100) * 100
 
@@ -503,6 +528,13 @@ class SimEngine:
         today_llm_picks = get_today_recommended_symbols(self.db_path, today_str)
         marked_positions: list[dict] = []
 
+        # v1.5(2026-09-05) 月内卖出冻结判定（仅 V2 实例 sell_rules_mode≠"all" 时生效）
+        # 冻结在 sell_rules_until(含当天) 前有效；超过该日期自动回到全规则（自清除）。
+        freeze_active = self.sell_rules_mode != "all" and (
+            self.sell_rules_until is None or today_str <= self.sell_rules_until)
+        only_hard_stop = freeze_active and self.sell_rules_mode == "hard_stop_only"
+        freeze_no_rules = freeze_active and self.sell_rules_mode == "none"
+
         for pos in positions:
             # 已标记待卖出的跳过（等待明日执行）
             if pos.get("pending_sell_reason"):
@@ -536,6 +568,10 @@ class SimEngine:
             # 运行卖出规则
             # v1.4 (2026-08-12): 传入今日开盘价 day_open → 硬止损"开盘价优先+收盘确认"双轨触发，
             # 跳空低开跌破止损线当天即标记卖出，收窄 T+1 模型下的止损跳空亏损
+            if freeze_no_rules:
+                # 冻结"none"：完全停止月内规则卖出（仅保留月末清仓；硬止损也不跑）。
+                # 估值已在上方更新，仅不标记卖出。
+                continue
             result = evaluate_exit(
                 entry_price=updated_pos["buy_price"],
                 current_price=close_price,
@@ -546,6 +582,7 @@ class SimEngine:
                 index_df=index_df.tail(30) if index_df is not None else None,
                 today_opened=bool(updated_pos.get("today_opened", 0)),
                 day_open=float(today_row["open"]) if "open" in today_row.index else None,
+                only_hard_stop=only_hard_stop,  # v1.5 冻结 hard_stop_only(=纯持有+硬止损护栏)
             )
 
             if result.should_exit:

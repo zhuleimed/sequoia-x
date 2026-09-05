@@ -346,13 +346,17 @@ def _check_lstm_factor(symbol: str) -> tuple[int, str]:
 def _check_min_hold(hold_days: int, total_score: int) -> bool:
     """最低持有天数保护。
 
-    hold_days < MIN_HOLD_DAYS 时，除非硬止损穿透(S1)，
-    否则强制阻止卖出（返回 True = 跳过卖出）。
+    hold_days < MIN_HOLD_DAYS 时强制阻止卖出（返回 True = 跳过卖出）。
+
+    修复（2026-09-05）：删除对 total_score < SCORE_HARD_STOP 的二次判断。
+    理由：真·硬止损(S1, 单条100分)已在 evaluate_exit 内提前 return（见 _check_hard_stop
+    返回 SCORE_HARD_STOP 时的那段直接 return），根本走不到本函数。此前用"总分≥100"
+    判断，会把两条 <100 的非穿透规则（如 M死叉70 + SH夏普70 = 140）加起来戳穿 5 天
+    最低持有 → 月度换仓次日就误卖。走到这里的持仓必然无 S1 穿透，故持满 MIN_HOLD_DAYS
+    前一律拦截（total_score 参数保留仅为兼容旧调用签名）。
     """
     if hold_days < MIN_HOLD_DAYS:
-        # 硬止损(100分=S1穿透)例外
-        if total_score < SCORE_HARD_STOP:
-            return True
+        return True
     return False
 
 
@@ -371,6 +375,7 @@ def evaluate_exit(
     index_df: Optional[pd.DataFrame] = None,
     today_opened: bool = False,
     day_open: Optional[float] = None,
+    only_hard_stop: bool = False,
 ) -> ExitRuleResult:
     """对单只持仓进行全维度卖出评分。
 
@@ -391,6 +396,11 @@ def evaluate_exit(
         index_df: 指数日线 DataFrame（含 close 列，用于相对强弱）。
         today_opened: 今日是否新开仓（T+1 保护）。
         day_open: 当日开盘价（v1.4: 硬止损开盘价优先触发；None=仅收盘确认）。
+        only_hard_stop (v1.5, 2026-09-05): True = "纯持有 + 硬止损保险" 模式。
+            只评估 S 硬止损一档（S1 -8% 穿透型100分，或 S2 -5% 预警40分），
+            完成后立即 return，跳过 T/D/M/SH/R/LSTM 月内动量规则——供
+            "买满N只 → 持有到月末，仅保留 -8% 极值回撤护栏" 的换仓策略变体使用。
+            默认 False 全规则评估，不改其它策略行为（LLM sim 等）。
 
     Returns:
         ExitRuleResult。
@@ -417,6 +427,17 @@ def evaluate_exit(
             score=score,
             breakdown=breakdown,
         )
+
+    # v1.5: only_hard_stop —— S1 -8% 已穿透(上面早return)；S2 -5% 预警(40分)也一并按硬止损一档评估，
+    # 交给下方 should_exit(≥60) + _check_min_hold 兜底（40<60 不会触发，天然满足"仅 -8% 才杀"）。
+    if only_hard_stop:
+        should_exit = total_score >= SELL_THRESHOLD
+        if should_exit and _check_min_hold(hold_days, total_score):
+            should_exit = False
+        if should_exit:
+            return ExitRuleResult(should_exit=True, reason=reason,
+                                  score=total_score, breakdown=breakdown)
+        return ExitRuleResult(should_exit=False, score=total_score, breakdown=breakdown)
 
     # ── T 移动止盈 ──
     score, reason = _check_trailing_stop(entry_price, current_price, highest_price)

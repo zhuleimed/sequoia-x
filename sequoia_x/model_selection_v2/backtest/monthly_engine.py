@@ -239,7 +239,11 @@ class MonthlyBacktestEngine:
         prediction_cache: dict | None = None,  # 月度预测缓存，提供则跳过训练+预测
         fusion_method: str = "pred_std",  # "pred_std"=原启发式 | "ic_weighted"=滚动IC加权（§25 方案1）
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
+        intra_exit_policy: str = "all",  # 月内规则卖出政策(2026-09-05 A/B): "all"(现状,月内跑全套规则) |
+                                         #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
     ):
+        if intra_exit_policy not in ("all", "none", "hard_stop_only"):
+            raise ValueError(f"intra_exit_policy 必须是 all/none/hard_stop_only, 收到 {intra_exit_policy!r}")
         self.cfg = cfg or get_config()
         self.engine = engine or DataEngine(Settings())
         self.top_n = top_n
@@ -250,6 +254,7 @@ class MonthlyBacktestEngine:
         self.prediction_cache = prediction_cache  # {month: {symbols, t2, t1, t3}}
         self.fusion_method = fusion_method
         self.keep_survivors = keep_survivors
+        self.intra_exit_policy = intra_exit_policy
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -1119,13 +1124,26 @@ class MonthlyBacktestEngine:
             if di == 0:
                 continue  # 买入日不卖出（T+1保护）
 
-            # 执行前一日触发的卖出
+            # 执行前一日触发的卖出（仅 intra_exit_policy=all 有 pending；其余恒空）
             for sym in list(pending_sells):
                 if sym in self.positions:
                     self._sell_position(sym, today, reason="规则触发")
             pending_sells.clear()
 
             # 逐只持仓检查卖出规则
+            # v1.5(2026-09-05) intra_exit_policy 门控月内规则卖出：
+            #   - "all"           : 全套规则（现状）
+            #   - "hard_stop_only": 只评估硬止损(-8%，仅_hard_stop)，死叉/负夏普/相对弱势等动量规则略过
+            #   - "none"          : 完全跳过月内规则，仅靠半月末 4f/月末强制清仓出场（纯持有）
+            # 三种策略都保留下面的月末 _sell_all_positions (模式A) 强制清仓。
+            only_hard_stop = (self.intra_exit_policy == "hard_stop_only")
+            skip_rules = (self.intra_exit_policy == "none")
+            if skip_rules:
+                # 纯持有：不评估任何规则，直接日终估值
+                self._mark_to_market(today)
+                self._record_daily(today)
+                continue
+
             for sym, pos in list(self.positions.items()):
                 if sym not in self.positions:
                     continue  # 可能已卖出
@@ -1150,8 +1168,9 @@ class MonthlyBacktestEngine:
                     symbol=sym,
                     symbol_df=symbol_df.tail(60) if len(symbol_df) >= 20 else None,
                     index_df=idx_df.tail(60) if idx_df is not None and not idx_df.empty else None,
-                    today_opened=(di == 0),
+                    today_opened=False,
                     day_open=float(prev_bar["open"]) if prev_bar is not None else None,
+                    only_hard_stop=only_hard_stop,
                 )
 
                 if result.should_exit:
