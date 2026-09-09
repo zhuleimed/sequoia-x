@@ -41,3 +41,7 @@ hypothesis/
 experiments/kronos/finetune_csv/finetuned/
 experiments/kronos/finetune_csv/data/*.csv
 scripts/tmp/
+
+# dragon_tiger 事件研究: 大 CSV 中间产物/断点 (code+小摘要入库, 大表不入)
+experiments/dragon_tiger_event/*.csv
+experiments/dragon_tiger_event/progress_sentiment.json

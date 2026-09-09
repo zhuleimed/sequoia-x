@@ -107,25 +107,33 @@ def main():
             if lo >= hi:
                 return False, 0.0
             return bool(pi in lu_pos[lo:hi]), float(np.nanmax(lu_val[lo:hi]))
-        for d, nb, nr in zip(ev["date"], ev["dt_net_buy"], ev["dt_net_rate"]):
+        # 富字段(from enrich-schema): 机构净买/游资净买/上榜当日涨幅(可能 None)
+        orgs = pd.to_numeric(ev.get("dt_org_net"), errors="coerce") if "dt_org_net" in ev.columns else pd.Series(np.nan, index=ev.index)
+        hms  = pd.to_numeric(ev.get("dt_hm_net"),  errors="coerce") if "dt_hm_net"  in ev.columns else pd.Series(np.nan, index=ev.index)
+        chgd = pd.to_numeric(ev.get("dt_chg"),     errors="coerce") if "dt_chg"     in ev.columns else pd.Series(np.nan, index=ev.index)
+        for i in range(len(ev)):
+            d = ev["date"].iloc[i]; nb = ev["dt_net_buy"].iloc[i]; nr = ev["dt_net_rate"].iloc[i]
+            org = orgs.iloc[i] if i < len(orgs) else np.nan
+            hm = hms.iloc[i] if i < len(hms) else np.nan
+            echg = chgd.iloc[i] if i < len(chgd) else np.nan
             n_ev_d += 1
             dkey = d.date()
             pi = pos.get(d)
             if pi is None or pi + 1 >= len(td_arr):
-                _push(rows, sym, dkey, nb, nr, _recent_flag(pi)[1], drop="市场日历无次日")
+                _push(rows, sym, dkey, nb, nr, _recent_flag(pi)[1], org=org, hm=hm, chg=echg, drop="市场日历无次日")
                 continue
             is_limD, max_lb = _recent_flag(pi)
             e1 = td_arr[pi + 1]
             if e1 not in g.index:
                 n_e1_nobar += 1
-                _push(rows, sym, dkey, nb, nr, max_lb, drop="E1停牌无bar")
+                _push(rows, sym, dkey, nb, nr, max_lb, org=org, hm=hm, chg=echg, drop="E1停牌无bar")
                 continue
             ro1 = g.loc[e1]
             o1 = float(ro1["open"])
             # 一字/无成交打不开 → 买不进(按 OHLC 精确判: open==high==low 无成交区间打不开)
             if ro1["open"] == ro1["high"] == ro1["low"]:
                 n_e1_oneword += 1
-                _push(rows, sym, dkey, nb, nr, max_lb,
+                _push(rows, sym, dkey, nb, nr, max_lb, org=org, hm=hm, chg=echg,
                       gap=o1 / float(g.loc[d, "close"]) - 1.0 if d in g.index else None,
                       drop="E1一字无成交区间")
                 continue
@@ -136,10 +144,13 @@ def main():
             gap = o1 / d_close - 1.0 if d_close == d_close and d_close else None
             rec = {"symbol": sym, "D": dkey, "dt_net_buy": nb, "dt_net_rate": nr,
                    "lianban6d_max": max_lb if max_lb else 0, "is_limit_D": int(is_limD),
+                   "org_net": org, "hm_net": hm, "chg_onD": echg,   # 富字段(元/小数)
                    "E1": e1.date(), "E1open": round(o1, 3),
                    "gap": round(gap, 4) if gap is not None else None,
                    "Dclose": round(d_close, 3) if d_close == d_close else None,
                    "D_pct": round(d_pct, 4) if d_pct == d_pct else None}
+            for _H in HOLD:
+                rec[f"sell_date{_H}"] = None          # 预置, 若某 H 无窗则留 None
             for H in HOLD:
                 eh_pos = pi + H
                 if eh_pos >= len(td_arr):
@@ -154,6 +165,7 @@ def main():
                 idxr = idx_close[eh] / idx_open[e1] - 1.0
                 rec[f"r{H}"] = round(rH, 6); rec[f"idx_r{H}"] = round(idxr, 6)
                 rec[f"ex{H}"] = round(rH - idxr, 6)
+                rec[f"sell_date{H}"] = eh.date()   # 保存卖点市场日, 便于换基准(rebase)对齐
             rows.append(rec)
     print(f"      dragon 文件 {len(files)}; 有效事件 {n_ev_d}; "
           f"E1停牌 {n_e1_nobar}, E1一字 {n_e1_oneword}", flush=True)
@@ -163,9 +175,10 @@ def main():
     return evdf
 
 
-def _push(rows, sym, dkey, nb, nr, max_lb, drop="", gap=None):
+def _push(rows, sym, dkey, nb, nr, max_lb, org=None, hm=None, chg=None, drop="", gap=None):
     rec = {"symbol": sym, "D": dkey, "dt_net_buy": nb, "dt_net_rate": nr,
            "lianban6d_max": float(max_lb) if max_lb else 0.0, "is_limit_D": 0,
+           "org_net": org, "hm_net": hm, "chg_onD": chg,
            "E1": None, "E1open": None,
            "gap": round(gap, 4) if gap is not None else None,
            "Dclose": None, "drop": drop}

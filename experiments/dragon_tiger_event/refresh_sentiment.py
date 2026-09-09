@@ -45,10 +45,28 @@ H = {"X-api-key": KEY}
 # 各面每股至今窗口(用于判断新增是否真的多出新日期；不直接依赖, 只 fallback 到 cutoff)
 #   —— 决定"最早要拉哪天"：取 sh.000300 近一年与现存 max 交叠的宽窗(宽松稳妥)
 FACE_COLS = {
-    "dragon_tiger": {"dt_net_buy": "net_value", "dt_net_rate": "net_rate", "dt_hot_rank": "hot_rank"},
+    # 龙虎榜: 生产只需 dt_*3, 这里加存更富的字段(研究用,不动V4)。
+    #   一个 (code,date) 可在 >1 个龙虎榜子榜出现 → canonical=净额绝对值最大的那席, 避免把子榜比率/主题混算。
+    #   api字段见同花顺: change(当日涨幅,小数), net_value(净买额,元), net_rate(净率,小数),
+    #   buy/sell_value(买卖额,元), org_net_value(机构净买,元,仅在机构席有), hot_money_net_value(游资净买,元,仅在游资席有),
+    #   hot_rank(人气榜rank,少计越好), range_days(连榜/榜数列?语义待注), limit_reason(题材字符串)
+    "dragon_tiger": {
+        "dt_net_buy": "net_value",          # 净买额(元)
+        "dt_net_rate": "net_rate",          # 净率(小数)
+        "dt_chg": "change",                 # 上榜当日涨幅(小数)
+        "dt_buy_val": "buy_value",          # 买额(元)
+        "dt_sell_val": "sell_value",        # 卖额(元)
+        "dt_org_net": "org_net_value",      # 机构席位净买(元; 缺失=非机构席)
+        "dt_hm_net": "hot_money_net_value", # 游资席位净买(元; 缺失=非游资席)
+        "dt_hot_rank": "hot_rank",          # 人气位次
+        "dt_range_days": "range_days",      # 连X(语义待注)
+        "dt_theme": "limit_reason",         # 题材字符串(不量化,仅存档)
+    },
     "limit_up":     {"lu_lianban": "continue_day_cnt", "lu_seal": "seal_money", "lu_is_st": "is_st"},
     "hot_rank":     {"hr_rank": "rank", "hr_heat": "heat"},
 }
+# 龙虎榜 canonical 依据: 净额绝对值最大的一席 (多子榜同一股同日时用最有信息量的席别)
+DRAGON_CANON = {k for k in FACE_COLS["dragon_tiger"]}
 
 
 def log(m): print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
@@ -67,17 +85,38 @@ def pull_dragon(day, _new):
                      params={"board_type": "all", "date": day.isoformat()}, headers=H, timeout=30).json()
     if j.get("code") != 0:
         return 0
-    c = 0
+    # 先按 code 聚齐该日所有子榜行, 选 |net_value| 最大席作为 canonical
+    by_code = {}
     for it in j.get("data", {}).get("stock_items", []):
         code = (it.get("thscode") or "").split(".")[0]
         if not code:
             continue
+        nval = _num(it.get("net_value"))
+        cur = by_code.get(code)
+        if cur is None or abs(nval or 0) > abs(cur.get("_n", 0)):
+            by_code[code] = {"_n": nval, "row": it}
+    c = 0
+    for code, d0 in by_code.items():
+        it = d0["row"]
         row = {"date": day}
         for k, api in FACE_COLS["dragon_tiger"].items():
-            row[k] = it.get(api)
+            v = it.get(api)
+            # 题材是字符串, 其余转 float; 缺(该席没给 org/游资)留 None
+            row[k] = v if k == "dt_theme" else (_num(v) if v is not None else None)
+        row.setdefault(k)  # no-op占位(遍历已含全部key)
         _new["dragon_tiger"][code][day] = row
         c += 1
     return c
+
+
+def _num(x):
+    """尽量转 float, 失败返回原值(None 留 None), 不吞串。"""
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return x
 
 
 def pull_limit(day, _new):
