@@ -882,7 +882,12 @@ class DataSync:
                                 if not latest.empty:
                                     latest["symbol"] = sym
                                     rt = _tencent_inst.get_realtime(tc_code)
-                                    latest["amount"] = rt["amount"] if rt else 0.0
+                                    # 2026-09-18 修复：腾讯实时行情 parts[37] 的成交额单位是**万元**，
+                                    # 而本库 stock_daily.amount 的约定是**元** —— 原样写入会让当日成交额
+                                    # 小 10000 倍（实测 08-04~09-17 共 118,530 行受影响，进而污染
+                                    # 022 的 turnover_rate/成交额/VWAP 类因子与 021 因子库）。
+                                    # 判定自证：改后 amount/volume ≈ close（中位比值 0.999871）。
+                                    latest["amount"] = float(rt["amount"]) * 10000.0 if rt else float("nan")
                                     # pctChg：用腾讯快照标准昨收（除权日=除权基准价）计算，
                                     # 与 baostock adjustflag=3 口径一致；快照不可用留 NaN → 写库 NULL
                                     if rt and rt.get("close_yest", 0) > 0:
@@ -891,7 +896,10 @@ class DataSync:
                                         )
                                     else:
                                         latest["pctChg"] = float("nan")
-                                    latest["turnover"] = 0.0
+                                    # 2026-09-18 修复：turnover 降级时**写 NULL 而不是 0.0** ——
+                                    # 0.0 读起来是"真实换手率为 0"（会让下游的换手类因子整块失真，
+                                    # 实测 021 因子库因此所有换手因子翻译必败）；NULL 才是"未知"的本库惯例。
+                                    latest["turnover"] = float("nan")
                                     # 估值字段：peTTM/pbMRQ 从腾讯实时行情获取；psTTM/pcfNcfTTM 暂无源，填0等baostock恢复
                                     latest["peTTM"] = float(rt["pe"]) if (rt and rt.get("pe") is not None) else 0.0
                                     latest["pbMRQ"] = float(rt["pb"]) if (rt and rt.get("pb") is not None) else 0.0
@@ -907,10 +915,12 @@ class DataSync:
                                 latest = sina_df.iloc[-1:].copy()
                                 if not latest.empty:
                                     latest["symbol"] = sym
-                                    latest["amount"] = 0.0
+                                    # 2026-09-18 修复：sina 降级路径拿不到成交额/换手率 → 写 NULL
+                                    # （原为 0.0，会让下游把"未知"误读成"成交额/换手率为 0"）
+                                    latest["amount"] = float("nan")
                                     # pctChg：默认 NaN（写库 NULL），下方用腾讯快照标准昨收计算覆盖
                                     latest["pctChg"] = float("nan")
-                                    latest["turnover"] = 0.0
+                                    latest["turnover"] = float("nan")
                                     # 估值字段：即使OHLCV来自Sina，仍从腾讯实时行情获取peTTM/pbMRQ
                                     try:
                                         sina_rt = _tencent_inst.get_realtime(
