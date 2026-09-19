@@ -230,9 +230,23 @@ class DataSync:
 
         # 其他数值字段：用上一交易日数据向前填充，仍为空则填0
         # pctChg 除外：单日属性，前向填充=假数据；缺失必须留 NULL（消费者自行计算）
-        ffill_cols = [c for c in numeric_cols if c not in ("volume", "pctChg") and c in df.columns]
+        # 2026-09-19（amount/turnover 事故收尾）：
+        #   amount  —— 前向填充会把"昨天的成交额"填进今天、填 0 更是假数据。
+        #              改用 close×volume 兜底（本库约定 amount 单位=元，与 09-18 修复同口径）。
+        #   turnover—— 缺失一律留 NULL。写 0.0 会被消费端读成"真实换手率为 0"，
+        #              022 就是因此在 08-04~09-18 期间判所有换手类因子异常。
+        ffill_cols = [
+            c for c in numeric_cols
+            if c not in ("volume", "pctChg", "amount", "turnover") and c in df.columns
+        ]
         if ffill_cols:
             df[ffill_cols] = df[ffill_cols].ffill().fillna(0.0)
+        if "amount" in df.columns and {"close", "volume"}.issubset(df.columns):
+            miss = df["amount"].isna() | (df["amount"] == 0.0)
+            if miss.any():
+                df.loc[miss, "amount"] = (
+                    df.loc[miss, "close"].astype(float) * df.loc[miss, "volume"].astype(float)
+                )
 
         if df.empty:
             return 0
@@ -1240,7 +1254,9 @@ class DataSync:
                             subset = tc_df[mask].copy()
                             if not subset.empty:
                                 subset["symbol"] = sym
-                                subset["turnover"] = 0.0
+                                # 2026-09-19：不再写 turnover = 0.0（本路径走 INSERT OR REPLACE，
+                                # 写 0 会**覆盖已有的真实换手率**）。缺失留 NULL 落库。
+                                subset["turnover"] = float("nan")
                                 subset["peTTM"] = None
                                 subset["pbMRQ"] = None
                                 subset["psTTM"] = None
@@ -1310,7 +1326,8 @@ class DataSync:
                                 subset = tc_df[mask].copy()
                                 if not subset.empty:
                                     subset["symbol"] = sym
-                                    subset["turnover"] = 0.0
+                                    # 2026-09-19：同上——写 0 会 INSERT OR REPLACE 覆盖真实换手率
+                                    subset["turnover"] = float("nan")
                                     subset["peTTM"] = None
                                     subset["pbMRQ"] = None
                                     subset["psTTM"] = None
@@ -1931,7 +1948,15 @@ class DataSync:
                     continue
                 tc_df = tc_df.copy()
                 tc_df["symbol"] = sym
-                tc_df["amount"] = 0.0
+                # 2026-09-19：原先写死 amount=0.0（0106 事故同类脏值，见 CLAUDE.md「amount 单位铁律」）——
+                # 补缺路径同样要给出可信值：用 close×volume（本库约定单位=元）。
+                if {"close", "volume"}.issubset(tc_df.columns):
+                    tc_df["amount"] = (
+                        pd.to_numeric(tc_df["close"], errors="coerce")
+                        * pd.to_numeric(tc_df["volume"], errors="coerce")
+                    )
+                else:
+                    tc_df["amount"] = float("nan")
                 # 计算 pctChg（自算=实际前收口径，补缺路径可接受；主路径用腾讯快照标准昨收）
                 # 首行无前收 → NaN 落库 NULL，不填 0 造假数据
                 if "close" in tc_df.columns and len(tc_df) >= 2:
@@ -1939,7 +1964,9 @@ class DataSync:
                     tc_df["pctChg"] = tc_df["pctChg"].round(2)
                 else:
                     tc_df["pctChg"] = float("nan")
-                tc_df["turnover"] = 0.0
+                # 2026-09-19：不再写 turnover = 0.0（写 0 = 假装"真实换手率为 0"，
+                # 022 侧换手类因子整块失效就是这类脏值造成的）。留 NULL，由消费端自行补算。
+                tc_df["turnover"] = float("nan")
                 tc_df["peTTM"] = None
                 tc_df["pbMRQ"] = None
                 tc_df["psTTM"] = None
