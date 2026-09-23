@@ -57,6 +57,23 @@ def _load_local_trade_days() -> set[str] | None:
     return _LOCAL_TRADE_DAYS or None
 
 
+# 一天"退市"超过本地这个比例 → 判定为数据源故障（而非真退市）
+MAX_DELIST_RATIO = 0.10
+
+
+def _looks_like_mass_delisting(n_local: int, n_remote: int,
+                               *, max_ratio: float = MAX_DELIST_RATIO) -> bool:
+    """远程股票名单是否小到"不可能全是真退市"——即**数据源故障**的信号。
+
+    2026-09-23 事故：同花顺不可用 + baostock 超时，`query_stock_basic` 只返回部分行（1643），
+    却被当成全量远程名单 → 本地 5222 只里 3579 只被判退市并归档（含 000001 平安银行）。
+    正常每天退市不过个位数，一周也到不了 10%；骤减 >10% 只可能是数据源坏了。
+
+    抽成独立函数是为了**可单测**——护栏必须实测它会拦，不能只写着好看。
+    """
+    return bool(n_local) and n_remote < n_local * (1 - max_ratio)
+
+
 class DataSync:
     """数据同步模块，负责 baostock → SQLite 的全量/增量数据同步。
 
@@ -510,9 +527,30 @@ class DataSync:
             logger.warning("get_active_stocks: 全源为空")
             return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
 
-        # ── 通用：对比本地, 输出新增/退市/名称 ──
         remote_set: set[str] = set(remote_symbols)
         local_set: set[str] = set(local_symbols)
+
+        # ── ⚠️ 名单断崖保护（2026-09-24，事故修复）─────────────────────────
+        # 2026-09-23 事故：同花顺不可用 + baostock 超时，query_stock_basic **只返回了部分行**
+        #   （1643 行）却被当成"全量远程名单" → 本地 5222 只里 3579 只被判"退市"并归档
+        #   （含 000001 平安银行）→ stock_daily 从 5222 只掉到 1643 只、
+        #   stock_list.delisted_date 被写脏（3579 只标成 2026-09-23 退市），
+        #   下游 022 的 panel 跟着只剩 1/3，整条链路的因子都在残市场上算。
+        # 判据：正常每天退市不过个位数；**一天"退市"超过本地 10% 必然是数据源故障**。
+        # 宁可这一轮不同步（下次再试），也绝不能把活跃股归档。
+        # 安全性：返回空 → sync_stock_list 会跳过列表更新（不写 delisted_date、不归档），
+        #        而 sync_daily 用的是本地 _get_local_last_dates，不受影响。
+        if _looks_like_mass_delisting(len(local_set), len(remote_set)):
+            drop = 1 - len(remote_set) / max(len(local_set), 1)
+            logger.error(
+                f"get_active_stocks: ⚠️ 远程名单异常偏小（远程 {len(remote_set)} / 本地 {len(local_set)}，"
+                f"骤减 {drop:.1%} > {MAX_DELIST_RATIO:.0%}）——判定为【数据源故障】而非真退市，"
+                "**中止本轮股票列表更新**（避免把活跃股误判退市并归档；历史事故见 2026-09-23）。"
+                "请检查同花顺 / baostock 可用性后重跑。"
+            )
+            return {"symbols": [], "new_listed": [], "delisted": [], "count": 0}
+
+        # ── 通用：对比本地, 输出新增/退市/名称 ──
         new_listed: list[str] = sorted(remote_set - local_set)
         delisted: list[str] = sorted(local_set - remote_set)
         logger.info(
