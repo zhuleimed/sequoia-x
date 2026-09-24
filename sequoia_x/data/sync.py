@@ -485,6 +485,11 @@ class DataSync:
         try:
             hl = self._hithink_all_a_share()
             if hl:
+                # 2026-09-24：同花顺含北交所（92xxxx 350 只）而 baostock 分支的 mask 只取
+                # sh.6/sz.0/sz.3（沪深）——两条路给**不同股票池**，源切换即静默改变universe。
+                # 此处按同一口径过滤，保证「同花顺在/不在」股票池恒定（实测过滤后 5227 只，
+                # 是本地 5222 只的超集、缺 0 只）。
+                hl = {k: v for k, v in hl.items() if k.startswith(("6", "0", "3"))}
                 remote_symbols = sorted(hl.keys())
                 names = {k: v for k, v in hl.items() if isinstance(k, str)}
                 logger.info(f"get_active_stocks: 同花顺 {len(remote_symbols)} 只")
