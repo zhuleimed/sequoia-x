@@ -595,11 +595,17 @@ def _process_month_worker(args: tuple) -> tuple:
     ohlcv_df = pd.read_sql(
         f"SELECT * FROM stock_daily WHERE symbol IN ({ph}) AND date <= ? ORDER BY symbol, date",
         conn, params=pool + [train_end_date])
-    print(f"[Worker {month}] Step4b: OHLCV={len(ohlcv_df)}行, 沪深300...", flush=True)
+    # 2026-09-26 修复：原打印的 "...沪深300..." 是**源码里写死的省略号**，把
+    # 「指数到底加载了几行」彻底藏住了 —— 而 §6/§6b 那 14 维是否生效正取决于它
+    # （2026-09-25 排查「指数取数走散」时，日志里查不到任何线索）。
+    # 改为查询后打印真实行数 + 日期范围；加载为空时显式告警。
     idx_df = pd.read_sql(
         "SELECT * FROM index_daily WHERE symbol='sh.000300' AND date <= ? ORDER BY date",
         conn, params=(train_end_date,))
     conn.close()
+    idx_desc = (f"{len(idx_df)}行 ({idx_df['date'].min()} ~ {idx_df['date'].max()})"
+                if len(idx_df) else "❌ 空！§6/§6b 将走全零分支")
+    print(f"[Worker {month}] Step4b: OHLCV={len(ohlcv_df)}行, 沪深300={idx_desc}", flush=True)
     print(f"[Worker {month}] Step4c: 分组...", flush=True)
     ohlcv_cache = {sym: g.reset_index(drop=True) for sym, g in ohlcv_df.groupby('symbol')}
     print(f"[Worker {month}] Step5: 特征构建({len(ohlcv_cache)}只有OHLCV, {FEAT_WORKERS}进程并行)...", flush=True)

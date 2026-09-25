@@ -54,9 +54,13 @@ def rebuild(include_market_state: bool, n_workers: int, no_extra: bool = False) 
     cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
     # 2026-08-07 回退机制: --no-extra 强制 88 维（扩展维度数据不全时降级重建）
     include_extra = bool(getattr(cfg, "extra_features", False)) and not no_extra
-    dim = "121维" if (include_market_state and include_extra) else \
-          ("88维" if include_market_state else "80维")
-    print(f"开始重建 {dim} 缓存 (sample_end={cfg.sample_end}, extra={include_extra}, "
+    # 实际生效的扩展开关：T4 的 80 维（include_market_state=False）不拼扩展特征。
+    # 原打印用的是 include_extra 而非这个值 → 80 维那次会误报 extra=True（2026-09-26 修）。
+    eff_extra = include_extra and include_market_state
+    # 2026-09-26 口径修正：原写死 "121维" 是 V3 时代旧值。v5 实为
+    # 76 基础（BASE_FEATURE_DIM=68 + 市场状态 8）+ 41 扩展 = 117 → padding 到 129。
+    dim = "129维" if eff_extra else ("88维" if include_market_state else "80维")
+    print(f"开始重建 {dim} 缓存 (sample_end={cfg.sample_end}, extra={eff_extra}, "
           f"workers={n_workers})...")
     symbols = _load_symbols(engine)
     X, y1, y2, y3, dates = build_training_dataset(
@@ -71,7 +75,7 @@ def rebuild(include_market_state: bool, n_workers: int, no_extra: bool = False) 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="数据集缓存重建")
-    parser.add_argument("--only-88", action="store_true", help="仅重建 88/121 维（树模型）")
+    parser.add_argument("--only-88", action="store_true", help="仅重建 88/129 维（树模型）")
     parser.add_argument("--only-80", action="store_true", help="仅重建 80 维（T4 LSTM）")
     parser.add_argument("--no-extra", action="store_true",
                         help="强制 88 维重建（扩展维度数据不全时降级, 2026-08-07 回退机制）")

@@ -61,7 +61,7 @@ def _notify(title: str, body: str) -> None:
 def _extra_coverage_ok() -> tuple[bool, str]:
     """覆盖率检查（2026-08-07 修正: 区分关键面/语义可缺失面）。
 
-    关键面 fund_flow/finance/holders（每只股票理应都有）: ≥90% 才允许重建 121 维;
+    关键面 fund_flow/finance/holders（每只股票理应都有）: ≥90% 才允许重建 129 维;
     语义可缺失面 consensus/news/xdxr（缺失合法, 特征层 fillna(0); forecast 2026-08-20 移除）:
     只报告实际覆盖率, 不阻断——如 consensus 实测 ~64%（A 股约 36% 无研报覆盖,
     要求 ≥90% 会永久降级 88 维, 与设计矛盾）。
@@ -203,7 +203,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
         t_rebuild = _time.time()
         cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py"),
                "--workers", "16"]  # 2026-08-11: 每 job 16 worker（121/88 + 80 双 job 并行 = 32 进程,
-        #   36 核机器合理; 原默认 12×2=24 偏保守但 121 维重建 17.6h; 勿用 32——64 进程会过载卡死）
+        #   36 核机器合理; 原默认 12×2=24 偏保守但 129 维重建 17.6h; 勿用 32——64 进程会过载卡死）
         if degraded:
             cmd.append("--no-extra")
         r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
@@ -235,7 +235,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
          "--output", str(dry)],
         cwd=str(PROJECT_DIR), timeout=4 * 3600)
     if r.returncode != 0 or not dry.exists():
-        _notify("❌ 月末干跑验证失败", "88/121 维预测链路未验证通过, 9/1 重训前需人工排查")
+        _notify("❌ 月末干跑验证失败", "88/129 维预测链路未验证通过, 9/1 重训前需人工排查")
         print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode} 耗时={(_time.time()-t_dry)/60:.0f}min")
         return False
     print(f"[{today}] ✅ 干跑验证通过 耗时={(_time.time()-t_dry)/60:.0f}min")
@@ -254,11 +254,11 @@ def auto_rebuild_and_verify(today: date) -> bool:
     if degraded:
         _notify("✅ 月末全链完成（已回退 88 维）",
                 f"{month} 数据拉取完成但扩展维度不全 → 88 维缓存已重建并验证, 9/1 按 88 维重训。"
-                f"下次月末将自动重试 121 维")
+                f"下次月末将自动重试 129 维")
     else:
         _notify("✅ 月末扩展维度全链完成",
-                f"{month} 数据拉取 + 121 维缓存重建 + 自检 + 干跑全部通过, 9/1 03:00 重训可直接运行")
-    print(f"[{today}] ═══ 自动链全部完成（{'降级 88 维' if degraded else '121 维'}）═══")
+                f"{month} 数据拉取 + 129 维缓存重建 + 自检 + 干跑全部通过, 9/1 03:00 重训可直接运行")
+    print(f"[{today}] ═══ 自动链全部完成（{'降级 88 维' if degraded else '129 维'}）═══")
     return True
 
 
