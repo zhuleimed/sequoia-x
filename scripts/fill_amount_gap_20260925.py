@@ -60,11 +60,72 @@ IMPLIED_TOL = 0.15
 RECONNECT_EVERY = 250    # baostock 长连接会静默失效，定期重连
 
 
+def _fill_computed(conn: sqlite3.Connection) -> int:
+    """残差兜底：真值取不到的 NULL 行用 `close × volume` 计算填充。
+
+    ⚠️ 这是**近似值**，不是真实成交额（实测相对误差中位 0.5%、95 分位 2.7%）。
+    采纳它的代价：这些行的 `amount/volume ≈ close` 自证校验变成**同义反复**
+    （由构造即成立），以后无法再用该检查发现单位类错误。
+    只应用于**真值确实取不到**的行（如 baostock 永久卡死的创业板股票）。
+    """
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM stock_daily "
+        "WHERE amount IS NULL AND close > 0 AND volume > 0").fetchone()[0]
+    total_null = conn.execute(
+        "SELECT COUNT(*) FROM stock_daily WHERE amount IS NULL").fetchone()[0]
+    print("=" * 88)
+    print("【残差兜底】用 close×volume 填充仍为 NULL 的 amount")
+    print("=" * 88)
+    print(f"  当前 amount 为 NULL 的行: {total_null:,}")
+    print(f"  其中可计算的（close>0 且 volume>0）: {rows:,}")
+    print(f"  无法计算的（停牌 volume=0 等）: {total_null - rows:,}（保持 NULL）")
+    if rows == 0:
+        print("  无需填充")
+        conn.close()
+        return 0
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    bak = pd.read_sql(
+        "SELECT symbol, date FROM stock_daily "
+        "WHERE amount IS NULL AND close > 0 AND volume > 0", conn)
+    bak_path = BACKUP_DIR / "computed_fill_keys.csv"
+    bak.to_csv(bak_path, index=False, encoding="utf-8-sig")
+    print(f"  【备份】受影响行的键 → {bak_path}（原值均为 NULL，回滚=置回 NULL）")
+
+    with conn:
+        cur = conn.execute(
+            "UPDATE stock_daily SET amount = close * volume "
+            "WHERE amount IS NULL AND close > 0 AND volume > 0")
+    print(f"  【写入】{cur.rowcount:,} 行")
+
+    left = conn.execute("SELECT COUNT(*) FROM stock_daily WHERE amount IS NULL").fetchone()[0]
+    print(f"\n【复验】剩余 NULL: {left:,}（填充前 {total_null:,}）")
+    v = pd.read_sql(
+        "SELECT close, volume, amount FROM stock_daily WHERE amount IS NOT NULL "
+        "AND volume > 0 ORDER BY RANDOM() LIMIT 200000", conn)
+    for c in ("close", "volume", "amount"):
+        v[c] = pd.to_numeric(v[c], errors="coerce")
+    r = (v["amount"] / v["volume"]) / v["close"]
+    print(f"  ⚠️ 单位自证 amount/volume ≈ close：中位 {r.median():.5f}，"
+          f"落在 [0.9,1.1] 占比 {(r.between(0.9, 1.1)).mean()*100:.2f}%")
+    print("     （该比例已因计算填充而偏高，**不再具备发现单位错误的效力**）")
+    json.dump({"computed_filled": int(cur.rowcount), "remaining_null": int(left)},
+              open(BACKUP_DIR / "computed_fill_summary.json", "w", encoding="utf-8"),
+              ensure_ascii=False, indent=2)
+    conn.close()
+    print(f"\n完成。备份目录: {BACKUP_DIR}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="回填 stock_daily.amount 历史缺口")
     ap.add_argument("--apply", action="store_true", help="执行回填（默认只体检）")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 只（试跑）")
     ap.add_argument("--symbols", type=str, default="", help="逗号分隔，只处理这些股票")
+    ap.add_argument("--fill-computed", action="store_true",
+                    help="残差兜底：真值取不到的行用 close×volume 计算填充"
+                         "（近似值，误差中位 0.5%/95分位 2.7%；会牺牲这些行的"
+                         "amount/volume≈close 自证校验，见文件头说明）")
     args = ap.parse_args()
 
     if not DB.exists():
@@ -72,6 +133,11 @@ def main() -> int:
         return 1
 
     conn = sqlite3.connect(DB)
+
+    # ── 残差兜底模式（独立于真值回填）──
+    if args.fill_computed:
+        return _fill_computed(conn)
+
     miss = pd.read_sql("SELECT symbol, date FROM stock_daily WHERE amount IS NULL", conn)
     print("=" * 90)
     print("【体检】amount 缺失情况")
