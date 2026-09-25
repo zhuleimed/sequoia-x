@@ -5,7 +5,11 @@
 Token/Topic 从 .env 读取（与项目 WxPusher 同一配置）。
 
 用法：
-  py312 python scripts/notify_wechat.py "<消息内容>"
+  py312 python scripts/notify_wechat.py "<消息内容>" ["<通知预览标题>"]
+
+2026-09-25: 加可选的第 2 参 summary（通知在手机上的预览标题）。
+  原先硬编码 "V4迁移进度"，其它项目（如 022 月末让路告警）复用时预览标题会误导。
+  不传则保持原值，老调用方行为不变。
 """
 import os
 import sys
@@ -22,9 +26,10 @@ def main():
     与 month_end_pull._notify / v2_monthly_retrain 荐股推送同源一致。
     """
     if len(sys.argv) < 2:
-        print("用法: notify_wechat.py '<消息>'")
+        print("用法: notify_wechat.py '<消息>' ['<通知预览标题>']")
         sys.exit(2)
     msg = sys.argv[1]
+    summary = sys.argv[2] if len(sys.argv) > 2 else "V4迁移进度"
     try:
         from sequoia_x.core.config import get_settings
         from wxpusher import WxPusher
@@ -37,7 +42,7 @@ def main():
             content=msg,
             token=s.wxpusher_token,
             topic_ids=s.wxpusher_topic_ids,
-            summary="V4迁移进度",
+            summary=summary,
             content_type=1,
         )
     except Exception as e:
