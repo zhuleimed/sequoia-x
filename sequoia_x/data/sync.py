@@ -752,7 +752,13 @@ class DataSync:
                     symbols.extend(new_syms)
                     logger.info(f"sync_daily: 补充 {len(new_syms)} 只新股: {' '.join(new_syms[:10])}{'...' if len(new_syms) > 10 else ''}")
             except Exception as e:
-                logger.debug(f"sync_daily: 补充新股失败: {e}")
+                # 2026-09-25：debug → warning。补充新股失败意味着**当日新上市的股票不会被纳入**。
+                # 说明：本项目的 logger 硬编码 level=DEBUG，故 debug 消息**并非不输出**，
+                #   而是被淹没——实测 09-24 管线日志 DEBUG 5244 行 / WARNING 仅 1 行，
+                #   一条 DEBUG 失败的信噪比约 1:5244，实际等同于看不见。
+                #   改用 warning 后同类失败一眼可见（也便于 grep WARNING/ERROR 巡检）。
+                # 失败本身不阻断存量同步，故不升 ERROR。
+                logger.warning(f"sync_daily: 补充新股失败（当日新上市股票将不被纳入）: {e}")
 
             # 获取每个 symbol 的最新日期（Bug 修复 #1：作用域统一在块开头）
             last_dates: dict[str, str] = self._get_local_last_dates()
@@ -792,7 +798,8 @@ class DataSync:
                     symbols.extend(new_syms)
                     logger.info(f"sync_daily force: 补充 {len(new_syms)} 只新股: {' '.join(new_syms[:10])}{'...' if len(new_syms) > 10 else ''}")
             except Exception as e:
-                logger.debug(f"sync_daily force: 补充新股失败: {e}")
+                # 2026-09-25：debug → warning，理由同上方非 force 分支
+                logger.warning(f"sync_daily force: 补充新股失败（当日新上市股票将不被纳入）: {e}")
             last_dates = self._get_local_last_dates()
             symbol_starts = {}
             for sym in symbols:
