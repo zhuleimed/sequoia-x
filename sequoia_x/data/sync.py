@@ -21,6 +21,13 @@ from sequoia_x.data.engine import DataEngine
 
 logger = get_logger(__name__)
 
+# ── 价格跳变自检参数（2026-09-25）──
+# A 股涨跌停 ±10%（创业板/科创板 ±20%），单日 >25% 必为异常。
+PRICE_JUMP_PCT: float = 0.25
+# 单日异常行数达到此值即告警：合法极端行情（新股首日/退市整理期）实测每日 ≤14 行，
+# 而历史事故日为 631~2,053 行 —— 30 是安全分界。
+PRICE_JUMP_ALERT_ROWS: int = 30
+
 # 2026-08-20: 同花顺交易日历模块级缓存（is_trade_day 当日复用，避免反复打接口）
 _HITHINK_TRADE_DAYS: set[str] | None = None
 
@@ -1069,6 +1076,106 @@ class DataSync:
                 "is_trade_day": True,
                 "error": str(e),
             }
+
+    # ── 价格跳变自检（2026-09-25 新增）──
+
+    def check_price_jumps(self, days: int = 5, threshold: int = PRICE_JUMP_ALERT_ROWS) -> dict:
+        """价格跳变自检：抓"整行价格错乱"这类 **coverage 检查抓不到**的数据事故。
+
+        背景（2026-09-25，LLM 模拟盘归因诊断时发现）：
+          stock_daily 历史上多次出现整行价格错乱——
+          2024-01-02（1,901 行）/ 2026-06-09（2,053 行）/
+          2026-07-06（631 行）/ 2026-07-07（642 行），累计约 5,200 行。
+          特征：**全部为深市代码**，呈 off-by-one 行错位（某只股票被写入上一只股票
+          的当日数据）；行内自洽（amount/volume ≈ close），
+          当日 sync_log 的 status=ok、coverage=1.0。
+          即：既有的完整性检查**完全发现不了**，直到做归因分析时才偶然发现，
+          此时脏数据已进入 V4 训练集与模拟盘信号。
+
+        判据：
+          单日 |close / prev_close − 1| > 25%  或  |open / prev_close − 1| > 25%
+          （A 股涨跌停 ±10%，创业板/科创板 ±20%，故 >25% 必为异常。）
+
+        阈值为何取 30 行/日：
+          新股上市首日、退市整理期等**合法**极端行情每天最多约 15 行
+          （实测长尾最大 14 行），而真实事故日为 631~2,053 行 —— 30 是安全分界。
+
+        Args:
+            days: 检查最近多少个交易日。
+            threshold: 单日异常行数达到该值即判 warning。
+
+        Returns:
+            dict: status("ok"|"warning"|"error")、checked_days、total_anomalies、
+                  by_date（{日期: 异常行数}）、worst_date、worst_count
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 多取 1 天：最早那天用来给次日提供 prev_close
+                dates = [
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT date FROM stock_daily ORDER BY date DESC LIMIT ?",
+                        (days + 1,),
+                    ).fetchall()
+                ]
+                if len(dates) < 2:
+                    return {"status": "ok", "checked_days": [], "total_anomalies": 0,
+                            "by_date": {}, "worst_date": "", "worst_count": 0}
+                scan_from = min(dates)
+                check_days = sorted(d for d in dates if d > scan_from)
+                df = pd.read_sql(
+                    "SELECT symbol, date, open, close FROM stock_daily "
+                    "WHERE date >= ? ORDER BY symbol, date",
+                    conn, params=(scan_from,),
+                )
+        except Exception as e:
+            logger.warning(f"check_price_jumps 执行异常: {e}")
+            return {"status": "error", "checked_days": [], "total_anomalies": 0,
+                    "by_date": {}, "worst_date": "", "worst_count": 0, "error": str(e)}
+
+        if df.empty:
+            return {"status": "ok", "checked_days": check_days, "total_anomalies": 0,
+                    "by_date": {}, "worst_date": "", "worst_count": 0}
+
+        for c in ("open", "close"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["prev_close"] = df.groupby("symbol")["close"].shift(1)
+        df = df[df["prev_close"] > 0]
+        jump = (
+            ((df["close"] / df["prev_close"] - 1).abs() > PRICE_JUMP_PCT)
+            | ((df["open"] / df["prev_close"] - 1).abs() > PRICE_JUMP_PCT)
+        )
+        bad = df[jump]
+        bad = bad[bad["date"].isin(check_days)]
+
+        by_date: dict[str, int] = bad.groupby("date").size().to_dict()
+        worst_date = max(by_date, key=lambda k: by_date[k]) if by_date else ""
+        worst_count = by_date.get(worst_date, 0)
+        status = "warning" if worst_count >= threshold else "ok"
+
+        if status == "warning":
+            top = sorted(by_date.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            logger.error(
+                f"⚠️ 价格跳变自检告警：{worst_date} 有 {worst_count} 行单日 |涨跌| > "
+                f"{PRICE_JUMP_PCT:.0%}（阈值 {threshold}），疑似整行价格错乱。"
+                f"近 {len(check_days)} 日异常行数 Top5: {top}。"
+                f"请核查后运行 scripts/fix_price_corruption_20260706.py"
+            )
+        elif len(bad):
+            logger.info(
+                f"价格跳变自检: 近 {len(check_days)} 日共 {len(bad)} 行 >{PRICE_JUMP_PCT:.0%} "
+                f"（均在正常范围，多为新股/退市整理期）。最大单日 {worst_date}: {worst_count} 行"
+            )
+        else:
+            logger.info(f"价格跳变自检: 近 {len(check_days)} 日无异常跳变")
+
+        return {
+            "status": status,
+            "checked_days": check_days,
+            "total_anomalies": int(len(bad)),
+            "by_date": by_date,
+            "worst_date": worst_date,
+            "worst_count": int(worst_count),
+        }
 
     # ── 缺失诊断与修复 ──
 
@@ -2210,6 +2317,20 @@ class DataSync:
         # 只检查最近 5 个交易日，用 Tencent 的 INSERT OR IGNORE 不覆盖已有 baostock 数据
         logger.info("run_full Phase 2b: OHLCV 缺失补填（Tencent）")
         self._fill_ohlcv_gaps(days=5)
+
+        # Phase 2c: 价格跳变自检（2026-09-25 新增）
+        # 抓"整行价格错乱"——这类事故行内自洽，check_missing 的 coverage 检查发现不了
+        # （历史上 2024-01-02 / 2026-06-09 / 07-06 / 07-07 共约 5,200 行，
+        #   均为 status=ok + coverage=1.0 静默入库，直到归因分析才被发现）。
+        # 仅告警不阻断：阈值 30 已远离正常极端行情（每日 ≤14 行），误报概率极低；
+        # 但生产连续性优先，是否阻断交由人工判断。
+        logger.info("run_full Phase 2c: 价格跳变自检")
+        try:
+            r2c: dict = self.check_price_jumps(days=5)
+        except Exception as e:
+            logger.warning(f"Phase 2c 价格跳变自检异常（不影响同步）: {e}")
+            r2c = {"status": "error", "error": str(e)}
+        phases["price_jump_check"] = r2c
 
         # Phase 3: baostock 估值字段补充（peTTM/pbMRQ/psTTM/pcfNcfTTM）
         # 策略暂未用到估值字段，baostock 能拉就拉，不能拉跳过

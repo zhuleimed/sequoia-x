@@ -162,6 +162,30 @@ def auto_rebuild_and_verify(today: date) -> bool:
     # 1.5 股票池月度刷新（2026-08-10 审计改进, 失败不阻断）
     _refresh_stock_pool(today)
 
+    # 1.8 入库数据体检（2026-09-25 新增）
+    #   为什么必须在"缓存重建"之前: 坏数据一旦烤进训练缓存，后面所有环节都是错的，
+    #   而缓存重建本身要 2-6h —— 先体检再重建，问题当场暴露、当天可修。
+    #   覆盖两类既有检查抓不到的事故：
+    #     ① 口径错误（历史事故: 深市 2024-01-02~2026-06-08 约 111 万行写成了后复权价）
+    #     ② 单日整行错乱（历史事故: 2026-07-06/07-07 off-by-one 写错股票）
+    #   体检不通过**不阻断**（月度流程连续性优先），但会微信告警，
+    #   并在日志里留下明确的人工处置指引。
+    print(f"[{today}] ①.5 入库数据体检（跳变 + 多源对拍）...")
+    r_audit = subprocess.run(
+        [sys.executable, str(PROJECT_DIR / "scripts/audit_data_integrity.py"), "--no-push",
+         "--json", str(PROJECT_DIR / f"output/audit_{today:%Y%m%d}.json")],
+        cwd=str(PROJECT_DIR), timeout=30 * 60)
+    if r_audit.returncode == 0:
+        print(f"[{today}] ✅ 数据体检通过")
+    else:
+        print(f"[{today}] ⚠️ 数据体检告警（详见上方输出与 "
+              f"output/audit_{today:%Y%m%d}.json）——继续重建，但结论可能被脏数据污染")
+        _notify("⚠️ 月末数据体检未通过",
+                "缓存重建仍会继续，但结果可能被脏数据污染。\n"
+                "请查看 logs/month_end_pull_*.log 中【入库数据体检】段，\n"
+                f"明细 output/audit_{today:%Y%m%d}.json\n"
+                "处置：python scripts/audit_data_integrity.py（体检）")
+
     # 2. 训练缓存重建（121/88 + 80 维并行, 2-6h; include_extra 从 config 读;
     #    数据不全时 --no-extra 强制 88 维）
     #    ⚠️ 断点续跑（2026-08-10 铁律二）: 重建成功写 .rebuild_done_<date> 标记;

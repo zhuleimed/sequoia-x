@@ -45,3 +45,6 @@ scripts/tmp/
 # dragon_tiger 事件研究: 大 CSV 中间产物/断点 (code+小摘要入库, 大表不入)
 experiments/dragon_tiger_event/*.csv
 experiments/dragon_tiger_event/progress_sentiment.json
+
+# LLM 模拟盘归因诊断（2026-09-25）：逐笔明细 9.5M，可再生（跑 pool_vs_llm.py 即得），不入库
+experiments/llm_sim_diag/pool_vs_llm.csv

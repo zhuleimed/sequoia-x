@@ -29,6 +29,95 @@ from sequoia_x.simulation.models import (
 
 logger = get_logger(__name__)
 
+# ════════════════════════════════════════════════════════════
+#  追高过滤（2026-09-25 新增）
+# ════════════════════════════════════════════════════════════
+# 背景：LLM 模拟盘归因诊断（docs/2026-09_LLM模拟盘买入即跌归因诊断.md）实测 101 笔买入，
+#   信号日涨幅与买入后收益呈**单调负相关**：
+#     信号日涨幅 0~3%  → +10 日超额 +4.39%
+#     信号日涨幅 3~6%  → +10 日超额 +2.33%
+#     信号日涨幅 6~9.5%→ +10 日超额 -3.65%
+#     信号日当日涨停   → +10 日超额 -2.13%
+#   且 LLM 明显偏好"当天放量大涨/涨停"的标的（选中组涨停占比 27%，
+#   同池被淘汰组仅 12%），T+1 开盘买入正好接在情绪脉冲的最高点。
+# 故：信号日涨幅超过阈值的标的，**不生成买入信号**（宁可空仓，不追脉冲）。
+CHASE_RET_LIMIT: float = 0.06   # 信号日单日涨幅上限（涨停 >9.8% 自然被覆盖）
+# 浮点比较容差：见 filter_chase_risk —— 不加会让"恰好等于阈值"的行为不确定
+_EPS: float = 1e-9
+
+
+def signal_day_return(db_path: str, symbol: str, signal_date: str) -> Optional[float]:
+    """取某股票在信号日的单日涨幅（不复权实际价口径）。
+
+    用 close/prev_close 现算而非读 pctChg 列：pctChg 在数据源失败时按项目约定写 NULL，
+    而 close 序列始终可用（除权日的跳空属于真实成交价，与模拟盘执行口径一致）。
+
+    Args:
+        db_path: 数据库路径。
+        symbol: 股票代码。
+        signal_date: 信号日（YYYY-MM-DD）。
+
+    Returns:
+        单日涨幅（0.06 = 6%）；该日无数据或无法计算时返回 None。
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT date, close FROM stock_daily WHERE symbol=? AND date<=? "
+                "AND close > 0 ORDER BY date DESC LIMIT 2",
+                (symbol, signal_date),
+            ).fetchall()
+    except Exception as e:
+        logger.warning(f"signal_day_return({symbol}) 查询失败: {e}")
+        return None
+    # 必须有信号日当天 + 前一交易日两条，且最新一条确实是信号日
+    if len(rows) < 2 or rows[0][0] != signal_date:
+        return None
+    prev_close = float(rows[1][1])
+    if prev_close <= 0:
+        return None
+    return float(rows[0][1]) / prev_close - 1.0
+
+
+def filter_chase_risk(db_path: str, symbols: list[str], signal_date: str,
+                      limit: float = CHASE_RET_LIMIT) -> tuple[list[str], list[tuple[str, float]]]:
+    """剔除信号日涨幅超过上限的标的（追高过滤）。
+
+    取不到当日涨幅的标的一律**保留**（fail-open）：过滤依据是"确认涨太多"，
+    而非"无法判断"——数据缺失时按原逻辑放行，只记日志。
+
+    Args:
+        db_path: 数据库路径。
+        symbols: 待过滤的股票代码列表。
+        signal_date: 信号日（YYYY-MM-DD）。
+        limit: 单日涨幅上限，默认 CHASE_RET_LIMIT。
+
+    Returns:
+        (保留的代码列表, [(被剔除的代码, 当日涨幅), ...])
+    """
+    kept: list[str] = []
+    dropped: list[tuple[str, float]] = []
+    unknown: list[str] = []
+    for sym in symbols:
+        r = signal_day_return(db_path, sym, signal_date)
+        if r is None:
+            unknown.append(sym)
+            kept.append(sym)
+        # 加 EPS 容差：10.60/10.00−1 在浮点下是 0.06000000000000005，
+        # 不加容差会让"恰好等于阈值"的标的被误剔除（边界行为不确定）
+        elif r > limit + _EPS:
+            dropped.append((sym, r))
+        else:
+            kept.append(sym)
+    if dropped:
+        logger.warning(
+            f"追高过滤: 剔除 {len(dropped)} 只（信号日涨幅 > {limit:.0%}）: "
+            + ", ".join(f"{s}({r:+.1%})" for s, r in dropped)
+        )
+    if unknown:
+        logger.warning(f"追高过滤: {len(unknown)} 只当日涨幅不可得，按原逻辑放行: {unknown}")
+    return kept, dropped
+
 
 # ════════════════════════════════════════════════════════════
 #  LLM 报告解析
@@ -174,6 +263,19 @@ def save_llm_recommendations(
         if not recommended and not llm_report:
             # LLM 未运行（如未配置 API Key），用多策略频率作为后备
             recommended = get_top_by_strategy_frequency(strategies_results, top_n)
+
+    # 追高过滤（2026-09-25）：信号日已大涨/涨停的标的不买入。
+    # 不递补候选 —— 补位的股票 LLM 并未评估过，补位＝擅自换策略。
+    # 全部被滤掉时当日无信号（宁可空仓），日志会说清楚。
+    recommended, _dropped = filter_chase_risk(db_path, recommended, today_str)
+    if not recommended:
+        if _dropped:
+            logger.warning(
+                f"save_llm_recommendations: 推荐标的全部被追高过滤剔除（{len(_dropped)} 只），当日无买入信号"
+            )
+        else:
+            logger.info("save_llm_recommendations: 无推荐股票，跳过")
+        return 0
 
     # 构建信号列表
     signals: list[dict] = []

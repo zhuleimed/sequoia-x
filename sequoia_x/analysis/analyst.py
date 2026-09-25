@@ -318,16 +318,26 @@ class MarketAnalyst:
         report = self._call_llm(prompt)
 
         # 5. 解析推荐股票（从 RECOMMEND 行）
+        #    2026-09-25：区分两种"没有推荐"——
+        #      ① RECOMMEND 行**存在但为空**：LLM 遵守进场时点约束后主动不推荐
+        #         （候选股全部当日大涨/涨停）→ 尊重其判断，**不回退**，当日不买入；
+        #      ② RECOMMEND 行**缺失**：模型格式漂移 → 沿用频率回退（原有行为）。
+        #    不加这个区分的话，情况①会被频率回退填上，等于把约束架空。
         recommended: list[str] = []
+        saw_recommend_line = False
         for line in reversed(report.strip().split("\n")):
             ls = line.strip()
             if ls.upper().startswith("RECOMMEND:"):
                 import re
                 codes = re.findall(r"\d{6}", ls[len("RECOMMEND:"):])
                 recommended = codes[:2]
+                saw_recommend_line = True
                 break
-        # 回退：按多策略频率取前 2 只
-        if not recommended:
+        if not recommended and saw_recommend_line:
+            logger.info("MarketAnalyst: LLM 显式给出空 RECOMMEND（主动不推荐），尊重其判断，当日不买入")
+            report = report.rstrip() + "\n\n📌 最终推荐: 无（LLM 判定候选股均不宜追高）"
+        # 回退：按多策略频率取前 2 只（仅当 RECOMMEND 行整体缺失时）
+        elif not recommended:
             from collections import Counter
             freq: Counter = Counter()
             for syms in strategies_results.values():
@@ -1041,11 +1051,21 @@ class MarketAnalyst:
 3. **新闻公告** — 调用下面的公告标题，判断是否有重大事项
 4. **综合研判** — 综合所有数据，给出最终推荐
 
+**进场时点约束（硬性，必须遵守）**：
+- 本系统在**次日开盘价**买入，因此"当天已经暴涨"的标的最容易买在情绪脉冲的顶部、
+  次日即回落。历史上这类买入的 10 日超额收益为负。
+- **禁止推荐当日涨幅 > 6% 或当日涨停的股票**；执行层也会对这类标的做买入过滤，
+  推荐了也买不进，只会浪费当天的机会。
+- 若候选股**全部**属于上述情形，请**如实说明并让 RECOMMEND 行留空**
+  （程序会自动跳过当日买入），**不要为凑数而推荐**。
+- 优选当日涨幅温和、量能配合、位置尚未大幅透支的标的。
+
 **篇幅硬性限制（务必遵守）**：
 - 全文（含标题，不含最后 RECOMMEND 行）不超过 1200 字
 - 每只股票分析 ≤4 行（综合评分/核心逻辑/行情/风险各 1 行），只保留最关键信息
 - 大盘环境 1-2 句；综合建议 3-4 行
 - 精简优先，宁缺毋滥；**RECOMMEND 行必须为全文最后一行，不得省略**
+  （若无票可推，写成 `RECOMMEND:` 留空即可，**不要省略这一行**，也不要为凑数硬推）
 
 ## 输出格式
 请严格按照以下格式输出（不要添加额外说明）：
@@ -1069,7 +1089,8 @@ class MarketAnalyst:
 [对每只候选股重复上述格式]
 
 ### 🏆 综合建议
-- 最优关注: [1-2只，给出明确理由]
+- 最优关注: [1-2只，给出明确理由；若候选股均触犯进场时点约束则写"无"]
+- 当日涨幅: [每只候选项标注当日涨跌幅，用于判断是否触犯 >6%/涨停 约束]
 - 操作建议: [明确的买卖建议]
 - 风险提醒: [整体风险提示]
 

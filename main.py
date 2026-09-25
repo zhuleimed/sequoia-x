@@ -27,7 +27,7 @@ from sequoia_x.strategy.base import BaseStrategy
 from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
 from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
 from sequoia_x.strategy.ma_volume import MaVolumeStrategy
-from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
+# from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy  # 2026-09-25 暂时摘出候选池，见下方策略清单处的说明
 from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
 from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
 from sequoia_x.strategy.rps_multi_period import RpsMultiPeriodStrategy
@@ -245,6 +245,11 @@ def main() -> None:
                     "backfilled": repair.get("total_filled", 0),
                     "latest_date": sync_mgr.engine._get_last_date_range() or "",
                 }, sync_elapsed)
+                # 价格跳变自检告警（2026-09-25 新增）：抓 coverage 检查发现不了的
+                # "整行价格错乱"事故，避免脏数据静默进入训练集/信号
+                jump = phases.get("price_jump_check", {})
+                if jump.get("status") == "warning":
+                    _push_price_jump_alert(settings, jump)
             else:
                 _push_data_alert(settings, {
                     "is_complete": False,
@@ -320,9 +325,15 @@ def main() -> None:
         logger.info(f"基础股票池共 {len(base_pool)} 只股票")
 
         # 5. 策略选股
+        # ⚠️ 2026-09-25: 海龟交易法则（TurtleTradeStrategy）**暂时摘出候选池**。
+        #    原因：它此前因"流动性判据用错列"（turnover 换手率 误比 1 亿）**长期不产出任何选股**，
+        #    修复该 bug 后日均候选会从 0 只变为约 163 只 —— 属于**改变线上选股行为**的变更，
+        #    而 P1-1 检验显示动量/突破类策略在该窗口是负 alpha。故：
+        #      · 代码已修复（sequoia_x/strategy/turtle_trade.py，含成交额判据 + 本地排序）
+        #      · 但**先不注册进候选池**，待 70 个月全样本回测确认选股能力后再决定是否恢复。
+        #    恢复方式：import TurtleTradeStrategy 并加回下面的列表即可。
         strategies: list[BaseStrategy] = [
             MaVolumeStrategy(engine=engine, settings=settings, stock_pool=base_pool),
-            TurtleTradeStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             HighTightFlagStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             LimitUpShakeoutStrategy(engine=engine, settings=settings, stock_pool=base_pool),
             UptrendLimitDownStrategy(engine=engine, settings=settings, stock_pool=base_pool),
@@ -557,6 +568,50 @@ def _push_data_alert(
             logger.warning(f"数据告警推送失败: {result}")
     except Exception as e:
         logger.warning(f"数据告警推送异常: {e}")
+
+
+def _push_price_jump_alert(settings, jump: dict) -> None:
+    """推送价格跳变自检告警（2026-09-25 新增）。
+
+    触发条件：近 5 个交易日内某一天出现 ≥30 行单日 |涨跌| > 25% 的记录。
+    历史事故日（2024-01-02 / 2026-06-09 / 07-06 / 07-07）单日均在 631~2,053 行，
+    而正常的极端行情（新股首日、退市整理期）每日 ≤14 行，故该阈值误报概率极低。
+    """
+    from datetime import date
+
+    from wxpusher import WxPusher
+    from sequoia_x.core.logger import get_logger
+
+    logger = get_logger(__name__)
+    today_str = date.today().strftime("%m-%d")
+    by_date = jump.get("by_date", {})
+    top = sorted(by_date.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    message = (
+        f"⚠️ Sequoia-X 数据异常告警 | {today_str}\n\n"
+        f"价格跳变自检未通过：\n"
+        f"最严重日期: {jump.get('worst_date', '?')}（{jump.get('worst_count', 0)} 行）\n"
+        f"近 5 日异常分布:\n"
+        + "\n".join(f"  {d}: {n} 行" for d, n in top)
+        + f"\n\n含义：单日 |涨跌| > 25% 的行数远超正常水平，疑似"
+        f"「整行价格错乱」（历史上出现过 4 次，全部为深市代码的 off-by-one 错位）。\n"
+        f"这类脏数据行内自洽，coverage 检查发现不了，但会污染训练集与选股信号。\n\n"
+        f"处置：运行 scripts/fix_price_corruption_20260706.py 体检（加 --apply 修复）"
+    )
+
+    try:
+        r = WxPusher.send_message(
+            content=message,
+            token=settings.wxpusher_token,
+            topic_ids=settings.wxpusher_topic_ids,
+            content_type=1,
+        )
+        if r.get("code") == 1000:
+            logger.info("价格跳变告警推送成功")
+        else:
+            logger.warning(f"价格跳变告警推送失败: {r}")
+    except Exception as e:
+        logger.warning(f"价格跳变告警推送异常: {e}")
 
 
 def _push_sync_summary(settings, result: dict, elapsed: float) -> None:
