@@ -607,9 +607,17 @@ class DataSync:
                         symbol       TEXT PRIMARY KEY,
                         listed_date  TEXT,
                         delisted_date TEXT,
-                        updated_at   TEXT DEFAULT (datetime('now','localtime'))
+                        updated_at   TEXT DEFAULT (datetime('now','localtime')),
+                        name         TEXT
                     )"""
                 )
+                # 2026-09-26：现网 stock_list 的 name 列是**手工 ALTER** 加的（仓库里查不到
+                # 那句 ALTER）→ 这个 CREATE 语句原先不含 name，**新建库会缺列**，随后的
+                # `INSERT ... (symbol, name)` 会直接报 "no such column: name"。
+                # 这里做一次幂等补列，兼顾老库与新库。
+                _cols = {r[1] for r in conn.execute("PRAGMA table_info(stock_list)")}
+                if "name" not in _cols:
+                    conn.execute("ALTER TABLE stock_list ADD COLUMN name TEXT")
 
                 count_row = conn.execute(
                     "SELECT COUNT(*) FROM stock_list"
@@ -637,6 +645,30 @@ class DataSync:
                             "INSERT OR IGNORE INTO stock_list (symbol, name) VALUES (?, ?)",
                             (sym, name),
                         )
+                    # 2026-09-26：补历史空名。原路径只在 is_empty / new_listed 时写 name，
+                    # 而 `INSERT OR IGNORE` 对已存在的行**不会更新** → 历史上带空 name 插入的
+                    # 行永远停在 NULL（实测 5,931 行里 5,327 行为空，含 600000 浦发银行）。
+                    # 名字每次同步都能从同花顺 tickers/list 拿到，这里顺手补上；
+                    # 先查空名数量，为 0 时零额外开销（正常月份就是 0）。
+                    if names:
+                        _missing = conn.execute(
+                            "SELECT COUNT(*) FROM stock_list WHERE name IS NULL OR name=''"
+                        ).fetchone()[0]
+                        if _missing:
+                            _filled = 0
+                            for _sym, _nm in names.items():
+                                if not _nm:
+                                    continue
+                                _filled += conn.execute(
+                                    "UPDATE stock_list SET name=? "
+                                    "WHERE symbol=? AND (name IS NULL OR name='')",
+                                    (_nm, _sym),
+                                ).rowcount
+                            if _filled:
+                                logger.info(
+                                    f"sync_stock_list: 补历史空名 {_filled} 只"
+                                    f"（补前空名 {_missing} 只）"
+                                )
                     # 退市股更新 delisted_date
                     today_str: str = date.today().strftime("%Y-%m-%d")
                     for sym in active["delisted"]:
