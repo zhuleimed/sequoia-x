@@ -221,6 +221,11 @@ def get_test_months(start_month: str, end_month: str) -> list[str]:
 
 
 def main():
+    # 2026-09-26：让 --output-dir 真正生效。此前它只被 argparse 收下、**从未被使用**
+    # —— save_summary_csv / monthly_returns / optimal_config 全都写死到模块级 OUTPUT_DIR，
+    # 于是换目录跑（如 V5 对照回测）会**静默覆盖** output/backtest_v2/summary_all.csv，
+    # 把既有基准冲掉。声明须在 parser 之前（下方 `default=str(OUTPUT_DIR)` 会先读它）。
+    global OUTPUT_DIR
     parser = argparse.ArgumentParser(description="Phase 2: 72 组共享预测缓存回测")
     parser.add_argument("--all", action="store_true", help="运行全部 72 组")
     parser.add_argument("--top-n", type=int, default=0, help="限制 TOP_N")
@@ -240,6 +245,10 @@ def main():
     parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR),
                         help="输出目录")
     args = parser.parse_args()
+
+    # 重绑模块级 OUTPUT_DIR（三个保存函数都在调用时读它）→ --output-dir 生效
+    OUTPUT_DIR = Path(args.output_dir)
+    logger.info(f"输出目录: {OUTPUT_DIR}")
 
     # 确定运行范围
     if args.all:
