@@ -376,6 +376,14 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
     if include_extra:
         want["extra_features"] = True
 
+    # 本次的目标目录（hash 含新的 cfg.sample_end）——不能把它自己当"旧缓存"复用，
+    # 否则 force_rebuild=True 形同虚设（2026-09-26 新增）
+    try:
+        target_dir: Path | None = _dataset_cache_path(
+            cfg, symbols, include_market_state, include_extra)[0]
+    except Exception:
+        target_dir = None
+
     best: tuple[Path, list[str], str] | None = None
     for d in glob.glob("data/cache/v2_dataset/*/"):
         meta_path = Path(d) / "metadata.json"
@@ -389,8 +397,15 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
             match = all(p.get(k) == v for k, v in want.items())
             if not match:
                 continue
+            if target_dir is not None and Path(d).resolve() == target_dir.resolve():
+                continue  # 目标目录本身（非"旧缓存"）→ 不复用
             old_end = str(p.get("sample_end", ""))
-            if old_end >= sample_end:  # 不早于当前 → 无需复用（可能是当前目录）
+            # 2026-09-26：判据由 `>=` 放宽为 `>`。
+            # 原注释本意只是"别选中当前目录"，但 `>=` 把**最后采样日相同**的旧缓存也一并排除了。
+            # 后果（实测）：同一日历月内先后跑两次重建（本次手动 V5 重建 9/25 + 月末链 9/30），
+            # 两次的 dates[-1] 都是 2026-09-21 → 被判"无需复用" → 月末链退化为全量 4.7h。
+            # 放宽后由 REUSE_SAFE_DAYS=60 保鲜过滤兜住近端（近 60 天照旧重算），其余天数复制。
+            if old_end > sample_end:
                 continue
             dates = _json.loads((Path(d) / "dates.json").read_text())
             if not dates:
