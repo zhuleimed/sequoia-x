@@ -391,6 +391,7 @@ def collect_subset(subset, codes, out, workers, refresh_days=None):
         return 0, 0, 0
 
     ok = fail = skip_empty = 0
+    skipped_degraded = []  # 2026-09-01: 采集降级但保留旧完整历史的股票, 供重刷
     t0 = time.time()
     total = len(todo)
     lock = __import__("threading").Lock()
@@ -401,12 +402,29 @@ def collect_subset(subset, codes, out, workers, refresh_days=None):
     def work(code):
         """带重试(指数退避)的采集任务。连接类错误重试; 解析类错误直接跳过;
         空返回(无覆盖/无记录) = 正常现象, 记 skip 不进 failed 清单。"""
-        nonlocal ok, fail, skip_empty
+        nonlocal ok, fail, skip_empty, skipped_degraded
         for attempt in range(4):  # 连接错误最多重试 4 次
             try:
                 df = fn(code)
                 if df is not None and len(df) > 0:
-                    df.to_parquet(_done_path(out, subset, code), index=False)
+                    path = _done_path(out, subset, code)
+                    # ── 2026-09-01: 防"降级覆盖完整历史"bug ──
+                    # fetch_finance 降级路径(mootdx 最新期快照)会在 DF 加 '(降级源)' 列,
+                    # 且通常只有 1 行。若磁盘已有更多行数的旧文件(全历史), 绝不能覆盖,
+                    # 否则完整历史被永久抹成单期 → 下游(扩展特征覆盖率/incomplete)整只剔除。
+                    if "(降级源)" in df.columns and os.path.exists(path):
+                        try:
+                            old = pd.read_parquet(path)
+                        except Exception:
+                            old = None
+                        if old is not None and len(old) > len(df):
+                            with lock:
+                                skipped_degraded.append(code)
+                                print(f"    ! {code} 采集降级(mootdx), 但磁盘已有 "
+                                      f"{len(old)}行历史 > 新{len(df)}行 → 保留旧数据",
+                                      flush=True)
+                                return code, "degraded_keep"
+                    df.to_parquet(path, index=False)
                     with lock:
                         ok += 1
                         return code, True
@@ -460,6 +478,13 @@ def collect_subset(subset, codes, out, workers, refresh_days=None):
         print(f"  [fund_flow] 💡 DDE 降级指引(实盘当日资金流, 摆脱东财):", flush=True)
         print(f"    python3 scripts/dde_calculator.py --codes {fp} "
               f"--start <日期> --end <日期> --out data/extra_features/dde", flush=True)
+    # 2026-09-01: 降级但保留旧历史的股票单独留痕 → 供下月重刷完整历史
+    if skipped_degraded:
+        dp = os.path.join(out, f"failed_degraded_{subset}.txt")
+        with open(dp, "w") as f:
+            f.write("\n".join(sorted(set(skipped_degraded))))
+        print(f"  [{subset}] ⚠️ 降级保留(未覆盖历史) {len(set(skipped_degraded))} 只 → "
+              f"已记录 {dp}, 待同花顺恢复后重刷", flush=True)
     return len(todo), ok, fail
 
 

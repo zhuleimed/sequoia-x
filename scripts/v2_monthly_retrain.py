@@ -1,4 +1,4 @@
-"""V2 月度重训 + 选股 + 信号入库（cron 每月 1 日 03:00 触发（2026-08-10: 与月末链错开——19:00 月末链约 8h 至 02:00, 03:00 重训零重叠））
+"""V4 月度重训 + 选股 + 信号入库（cron 每月 1 日 03:00 触发（2026-08-10: 与月末链错开——19:00 月末链约 8h 至 02:00, 03:00 重训零重叠））
 
 时机依据（用户设计）：
   - 月末最后交易日 18:10 同步完成 → 上月数据 100% 完整
@@ -12,7 +12,7 @@
   2. T4 训练（t4_monthly_worker）
   3. 从 prediction_cache 读最新月预测 → Rank 融合选股 → TOP_N
   4. 写入 sim_v2.db（submit_buy_signals，strategy_name="V2"）
-  5. V2 荐股推送（wxpusher）
+  5. V4 荐股推送（wxpusher）
 
 用法（cron, 2026-08-10: 00:00 → 03:00 与月末链错开）：
   0 3 1 * * cd <project> && python scripts/v2_monthly_retrain.py >> logs/v2_retrain_$(date +%Y%m).log 2>&1
@@ -85,7 +85,7 @@ def _check_extra_coverage() -> None:
             from wxpusher import WxPusher
             settings = get_settings()
             WxPusher.send_message(
-                content=f"⚠️ 扩展维度覆盖率不足: {', '.join(low)}（V2重训 Step0）",
+                content=f"⚠️ 扩展维度覆盖率不足: {', '.join(low)}（V4重训 Step0）",
                 token=settings.wxpusher_token,
                 topic_ids=settings.wxpusher_topic_ids,
                 content_type=1,
@@ -152,7 +152,7 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
         last_date = sample_dates[-1]
     pool_path = PROJECT_DIR / "output/backtest_v2/.stock_pool.json"
     if not pool_path.exists():
-        _notify("❌ V2 重训: .stock_pool.json 缺失",
+        _notify("❌ V4 重训: .stock_pool.json 缺失",
                 "月末自动链未正常运行（应写入股票池）。请检查 logs/month_end_pull_*.log")
         return False
     symbols = _json.loads(pool_path.read_text())
@@ -192,13 +192,34 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
 
     deadline = time.time() + max_wait_h * 3600
     waited = 0
+    _triggered_rebuild = False  # 2026-09-01: 月末链失败自愈——只触发一次补建, 防冲突
     while True:
         # 就绪判定: 优先扩展特征维（V4 配置目标）; 缺失但 88 就绪（自动链数据不全回退）→ 降级接受
+        ok, msg = _check_ready(want_extra)
+        # ── 2026-09-01 自愈: 等待 45min 仍未就绪(疑似月末链失败/未完成) → 主动触发一次缓存补建,
+        #    而不是干等到 12h 超时。恢复"8/31 月末链验证崩溃但标记已写"这类假就绪 → 实际覆盖不足的故障。
+        if not ok and waited >= 45 and not _triggered_rebuild:
+            _triggered_rebuild = True
+            _notify("⚠️ V4 重训: 缓存等待 45min 未就绪, 自动触发训练数据集缓存补建",
+                    f"原因: {msg}\n将调用 rebuild_dataset_cache.py 重建(预计10min-3h)。若月末链正在重建(本应 19:00 启动)"
+                    f"请留意日志避免重复。")
+            logger.warning(f"自动补建训练缓存 (waited={waited}min, reason={msg})...")
+            try:
+                _rs = subprocess.run(
+                    [PYTHON, "-u", "scripts/rebuild_dataset_cache.py"],
+                    cwd=str(PROJECT_DIR), timeout=8 * 3600,
+                )
+                logger.warning(f"自动补建完成 exit={_rs.returncode}")
+                if _rs.returncode != 0:
+                    _notify("❌ V4 重训: 缓存自动补建失败",
+                            f"rebuild_dataset_cache.py exit={_rs.returncode}, 继续等待/最终超时")
+            except Exception as _e:
+                logger.error(f"自动补建异常: {_e}")
         ok, msg = _check_ready(want_extra)
         if not ok and want_extra:
             ok88, msg88 = _check_ready(False)
             if ok88:
-                _notify("⚠️ V2 重训自动回退 88 维",
+                _notify("⚠️ V4 重训自动回退 88 维",
                         "扩展特征维缓存未就绪, 但 88 维缓存已就绪 → 本次按 88 维重训（保底机制）")
                 logger.warning(f"扩展特征维未就绪, 接受 88 维降级: {msg88}")
                 return True
@@ -210,7 +231,7 @@ def wait_for_cache_ready(target_month: str, max_wait_h: float = 12.0) -> bool:
             return True
 
         if time.time() > deadline:
-            _notify("❌ V2 重训等待缓存超时",
+            _notify("❌ V4 重训等待缓存超时",
                     f"等待 {max_wait_h:.0f}h 未就绪: {reason}\n请检查 logs/month_end_pull_*.log（月末自动链）")
             logger.error(f"缓存等待超时: {reason}")
             return False
@@ -296,14 +317,14 @@ def select_stocks(target_month: str) -> tuple[list[str], dict]:
 
 
 def push_recommendation(target_month: str, pred_info: dict) -> None:
-    """V2 荐股报告推送（wxpusher，直接 send_message，不依赖已废弃的选股播报格式）。"""
+    """V4 荐股报告推送（wxpusher，直接 send_message，不依赖已废弃的选股播报格式）。"""
     try:
         from wxpusher import WxPusher
 
         from sequoia_x.data.engine import DataEngine
 
         settings = get_settings()
-        lines = [f"【V2 模型月度荐股 {target_month}】"]
+        lines = [f"【V4 模型月度荐股 {target_month}】"]
         lines.append(f"股票池: {pred_info['n_pool']} 只 | "
                      f"T2 头部均值: {pred_info['t2_mean_top']:+.2%} | "
                      f"T4 头部均值: {pred_info['t4_mean_top']:+.2%}")
@@ -319,11 +340,11 @@ def push_recommendation(target_month: str, pred_info: dict) -> None:
             content_type=1,
         )
         if result.get("code") == 1000:
-            logger.info("V2 荐股已推送")
+            logger.info("V4 荐股已推送")
         else:
-            logger.warning(f"V2 荐股推送失败: {result}")
+            logger.warning(f"V4 荐股推送失败: {result}")
     except Exception as e:
-        logger.warning(f"V2 荐股推送失败: {e}")
+        logger.warning(f"V4 荐股推送失败: {e}")
 
 
 def main() -> None:
@@ -331,7 +352,7 @@ def main() -> None:
     t_main = _time.time()
     target_month = get_target_month()
     logger.info("=" * 60)
-    logger.info(f"V2 月度重训启动 | 目标月={target_month} | {datetime.now()}")
+    logger.info(f"V4 月度重训启动 | 目标月={target_month} | {datetime.now()}")
     logger.info("=" * 60)
 
     # ── Step0: 辅助维度增量刷新（资金流向/财务/股东/研报/新闻/分红, 见 collect_extra_features.py）──
@@ -352,20 +373,20 @@ def main() -> None:
     # ── Step0.5: 等待月末自动链训练缓存就绪（2026-08-07）──
     #    8/31 19:00 拉取 + 重建 2-6h, 9/1 03:00 启动时可能未完成 → 轮询等待（最长 12h）
     if not wait_for_cache_ready(target_month):
-        _notify("❌ V2 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
+        _notify("❌ V4 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
         sys.exit(1)
     logger.info(f"训练缓存就绪，继续重训（累计 {(_time.time()-t_main)/60:.0f}min）")
 
     # ── Step1: T2/T1/T3 缓存构建（增量，断点续跑）──
     if not build_prediction_cache(target_month):
-        _notify("❌ V2 重训 Step1 失败", "T2/T1/T3 预测缓存构建失败, 请查 logs/v2_retrain_*.log")
+        _notify("❌ V4 重训 Step1 失败", "T2/T1/T3 预测缓存构建失败, 请查 logs/v2_retrain_*.log")
         logger.error("T2/T1/T3 构建失败，重训终止")
         sys.exit(1)
     logger.info(f"Step1 完成（累计 {(_time.time()-t_main)/60:.0f}min）")
 
     # ── Step2: T4 训练（追加 T4 预测到缓存）──
     if not train_t4(target_month):
-        _notify("❌ V2 重训 Step2 失败", "T4 LSTM 训练失败, 请查 logs/v2_retrain_*.log")
+        _notify("❌ V4 重训 Step2 失败", "T4 LSTM 训练失败, 请查 logs/v2_retrain_*.log")
         logger.error("T4 训练失败，重训终止（可重跑续跑）")
         sys.exit(1)
     logger.info(f"Step2 T4 完成（累计 {(_time.time()-t_main)/60:.0f}min）")
@@ -387,12 +408,12 @@ def main() -> None:
         strategy_name="V2",
         top_n=TOP_N_BUY,
     )
-    logger.info(f"V2 买入信号已写入 sim_v2.db: {n} 条")
+    logger.info(f"V4 买入信号已写入 sim_v2.db: {n} 条")
 
     # ── Step5: 荐股推送 ──
     push_recommendation(target_month, pred_info)
 
-    # ── Step6: V2 + LLM 模拟盘月度汇总报告推送（对应 V1 月末月度报告）──
+    # ── Step6: V4 + LLM 模拟盘月度汇总报告推送（对应 V1 月末月度报告）──
     try:
         from sequoia_x.simulation.reporter import build_monthly_report_text, push_daily_summary
         settings = get_settings()
@@ -409,20 +430,20 @@ def main() -> None:
         llm_text = build_monthly_report_text(y, prev_m, settings.db_path)
 
         if not v2_text and not llm_text:
-            logger.info("V2/LLM 月度报告均为空，跳过")
+            logger.info("V4/LLM 月度报告均为空，跳过")
         else:
-            report = [f"【V2 + LLM 模拟盘月度报告 {y}-{prev_m:02d}】", ""]
-            report.append("═══ V2 模拟盘 ═══")
+            report = [f"【V4 + LLM 模拟盘月度报告 {y}-{prev_m:02d}】", ""]
+            report.append("═══ V4 模拟盘 ═══")
             report.append(v2_text or "（本月无模拟盘交易数据）")
             report.append("")
             report.append("═══ LLM 模拟盘 ═══")
             report.append(llm_text or "（本月无模拟盘交易数据）")
             push_daily_summary(settings, "\n".join(report))
-            logger.info(f"V2+LLM 月度报告已推送（{y}-{prev_m:02d}）")
+            logger.info(f"V4+LLM 月度报告已推送（{y}-{prev_m:02d}）")
     except Exception as e:
-        logger.warning(f"V2+LLM 月度报告推送失败: {e}")
+        logger.warning(f"V4+LLM 月度报告推送失败: {e}")
 
-    logger.info(f"V2 月度重训完成 | 耗时见日志 | 信号待下个交易日执行")
+    logger.info(f"V4 月度重训完成 | 耗时见日志 | 信号待下个交易日执行")
 
 
 if __name__ == "__main__":

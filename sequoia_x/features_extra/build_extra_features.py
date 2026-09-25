@@ -436,6 +436,16 @@ def build_extra_with_flag(dates: pd.DatetimeIndex, close: pd.Series,
         if cols:
             key_covs[g] = float((feats[cols] != 0).any(axis=1).mean())
     incomplete = bool(key_covs) and any(c < EXTRA_COVERAGE_THRESHOLD for c in key_covs.values())
+    # 2026-09-01: 精准放宽 — 东财 RPT_HOLDERNUM_DET 对部分大盘蓝筹(如 600027/601899)不披露股东户数,
+    # 若仅 holders 面缺失、而 fund_flow 与 finance 均达标 → 视为数据源覆盖缺失, 不整只剔除。
+    # 避免误剔正常标的(历史月份均在池、且有真实预测)。如多个关键面缺失, 维持剔除。
+    if incomplete and key_covs.get("holders", 1.0) < EXTRA_COVERAGE_THRESHOLD:
+        other_ok = all(
+            key_covs.get(g, 1.0) >= EXTRA_COVERAGE_THRESHOLD
+            for g in ("fund_flow", "finance")
+        )
+        if other_ok:
+            incomplete = False
     return feats, incomplete, cov
 
 

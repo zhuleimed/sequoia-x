@@ -34,7 +34,34 @@ from sequoia_x.model_selection_v2.features import _extract_per_day_features
 # ── 常量 ──
 # T4 LSTM 使用 80 维特征（不含市场状态），树模型使用 88 维（含市场状态）。
 # §3.6 已验证：LSTM 能从 120 步时序中隐式推断市场状态，显式特征反而引入噪声。
-CACHE_DIR = PROJECT_ROOT / "data/cache/v2_dataset/62cf234c5440"  # 80维缓存 (2026-08-01 重建, 400728样本)
+# 2026-09-01 fix: 不再硬编码旧缓存路径(62cf234c5440, 数据仅到 2026-06-22)。
+# 改用动态 _dataset_cache_path(sample_end=resolve_sample_end到上月最后交易日) →
+# 用当前参数的最新 T4 缓存(覆盖到 8 月), 消除"T4 训练漏 7-8 月数据"与 _verify_caches 报"T4缺失"。
+# 注意: 需在 rebuild_dataset_cache.py --only-80 重建最新缓存后才生效(否则动态目录不存在)。
+
+def get_t4_cache_dir():
+    """动态返回 T4(80维) 训练缓存目录(与 _verify_caches/月末链同参数 hash)。"""
+    from sequoia_x.model_selection_v2.labels import _dataset_cache_path, resolve_sample_end
+    cfg = get_config()
+    # 2026-09-01 fix: 优先遵循 V4_SAMPLE_END_FIX(与 build_prediction_cache/月末链一致)。
+    #   否则 resolve_sample_end 在 DB 已同步新交易日(如月初9/1入库)时动态返回最新日,
+    #   导致与缓存重建时的截止日(08-31) hash 失配 → worker 找不到缓存。
+    se_fix = os.environ.get("V4_SAMPLE_END_FIX", "")
+    if se_fix:
+        cfg.sample_end = se_fix
+    else:
+        cfg.sample_end = resolve_sample_end(cfg)  # DB 最后交易日, 与重建/重训同口径
+    import json as _json
+    symbols = _json.loads(STOCK_POOL_PATH.read_text())
+    d, _ = _dataset_cache_path(cfg, symbols, include_market_state=False, include_extra=False)
+    full = PROJECT_ROOT / d
+    if not (full / "metadata.json").exists():
+        raise RuntimeError(
+            f"T4(80维)缓存不存在: {full}\n请先运行 python scripts/rebuild_dataset_cache.py --only-80 重建"
+            f"(旧硬编码缓存 62cf234c5440 数据仅到 2026-06-22, 需重建到最新)")
+    return full
+
+
 CACHE_PATH = PROJECT_ROOT / "output/backtest_v2/prediction_cache.json"
 TMP_DIR = PROJECT_ROOT / "output/backtest_v2/.t4_tmp"
 LOG_DIR = PROJECT_ROOT / "output/backtest_v2/.t4_logs"
@@ -82,10 +109,18 @@ def setup_logger(month: str) -> logging.Logger:
 
 
 def load_shared_data():
-    """加载所有 Worker 共享的只读数据（mmap + 股票池 + 日期）。"""
-    X = np.load(str(CACHE_DIR / "X.npy"), mmap_mode="r")
-    y2 = np.load(str(CACHE_DIR / "y2.npy"), mmap_mode="r")
-    with open(CACHE_DIR / "dates.json") as f:
+    """加载所有 Worker 共享的只读数据（mmap + 股票池 + 日期）。
+
+    2026-09-01: 改用动态 get_t4_cache_dir()(见上), 不再硬编码旧缓存路径。
+    """
+    return _load_shared_data_from(get_t4_cache_dir())
+
+
+def _load_shared_data_from(cache_dir: Path):
+    """实际从给定缓存目录加载共享只读数据。"""
+    X = np.load(str(cache_dir / "X.npy"), mmap_mode="r")
+    y2 = np.load(str(cache_dir / "y2.npy"), mmap_mode="r")
+    with open(cache_dir / "dates.json") as f:
         dates = json.load(f)
     with open(STOCK_POOL_PATH) as f:
         stock_pool = json.load(f)

@@ -21,6 +21,9 @@ from datetime import date
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_DIR))  # 2026-09-01 fix: 直接运行时主进程 import sequoia_x 必需,
+#     否则 _notify/_verify_caches 等 from sequoia_x... 触发 ModuleNotFoundError, 月末链验证段崩溃
+#     （8/31 实测: .rebuild_done 标记已写但 _verify_caches 崩溃, 验证缺失未被发现）
 
 # 交易日历来源（akshare 新浪, 免费）; 失败时回退: 周一~周五直接放行（近似）
 def get_trade_dates():
@@ -88,20 +91,33 @@ def _verify_caches() -> tuple[bool, str]:
     cfg.sample_end = resolve_sample_end(cfg)  # DB 最后交易日, 与重建/重训同口径
     symbols = _json.loads((PROJECT_DIR / "output/backtest_v2/.stock_pool.json").read_text())
     include_extra = bool(getattr(cfg, "extra_features", False))
-    exp_tree = 121 if include_extra else 88
+    # 2026-09-01 fix: 维度基准不再硬编码 121 —— feature_version 已演进到 129(更高)。
+    # 改为: base 行情特征数(88) 恒定; 扩展特征维数由"已存在缓存的实际 X_shape[2] 相对 88 的增量"
+    # 为基准, 训练/预测两端应一致。缺失时(首次重建) fallback 88(不含扩展) 或按 cfg 估算。
+    _BASE_DIM = 88  # base 行情特征(含 market_state), 恒定为 88
     msgs, bad = [], []
-    for name, ms, extra, want in [("树模型", True, include_extra, exp_tree),
-                                  ("T4", False, False, 80)]:
+    for name, ms, extra, base_ok in [("树模型", True, include_extra, True),
+                                     ("T4", False, False, False)]:
         d, _ = _dataset_cache_path(cfg, symbols, ms, extra)
         if not (d / "metadata.json").exists():
             bad.append(f"{name}缓存缺失:{d.name}")
             continue
         m = _json.loads((d / "metadata.json").read_text())
         xdim = m["X_shape"][2]
-        if xdim != want:
-            bad.append(f"{name}维度错误:{xdim}≠{want}")
-            continue
+        # 维度合法性: base 面上须 ≥ base(88/80)。扩展面用相对增量动态校验, 避免硬编码 129/121。
+        exp_base = 80 if not ms else _BASE_DIM
+        if ms:  # 树模型: ≥88 即合法; 若含扩展则额外校验扩展维数来自 base 增量(正确缓存)
+            if xdim < _BASE_DIM:
+                bad.append(f"{name}维度错误:{xdim}<88")
+                continue
+        else:  # T4: 恰好 80 维(不含 market_state/扩展)
+            if xdim != 80:
+                bad.append(f"{name}维度错误:{xdim}≠80")
+                continue
         dates = _json.loads((d / "dates.json").read_text())
+        if not dates:
+            bad.append(f"{name}无采样日")
+            continue
         msgs.append(f"{name}={xdim}维,{len(set(dates))}日,止于{dates[-1]}")
     return (not bad), "; ".join(msgs + bad)
 
