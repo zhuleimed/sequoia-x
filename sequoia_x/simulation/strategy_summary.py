@@ -1,15 +1,15 @@
-"""多策略汇总报告：LLM 策略 vs V2 策略。
+"""多策略汇总报告：LLM 策略 vs V4 策略。
 
 每日推送对比摘要到微信，格式：
 
 Sequoia-X 策略汇总 | 07-20
 ════════════════════════════════════════
 1. LLM LLM选股  累计+X.X%  持仓X只
-2. V2 V2模型选股  累计+X.X%  持仓X只
+2. V4 V4模型选股  累计+X.X%  持仓X只
 
 数据来源：
   - data/sequoia_v2.db  — LLM 策略模拟盘
-  - data/sim_v2.db      — V2 策略模拟盘
+  - data/sim_v2.db      — V4 策略模拟盘
 （V1 LSTM 模拟盘已废止 2026-08-02，不再纳入）
 """
 
@@ -102,7 +102,7 @@ def _format_strategy_line(
         f"累计{total_return:+.2%}",
         f"持仓{pos_count}只",
         f"资产{total_value:,.0f}",
-        f"交易{trade_count}笔",  # 始终显示（0 笔也显示，如 V2 首日无平仓）
+        f"交易{trade_count}笔",  # 始终显示（0 笔也显示，如 V4 首日无平仓）
     ]
     detail = " | ".join(summary_parts)
     return f"{emoji} {name}  {detail}"
@@ -121,7 +121,7 @@ def build_strategy_summary_text() -> str:
     llm_positions = _get_position_count(LLM_DB)
     llm_trades = _get_closed_trades_count(LLM_DB)
 
-    # V2 策略（sim_v2.db 独立模拟盘）
+    # V4 策略（sim_v2.db 独立模拟盘）
     v2_account = _get_account_summary(V2_DB)
     v2_positions = _get_position_count(V2_DB)
     v2_trades = _get_closed_trades_count(V2_DB)
@@ -133,22 +133,22 @@ def build_strategy_summary_text() -> str:
             "1. LLM", "LLM选股", llm_account, llm_positions, llm_trades
         ),
         _format_strategy_line(
-            "2. V2", "V2模型选股", v2_account, v2_positions, v2_trades
+            "2. V4", "V4模型选股", v2_account, v2_positions, v2_trades
         ),
         "",
     ]
 
-    # LLM vs V2 主力策略对比
+    # LLM vs V4 主力策略对比
     if llm_account is not None and v2_account is not None:
         llm_ret = llm_account.get("total_return", 0.0)
         v2_ret = v2_account.get("total_return", 0.0)
         diff = llm_ret - v2_ret
         if diff > 0.01:
-            lines.append(f"LLM 领先 V2 {diff:+.2%}")
+            lines.append(f"LLM 领先 V4 {diff:+.2%}")
         elif diff < -0.01:
-            lines.append(f"V2 领先 LLM {abs(diff):+.2%}")
+            lines.append(f"V4 领先 LLM {abs(diff):+.2%}")
         else:
-            lines.append("LLM 与 V2 累计收益接近")
+            lines.append("LLM 与 V4 累计收益接近")
         lines.append("")
 
     return "\n".join(lines)
