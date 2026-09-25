@@ -205,10 +205,28 @@ def _consensus_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) ->
     eps2 = float(r["Y2预测EPS"] or 0)
     aim_hi = float(r["目标价上限"] or 0)
     aim_lo = float(r["目标价下限"] or 0)
-    # 可用日 = 文件采集日(快照之后才有效)
-    fp = EXTRA_DIR / "consensus" / f"{code}.parquet"
-    avail = datetime.fromtimestamp(os.path.getmtime(fp)).date() if fp.exists() else date.today()
-    mask = dates >= pd.Timestamp(avail)  # 采集日前 = NaN(回测早期无此特征)
+    # 可用日（2026-09-25 修复）：
+    #   先明确一点——**把"快照采集日之前"的样本掩掉是正确行为**：
+    #   该快照当时还不存在，拿它当历史特征就是前视偏差。所以
+    #   "老样本上 consensus 为 0"不是 bug，是应有之义。
+    #
+    #   真正的问题是**判断"采集日"的依据错了**：原实现读文件 **mtime**，
+    #   而 mtime 是文件系统元数据，会被复制 / rsync / 重写 parquet / 重新下载
+    #   任意改写 —— 一次不经意的文件操作就能把"快照生效日"整体挪位，
+    #   而且**不会报错**（实测：目录里 3,334 个文件 mtime 全被推到 2026-08-31，
+    #   而训练采样日最大只到 2026-07-21 → 掩码命中 0 天，5 列全 0；
+    #   更早一次构建时 mtime 是 2026-08-07，同一份数据就"有值"）。
+    #
+    #   改为**优先读 parquet 里的 `snapshot_date` 列**（采集时写入的业务日期，
+    #   属数据本身、随文件走，且刷新不改写），缺失时才退回 mtime（老数据兼容）。
+    snap = r.get("snapshot_date") if hasattr(r, "get") else None
+    if snap is not None and pd.notna(snap):
+        avail = pd.Timestamp(snap)
+    else:
+        fp = EXTRA_DIR / "consensus" / f"{code}.parquet"
+        avail = (pd.Timestamp(datetime.fromtimestamp(os.path.getmtime(fp)))
+                 if fp.exists() else pd.Timestamp(date.today()))
+    mask = dates >= avail  # 快照采集日前 = NaN(回测早期无此特征)
     out = pd.DataFrame(index=dates, columns=cols, dtype=float)
     out.loc[mask, "cs_buy_ratio"] = buy / org if org else 0.0
     out.loc[mask, "cs_org_num"] = np.log1p(org)
@@ -257,15 +275,34 @@ def _xdxr_features(code: str, dates: pd.DatetimeIndex, close: pd.Series) -> pd.D
     ev = ev.dropna(subset=["avail"]).drop_duplicates(subset="avail", keep="last")
     if len(ev) == 0:
         return pd.DataFrame(index=dates, columns=cols, dtype=float)
-    # 滚动 12 月累计分红/送转(按事件日对齐)
+    # ── 逐日 as-of 口径（2026-09-25 修复）──
+    # 原实现有两处结构性问题，导致这两维**永远恒 0、零信息**（实测生产缓存里
+    # `xd_div_cnt_3y`/`xd_song_cnt_3y` 零方差）：
+    #   ① L264-268 原把"近3年事件次数"算成**一个标量**贴满整列 → 常数列会被
+    #      `model_selection_v2/features.py` 的零方差保护强制清 0；
+    #      且 `song_3y` 用的是**全历史**次数（不是近 3 年）——语义也不对。
+    #   ② `xd_yield` 用 `div_cum.reindex(dates)`，而 div_cum 的索引是**事件日**，
+    #      对齐到交易日只在除权当天有值（实测 1,733 个交易日里仅 14 天非零）。
+    # 现在三列都改成"对每个交易日 d，取其及之前已知的信息"。
     out = pd.DataFrame(index=dates)
     div_cum = ev.set_index("avail")["fenhong"].sort_index().rolling("365D", min_periods=1).sum()
-    song_cum = ev.set_index("avail")["songzhuangu"].sort_index().rolling("365D", min_periods=1).sum()
-    div_3y = ev[ev["avail"] >= dates[-1] - pd.Timedelta(days=1095)].shape[0]  # 近3年事件次数
-    song_3y = (ev["songzhuangu"] > 0).sum()
-    out["xd_yield"] = (div_cum.reindex(dates).fillna(0.0) / close.replace(0, np.nan)).fillna(0.0)
-    out["xd_div_cnt_3y"] = float(div_3y)
-    out["xd_song_cnt_3y"] = float(song_3y)
+    # ① 近 12 月累计分红按日 as-of 对齐（取 d 之前最近一次事件的滚动值，而非只在事件日有值）
+    out["xd_yield"] = (
+        div_cum.reindex(dates, method="ffill").fillna(0.0) / close.replace(0, np.nan)
+    ).fillna(0.0)
+
+    # ② 近 3 年事件次数：按日滚动计数（avail ∈ [d-1095天, d]），随日变化
+    def _count_within_3y(ev_dates: pd.Series) -> np.ndarray:
+        arr = np.sort(pd.to_datetime(ev_dates).values)
+        if len(arr) == 0:
+            return np.zeros(len(dates))
+        d_arr = dates.values
+        hi = np.searchsorted(arr, d_arr, side="right")
+        lo = np.searchsorted(arr, d_arr - np.timedelta64(1095, "D"), side="left")
+        return (hi - lo).astype(float)
+
+    out["xd_div_cnt_3y"] = _count_within_3y(ev.loc[ev["fenhong"] > 0, "avail"])
+    out["xd_song_cnt_3y"] = _count_within_3y(ev.loc[ev["songzhuangu"] > 0, "avail"])
     return out
 
 

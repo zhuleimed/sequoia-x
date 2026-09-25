@@ -238,6 +238,11 @@ def fetch_consensus(code: str) -> pd.DataFrame:
             "Y4年度": r.get("YEAR4"),
             "目标价上限": r.get("DEC_AIMPRICEMAX"),
             "目标价下限": r.get("DEC_AIMPRICEMIN"),
+            # 2026-09-25 新增：快照的**业务生效日**（= 本次采集日）。
+            # 特征侧原先靠文件 mtime 判断"快照何时开始可用"，但每次刷新都会把 mtime
+            # 推到刷新日，导致所有历史采样日都落在掩码之前、整组特征被砍成 0。
+            # 该列一旦写入**不得被后续刷新改写**（增量采集只写新行）。
+            "snapshot_date": time.strftime("%Y-%m-%d"),
         }])
 
     # ── 报表无记录 → reportapi 逐条研报聚合兜底(近 30 月) ──
@@ -282,6 +287,7 @@ def fetch_consensus(code: str) -> pd.DataFrame:
         "目标价上限": latest.get("indvAimPriceT"),
         "目标价下限": latest.get("indvAimPriceL"),
         "(兜底源)": "reportapi",
+        "snapshot_date": time.strftime("%Y-%m-%d"),   # 同上报路径，见上注释
     }])
 
 

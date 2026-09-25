@@ -14,6 +14,14 @@ from sequoia_x.data.engine import DataEngine
 from sequoia_x.core.logger import get_logger
 from sequoia_x.model_selection_v2.config import V2Config, get_config
 from sequoia_x.model_selection_v2.features import build_stock_features
+from sequoia_x.model_selection_v2.index_source import load_index_close_forward
+
+# 增量复用的"数据面保鲜"天数（2026-09-25 新增，见 _find_reusable_cache）。
+# 扩展维度数据每次采集会整体重写，故只复用比 sample_end 早于该天数的采样日；
+# 取 60 > 采集刷新窗口 40（v2_monthly_retrain Step0 --refresh-days 40），留安全边界。
+REUSE_SAFE_DAYS: int = 60
+# 当前特征版本（同时用于缓存 hash key 与复用判据，**两处必须一致**）
+FEATURE_VERSION: int = 5
 
 logger = get_logger(__name__)
 
@@ -134,16 +142,9 @@ def _compute_label_t2(
         df_rows = pd.DataFrame(stock_rows, columns=["date", "close"])
         apply_adjust(df_rows, symbol)
         stock_rows = list(df_rows.itertuples(index=False, name=None))
-    # 指数（优先从 index_daily 表查询 sh.000300，fallback 到 stock_daily 的 000300）
-    idx_rows = conn.execute(
-        "SELECT close FROM index_daily WHERE symbol='sh.000300' AND date > ? ORDER BY date LIMIT ?",
-        (ref_date, cfg.predict_horizon_t2 + 2)
-    ).fetchall()
-    if len(idx_rows) < cfg.predict_horizon_t2:
-        idx_rows = conn.execute(
-            "SELECT close FROM stock_daily WHERE symbol='000300' AND date > ? ORDER BY date LIMIT ?",
-            (ref_date, cfg.predict_horizon_t2 + 2)
-        ).fetchall()
+    # 指数（优先 index_daily 的 sh.000300，fallback stock_daily 的 000300）
+    # 2026-09-25：表名与回退规则改由 index_source 统一提供，避免与 features.py 走散
+    idx_rows = load_index_close_forward(conn, ref_date, cfg.predict_horizon_t2 + 2)
     conn.close()
 
     if len(stock_rows) < cfg.predict_horizon_t2 or len(idx_rows) < cfg.predict_horizon_t2:
@@ -280,7 +281,7 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str], include_market_state:
         "sample_start": cfg.sample_start,
         "sample_end": cfg.sample_end,
         "window": cfg.window,
-        "feature_version": 4,  # 2026-08-20: v4=特征层换源(finance16维+砍forecast+短线情绪), 与v3不兼容→缓存/重训全量重建
+        "feature_version": FEATURE_VERSION,  # v4=特征层换源; v5=2026-09-25 列布局修复(§6 分支不对称)+指数取数同源+扩展死列修复 → 与 v4 不兼容，缓存/重训全量重建
         "market_state": include_market_state,  # T4=80维(False), T2/T1/T3=88维(True)
     }
     # 2026-08-07: 88+33=121维扩展特征——仅 True 时加 key（False 时 hash 与现有 88 维缓存一致,
@@ -369,7 +370,7 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
         "n_stocks": len(symbols),
         "sample_start": cfg.sample_start,
         "window": cfg.window,
-        "feature_version": 4,
+        "feature_version": FEATURE_VERSION,
         "market_state": include_market_state,
     }
     if include_extra:
@@ -400,11 +401,34 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
         except Exception:
             continue
     if best is not None:
+        old_dir, old_dates, old_end = best
+        # ── 数据面保鲜（2026-09-25 修复）──
+        # 上述等价性判据只含参数 hash（n_stocks/sample_end/window/feature_version/
+        # market_state/extra_features），**不含数据状态**。而扩展维度数据
+        # （fund_flow/finance/holders/consensus/...）每次采集都会被整体重写，
+        # 旧缓存里的那几列是**当时的数据状态**算出来的 —— 于是任何数据刷新
+        # 都不会反映到被复用的旧采样日上，最新一个月反而拿着旧数据训练。
+        # 修法：只复用"足够旧"的采样日（其扩展数据不会再变），近端一律重算。
+        # 边界取 60 天 > 采集刷新窗口 40 天（v2_monthly_retrain Step0 --refresh-days 40）。
+        if include_extra and old_dates:
+            cutoff = (pd.Timestamp(sample_end) - pd.Timedelta(days=REUSE_SAFE_DAYS)
+                      ).strftime("%Y-%m-%d")
+            fresh = [d for d in old_dates if d <= cutoff]
+            dropped = len(old_dates) - len(fresh)
+            if dropped:
+                logger.info(
+                    f"增量复用: 数据面保鲜——丢弃最近 {dropped} 个采样日"
+                    f"（>{REUSE_SAFE_DAYS} 天内，扩展数据可能已被刷新）"
+                )
+            if not fresh:
+                logger.info("增量复用: 全部旧采样日都在保鲜窗口内 → 转全量构建")
+                return None
+            old_dates = fresh
         logger.info(
-            f"增量复用: 发现同参数旧缓存 {best[0].name} "
-            f"（sample_end={best[2]}, {len(best[1])} 个旧采样日）→ 只构建新增采样日"
+            f"增量复用: 发现同参数旧缓存 {old_dir.name} "
+            f"（sample_end={old_end}, {len(old_dates)} 个旧采样日）→ 只构建新增采样日"
         )
-        return best[0], best[1]
+        return old_dir, old_dates
     return None
 
 
@@ -555,7 +579,7 @@ def build_training_dataset(
         "sample_start": str(cfg.sample_start),
         "sample_end": str(dates[-1] if dates else cfg.sample_end),
         "window": cfg.window,
-        "feature_version": 4,
+        "feature_version": FEATURE_VERSION,
         "market_state": include_market_state,
     }
     if include_extra:

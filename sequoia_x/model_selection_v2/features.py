@@ -1,21 +1,41 @@
 """model_selection_v2 - 特征工程模块。
 
-从 stock_daily 表计算 78 维时序特征，严格避免 look-ahead bias：
-第 T 日的特征仅使用 T 日及之前已知的数据。
+从 stock_daily 表计算 **76 维**基础时序特征（含市场状态 8 维；不含则 68 维），
+严格避免 look-ahead bias：第 T 日的特征仅使用 T 日及之前已知的数据。
 
 特征分组：
   价格收益(8) + 均线偏离(6) + 量能(8) + 技术指标(11)
-  + 波动率(4) + 大盘关联(8) + 市场状态(8)
+  + 波动率(4) + 大盘关联(6) + 市场状态(8)
   + 价格形态(7) + 最大回撤(3) + 收益分布(4) + 时间日历(4)
-  + 价格位置(3) + 估值指标(4: peTTM+pbMRQ+分位) = 78 维
-  padding 到 88 维（预留 10 维扩展空间）
-  (padding 到 80)
+  + 价格位置(3) + 估值指标(4: peTTM+pbMRQ+分位) = 76 维
+  padding 到 88 维（树模型）/ 80 维（T4 LSTM，不含市场状态）
+  拼接扩展特征后：88+41 = 129 维（feature_version=5）
+
+⚠️ 2026-09-25 口径更正：本文档原写"大盘关联(8)、基础 78 维"，
+   但设计文档只命名了 6 个大盘关联特征（见 BASE_FEATURE_DIM 处注释），
+   "8"是记账错误。已统一为 6，基础维数由 78 更正为 76。
 """
 from __future__ import annotations
 import numpy as np
 import pandas as pd
 from sequoia_x.data.engine import DataEngine
 from sequoia_x.model_selection_v2.config import V2Config, get_config
+from sequoia_x.model_selection_v2.index_source import load_index_close
+
+
+# ── 布局基准（2026-09-25 新增，用于断言列布局一致性）──
+# §1 价格收益(8) + §2 均线偏离(6) + §3 量能(8) + §4 技术指标(11) + §5 波动率(4)
+# + §6 大盘关联(6) + §7 价格形态(7) + §7b 最大回撤(3) + §7c 收益分布(4)
+# + §7d 时间日历(4) + §7e 价格位置(3) + §8 估值(4)  = 68
+# （不含 §6b 市场状态 8 维，它由 include_market_state 决定）
+#
+# ⚠️ 口径更正：文档（模块 docstring / BACKTEST_PLAN §81 / 设计文档 §128）一直写
+#   "大盘关联 8 维、基础 78 维"，但设计文档 §128 实际只命名了 6 个特征
+#   （指数收益率 / 20日Beta / 相对强度 / 指数MA20、MA60 位置 / 近5日超额），
+#   与代码 `if` 分支逐一对应 —— 即"8"是文档记账错误。
+#   原 `else` 分支照着这个错的 8 补零，导致两条分支列数不等（6 vs 8），
+#   使 §7 之后所有列在两种布局下相差 2 位。2026-09-25 已统一为 6。
+BASE_FEATURE_DIM: int = 68
 
 
 # ════════════════════════════════════════════════════════════
@@ -200,7 +220,12 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
     vol_5d = pd.Series(ret_1d).rolling(5, min_periods=1).std().values * np.sqrt(252)
     feature_list.append(vol_5d / np.maximum(vol_20d, 1e-10) - 1.0)
 
-    # ── 6. 大盘关联特征 (8维) ──
+    # ── 6. 大盘关联特征 (6维) ──
+    # ⚠️ 2026-09-25 修复：本段 `if` 分支实际只追加 6 维，而 `else` 分支原先补 8 维零 ——
+    #    两条分支列数不等，会让 §7 之后**所有列**在两种布局下相差 2 位。
+    #    而 `len(df_index) == n` 是**逐股**判定（L204/L237），当前 DB 下只有 2,385/5,202
+    #    只满足等长 → 一次重建会让同一个 X 里同时存在两套列布局，即
+    #    "同一列在不同样本里含义不同"。故把 `else` 对齐为 6 维零。
     if df_index is not None and len(df_index) == n:
         idx_close = df_index["close"].values.astype(float)
         idx_ret = np.diff(idx_close, prepend=idx_close[0]) / np.maximum(np.roll(idx_close, 1), 1e-10)
@@ -226,7 +251,7 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
         idx_ret_5d = pd.Series(idx_close).pct_change(5).fillna(0.0).values
         feature_list.append(ret_5d_stock - idx_ret_5d)
     else:
-        for _ in range(8):
+        for _ in range(6):          # 必须与上面 if 分支的 6 维一致（2026-09-25 修复，原为 8）
             feature_list.append(np.zeros(n))
 
     # ── 6b. 市场状态特征 (8维，仅树模型使用) ──
@@ -377,7 +402,22 @@ def _extract_per_day_features(df: pd.DataFrame, df_index: pd.DataFrame | None,
         for i in range(extra_matrix.shape[1]):
             feature_list.append(extra_matrix[:, i].astype(np.float32))
 
-    # padding 到目标维度（80维=无市场状态, 88维=含市场状态, 121维=含扩展特征）
+    # ── 布局一致性断言（2026-09-25 新增）──
+    # 背景：§6 曾在"指数可用/不可用"两条分支下产出不同列数（6 vs 8），
+    #   使 §7 之后所有列在两种布局下相差 2 位 —— 同一个 X 里不同样本的同一列含义不同，
+    #   而且**不会报错**，只会静默污染训练。此处断言基础列数恒定，防止再次引入。
+    n_extra = extra_matrix.shape[1] if extra_matrix is not None else 0
+    base_dim = len(feature_list) - n_extra
+    expected_base = BASE_FEATURE_DIM + (8 if include_market_state else 0)
+    if base_dim != expected_base:
+        raise AssertionError(
+            f"特征列布局不一致：基础列数 {base_dim}，期望 {expected_base}"
+            f"（BASE_FEATURE_DIM={BASE_FEATURE_DIM}, "
+            f"include_market_state={include_market_state}）。"
+            f"请检查各特征段在 if/else 分支下追加的列数是否对齐。"
+        )
+
+    # padding 到目标维度（80维=无市场状态, 88维=含市场状态, 121/129维=含扩展特征）
     while len(feature_list) < target_dim:
         feature_list.append(np.zeros(n))
 
@@ -450,11 +490,14 @@ def build_stock_features(
         if incomplete:
             return None, None
 
+    # 指数取数：统一走 index_source（2026-09-25 修复）
+    # 原先用 engine.get_ohlcv("000300")，而该方法是查 stock_daily —— 指数在 index_daily
+    # 表、代码 sh.000300，故恒返回空 → df_index=None → §6+§6b 共 14 维在**推理时恒为 0**，
+    # 与训练侧（labels.py 走 index_daily）口径不一致。
     df_index = None
     try:
-        df_index = engine.get_ohlcv("000300")
+        df_index = load_index_close(engine, ref_date=ref_date)
         if df_index is not None:
-            df_index = df_index[df_index["date"] <= ref_date].copy()
             if len(df_index) != len(df):
                 df_index = None
     except Exception:
@@ -539,12 +582,11 @@ def build_prediction_features(
         if incomplete:
             return None
 
+    # 指数取数：统一走 index_source（2026-09-25 修复，同上）
     df_index = None
     try:
-        df_index = engine.get_ohlcv("000300")
+        df_index = load_index_close(engine, ref_date=ref_date)
         if df_index is not None:
-            if ref_date is not None:
-                df_index = df_index[df_index["date"] <= ref_date].copy()
             if len(df_index) != len(df):
                 df_index = None
     except Exception:
