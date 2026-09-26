@@ -1,0 +1,43 @@
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[65]	valid_0's rmse: 0.0929192
+[2026-09-26 13:51:56] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=65                      
+  2025-08-07 → 2025-08-21  leaky   IC=+0.0407
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[121]	valid_0's rmse: 0.0968904
+[2026-09-26 13:53:05] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=121                     
+  2025-09-19 → 2025-10-15  leaky   IC=+0.0159
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[243]	valid_0's rmse: 0.101903
+[2026-09-26 13:54:45] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=243                     
+  2025-10-29 → 2025-11-07  leaky   IC=+0.0857
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[176]	valid_0's rmse: 0.102873
+[2026-09-26 13:56:07] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=176                     
+  2025-11-21 → 2025-12-05  leaky   IC=+0.0691
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[91]	valid_0's rmse: 0.104491
+[2026-09-26 13:57:04] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=91                      
+  2025-12-19 → 2026-01-09  leaky   IC=-0.0178
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[123]	valid_0's rmse: 0.0973467
+[2026-09-26 13:58:10] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=123                     
+  2026-01-23 → 2026-02-06  leaky   IC=+0.0864
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[161]	valid_0's rmse: 0.10024
+[2026-09-26 13:59:27] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=161                     
+  2026-02-06 → 2026-02-27  leaky   IC=+0.1502
+Training until validation scores don't improve for 50 rounds
