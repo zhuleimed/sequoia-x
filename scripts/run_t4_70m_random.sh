@@ -11,14 +11,21 @@
 # 多周期 + 中性化分析。
 #
 # 口径（与 `run_t4_check_random.sh` 的公平版**完全一致**，便于互相印证）：
-#   2020-09 ~ 2026-06 ｜ purge 25 ｜ random 抽样（种子 42）｜ lastday_agg ｜ workers=2 ｜ 含 T4
+#   2020-09 ~ 2026-06 ｜ purge 25 ｜ random 抽样（种子 42）｜ lastday_agg ｜ 含 T4
 #
-# 两点设计说明
+# 三点设计说明
 # ------------
-# 1) **排队**：先等 `run_t4_check_random.sh`（18 月）跑完再开始。理由：每个 worker 的 TF
-#    用 16 个 intraop 线程，两个任务同时跑 = 4×16 = 64 线程挤 36 核，两边一起变慢，
-#    总吞吐不增反降。
-# 2) **checkpoint 复用**：2025-01~2026-06 这 18 个月，18 月任务已建好的
+# 1) **排队**：先等 `run_t4_check_random.sh`（18 月）跑完再开始。理由：两个任务同时跑会
+#    把 36 核挤爆，两边一起变慢，总吞吐不增反降。
+# 2) **线程/进程配置（2026-09-27 用户选择"快版"）**：4 workers × 8 线程 = 32 ≤ 36 核。
+#    `deep_lstm.py:26-32` 用 `os.environ.setdefault` 读线程数 ⇒ **调用方设环境变量即可**，
+#    不需要改生产代码：
+#        TF_NUM_INTRAOP_THREADS=8 / TF_NUM_INTEROP_THREADS=4 / OMP_NUM_THREADS=8
+#    ⚠️ **代价（必须知晓）**：18 月任务用的是 16 线程，本任务新建的 52 个月用 8 线程 ——
+#    线程数只改变浮点累加顺序，模型差异极小但**非零**。因此本缓存里
+#    2025-01~2026-06（复用 16 线程的 checkpoint）与其余月份**线程配置不同**，
+#    引用时需注明。KMP_AFFINITY 仍必须清（否则锁核，见项目铁律）。
+# 3) **checkpoint 复用**：2025-01~2026-06 这 18 个月，18 月任务已建好的
 #    `t4_checkpoint_cache_{月}.keras` 与本任务**同窗口/同数据/同种子 ⇒ 模型完全相同**，
 #    直接复用（省约 1/4 时间）。但 2020-2024 段若存在同名 checkpoint 说明是**别的口径**
 #    的遗留（deep_lstm.py:574 会静默 load 并跳过训练）→ 首次启动即中止。
@@ -39,13 +46,17 @@ TOTAL=70
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$PROG"; }
 
-export V4_BT_WORKERS=2
+# 快版：4 workers × 8 线程（≤36 核）。线程数经 os.environ 传入，见文件头说明 2)
+export V4_BT_WORKERS=4
+export TF_NUM_INTRAOP_THREADS=8
+export TF_NUM_INTEROP_THREADS=4
+export OMP_NUM_THREADS=8
 export V2_TRAIN_SAMPLE_MODE=random
 export V2_TRAIN_PURGE_DAYS=25
 
 # ── 1) 排队：等 18 月任务结束 ──
 while pgrep -f "run_t4_check_random.sh" > /dev/null 2>&1; do
-  log "⏳ 等待 18 月补测结束中（避免 4×16 线程过载）…"
+  log "⏳ 等待 18 月补测结束中（避免与其并行 → 32+32 > 36 线程过载）…"
   sleep 300
 done
 
@@ -71,9 +82,17 @@ fi
 ) &
 MON=$!
 
-log "═══ 70 月含 T4 补测启动（2020-09~2026-06，purge 25，random，lastday_agg，workers=2）═══"
+log "═══ 70 月含 T4 补测启动（2020-09~2026-06，purge 25，random，lastday_agg，4 workers × 8 线程）═══"
+log "  线程配置：TF_INTRAOP=$TF_NUM_INTRAOP_THREADS TF_INTEROP=$TF_NUM_INTEROP_THREADS OMP=$OMP_NUM_THREADS（$(nproc) 核）"
 T0=$(date +%s)
-env -u KMP_AFFINITY -u OMP_NUM_THREADS "$PY" -u scripts/build_prediction_cache.py \
+# 注意：只清 KMP_AFFINITY（会锁核），**保留**显式设置的线程数（用 env 直接赋给子进程）
+env -u KMP_AFFINITY \
+    TF_NUM_INTRAOP_THREADS="$TF_NUM_INTRAOP_THREADS" \
+    TF_NUM_INTEROP_THREADS="$TF_NUM_INTEROP_THREADS" \
+    OMP_NUM_THREADS="$OMP_NUM_THREADS" \
+    V4_BT_WORKERS="$V4_BT_WORKERS" \
+    V2_TRAIN_SAMPLE_MODE=random V2_TRAIN_PURGE_DAYS=25 \
+    "$PY" -u scripts/build_prediction_cache.py \
   --start-month 2020-09 --end-month 2026-06 \
   --feature-view lastday_agg \
   --output "$OUT" >> "$LOG" 2>&1
