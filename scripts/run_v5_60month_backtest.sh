@@ -13,8 +13,13 @@
 # 用法: nohup bash scripts/run_v5_60month_backtest.sh > logs/v5_60m_bt.log 2>&1 &
 PROJ=$(cd "$(dirname "$0")/.." && pwd)
 PY=/home/zhulei/anaconda3/envs/zhulei_py312/bin/python
-OUT="$PROJ/output/backtest_v2/prediction_cache_v5_60m.json"
-TMPDIR="$PROJ/output/backtest_v2/.cache_tmp_prediction_cache_v5_60m"
+# 2026-09-26 参数化：支持切换特征视图（默认 full = 原样，OUT 路径不变）
+#   用法：FEATURE_VIEW=lastday_agg VIEW_TAG=v5_387 [OUTDIR=...] bash scripts/run_v5_60month_backtest.sh
+FEATURE_VIEW="${FEATURE_VIEW:-full}"
+VIEW_TAG="${VIEW_TAG:-v5}"
+OUT="$PROJ/output/backtest_v2/prediction_cache_${VIEW_TAG}_60m.json"
+TMPDIR="$PROJ/output/backtest_v2/.cache_tmp_prediction_cache_${VIEW_TAG}_60m"
+OUTDIR="${OUTDIR:-$PROJ/output/backtest_v5}"
 cd "$PROJ"
 log(){ echo "[$(date '+%F %T')] $1"; }
 notify(){ "$PY" scripts/notify_wechat.py "$1" 2>/dev/null || true; }
@@ -51,14 +56,15 @@ if [ "${SKIP_PROGRESS:-0}" != "1" ]; then
     log "进度监控器启动 PID=$MONITOR_PID"
 fi
 
-notify "🚀 V5 129维 70个月回测启动（2020-09~2026-06，与 V4 同口径对照）。"
+notify "🚀 V5 70个月回测启动（2020-09~2026-06）特征视图=${FEATURE_VIEW}。"
 
 # ── 阶段1: 70 个月 V5 预测缓存（断点续跑）──
 log "阶段1: 构建 70 个月 V5 预测缓存 -> $OUT"
 START_T=$(date +%s)
 PYTHONPATH=$PROJ "$PY" -u scripts/build_prediction_cache.py \
   --start-month 2020-09 --end-month 2026-06 --skip-t4 \
-  --output "$OUT" >> logs/v5_60m_bt.log 2>&1
+  --feature-view "$FEATURE_VIEW" \
+  --output "$OUT" >> "logs/v5_60m_bt_${VIEW_TAG}.log" 2>&1
 RC=$?
 ELAPSED=$(( ($(date +%s) - START_T) / 60 ))
 if [ $MONITOR_PID ]; then kill $MONITOR_PID 2>/dev/null; fi
@@ -72,8 +78,8 @@ notify "✅ V5 预测缓存完成(${ELAPSED}min)。开始 70 月并行回测..."
 # ── 阶段2: 并行回测（**必须 --period full**）──
 log "阶段2: 并行回测（--period full = 2020-09~2026-06）..."
 "$PY" -u scripts/run_shared_backtest.py --all --period full --cache "$OUT" \
-  --output-dir "$PROJ/output/backtest_v5" \
-  >> logs/v5_60m_bt.log 2>&1
+  --output-dir "$OUTDIR" \
+  >> "logs/v5_60m_bt_${VIEW_TAG}.log" 2>&1
 RC2=$?
 log "阶段2 回测: exit=$RC2"
 if [ $RC2 -eq 0 ]; then
