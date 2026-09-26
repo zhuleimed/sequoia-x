@@ -499,14 +499,22 @@ def _process_month_worker(args: tuple) -> tuple:
         (f"{prev_y}-{prev_m:02d}-01", month + "-01"),
     ).fetchone()
     train_end_date = last_date_row[0] if last_date_row and last_date_row[0] else (month + "-01")
-    # ── 2026-09-26 实验开关：训练样本 purge（默认 0 = 与既有行为完全一致）──
-    # 为什么要它：采样日 D 的标签 y2 = D **之后** 20 个交易日的收益。若 D 距 train_end
-    #   不足 20 个交易日，该标签就用到了 train_end 之后的数据 —— 而 train_end 之后
-    #   正是**被预测的那个月** → 模型等于用答案训练。
-    #   `MAX_TRAIN_SAMPLES=5000` 取尾部 ~1.8 个采样日，使该泄漏覆盖 **100% 训练集**。
+    # ── 训练样本 purge（2026-09-26 起**默认开启**，不再是实验开关）──
+    # 为什么必须 purge：采样日 D 的标签 y2 = D **之后** 20 个交易日的收益。若 D 距
+    #   train_end 不足 20 个交易日，该标签就用到了 train_end 之后的数据 —— 而 train_end
+    #   之后正是**被预测的那个月** → 模型等于用答案训练。
+    #   原 `X_tr[-5000:]`（取尾部）使该泄漏覆盖 **100% 训练集**，实测把 IC 从
+    #   +0.015（真实）抬到 +0.224（70 月）/ +0.428（18 月），且 99% 的月份为正。
+    #   详见 docs/2026-09_回测IC异常排查清单.md
     # V2_TRAIN_PURGE_DAYS=N：只保留"标签已完整"的样本（D ≤ train_end 往前 N 个交易日）。
+    #   默认 25（> 标签期 20，留安全边界）。**要复现泄漏必须显式设 V2_ALLOW_LEAK=1**。
     import os as _os
-    _purge = int(_os.environ.get("V2_TRAIN_PURGE_DAYS", "0") or 0)
+    _purge = int(_os.environ.get("V2_TRAIN_PURGE_DAYS", "25") or 0)
+    _allow_leak = _os.environ.get("V2_ALLOW_LEAK", "0") == "1"
+    if _purge < 20 and not _allow_leak:
+        raise RuntimeError(
+            f"[{month}] 训练集含前视：V2_TRAIN_PURGE_DAYS={_purge} < 20（标签=未来 20 交易日"
+            f"收益，会跨入被预测月）。真要做泄漏对照实验请显式设 V2_ALLOW_LEAK=1。")
     _purge_cutoff = ""
     if _purge > 0:
         _cal = [r[0] for r in conn.execute(
@@ -533,11 +541,23 @@ def _process_month_worker(args: tuple) -> tuple:
     mask = (dates_arr >= train_start) & (dates_arr <= train_end_date)
     if _purge_cutoff:
         mask &= (dates_arr <= _purge_cutoff)
-        print(f"[Worker {month}] ⚠️ 训练 purge={_purge} 交易日 → 上界 {_purge_cutoff}"
+        print(f"[Worker {month}] 训练 purge={_purge} 交易日 → 上界 {_purge_cutoff}"
               f"（原 {train_end_date}），剩余样本 {int(mask.sum()):,}", flush=True)
     n_train = mask.sum()
     if n_train < 100:
         return month, None
+    # ── 防回归断言（2026-09-26）──
+    # 判据**独立于**上面的 purge 逻辑：直接算"train_end 往前 20 个交易日"，要求所有
+    # 训练样本 ≤ 它。这样即使日后有人改坏 purge，只要泄漏回来就会立刻炸，而不是静默
+    # 把 IC 从 0.015 抬到 0.22。
+    if not _allow_leak:
+        _need = _cal[-21] if len(_cal) > 20 else train_end_date
+        _maxd = str(dates_arr[mask].max())
+        if _maxd > _need:
+            raise RuntimeError(
+                f"[{month}] 防回归断言失败：训练集最晚采样日 {_maxd} > 允许上界 {_need}"
+                f"（= train_end {train_end_date} 往前 20 交易日）→ 标签跨入预测期（前视）。"
+                f"详见 docs/2026-09_回测IC异常排查清单.md")
 
     X_tr = X[mask]
     y_tr = y2[mask]
@@ -763,6 +783,11 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
         err_file = tmp_dir / f"month_{month}.error"
         with open(err_file, "w") as f:
             f.write(traceback.format_exc())
+        # 2026-09-26：**同时打到 stdout** —— 原来只写文件、控制台一声不吭，
+        #   导致 worker 因"训练集含前视"断言失败时，外层只看到"0/1 个月完成"、
+        #   退出码 0，故障被静默吞掉。失败必须可见。
+        print(f"\n[Worker {month}] ❌ 失败: {type(e).__name__}: {e}\n"
+              f"  完整堆栈见 {err_file}\n{traceback.format_exc()}", flush=True)
 
 
 def _filter_stock_pool(symbols: list[str], db_path: str) -> list[str]:
@@ -989,6 +1014,16 @@ def build_cache(
                 _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
             # 收尾 merge（确保所有月份入库）
             _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
+
+    # 2026-09-26：失败必须可见 —— 原来失败只写 .error 文件、控制台不出声、退出码仍为 0，
+    #   于是"训练集含前视"这类致命故障会被静默吞掉（实测：只显示 0/1 个月完成）。
+    import glob as _glob
+    _errs = _glob.glob(str(tmp_dir / "month_*.error"))
+    if _errs:
+        logger.error(f"❌ {len(_errs)} 个月份构建失败: "
+                     f"{[Path(p).stem for p in _errs]}")
+        for _p in _errs[:3]:
+            logger.error(f"--- {Path(_p).name} ---\n{Path(_p).read_text()[-1000:]}")
 
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
