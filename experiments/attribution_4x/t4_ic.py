@@ -172,7 +172,7 @@ def main() -> int:
         t4 = f"{r['t4_ic20']:+.4f}" if pd.notna(r["t4_ic20"]) else "  (T4缺)"
         print(f"    {r['month']}  T2 {r['t2_ic20']:+.4f} ｜ T4 {t4} ｜ 融合 {r['fuse_ic20']:+.4f}")
     print(f"\n  T4 有效月数 {df['t4_ic20'].notna().sum()}/{len(df)}"
-          f"（2025-08 因陈旧 checkpoint 训练失败，T4 全 0 已剔除）")
+          + (f"（无方差月已剔除：{bad}）" if bad else "（全部月份 T4 均有方差）"))
 
     for tag, col in [("T4", "t4"), ("T2", "t2")]:
         v = df[f"{col}_top10"].dropna()
