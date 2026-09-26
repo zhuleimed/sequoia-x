@@ -265,6 +265,26 @@ def predict_full_pool(
 # 特征构建并行数（2026-08-02：单只股票特征计算无状态，可安全并行）
 FEAT_WORKERS = 8
 
+# ── 特征视图（2026-09-26 新增，实验开关；默认 full = 与既有行为**逐字节一致**）──
+# full        : (120天 × 129维) 展平 = 15,480 维（现状）
+# lastday_agg : 最后一天 129 维 + 窗口均值 129 + 窗口标准差 129 = 387 维
+# 依据：实测 10 切点 × 13 样本外评估日（n=130），387 维的 T2 Rank IC 点估计更高
+#       （+0.064 vs +0.051，p=0.15 不显著），但训练快 **13.7 倍**（4s vs 60s）。
+#       故定位为"实验加速用"；**换生产需先跑 70 月回测看收益/夏普/回撤**。
+FEATURE_VIEWS = ("full", "lastday_agg")
+
+
+def _apply_feature_view(X3d: np.ndarray, view: str) -> np.ndarray:
+    """把 (n, window, n_feat) 的时间序列块转成模型输入矩阵。
+
+    full 分支为 X3d.reshape(n, -1)，与改动前的写法完全等价（默认路径零风险）。
+    """
+    if view == "full":
+        return X3d.reshape(len(X3d), -1)
+    if view == "lastday_agg":
+        return np.concatenate([X3d[:, -1, :], X3d.mean(axis=1), X3d.std(axis=1)], axis=1)
+    raise ValueError(f"未知 feature_view: {view}（可选 {FEATURE_VIEWS}）")
+
 
 def _build_one_features(args: tuple):
     """单只股票特征构建（Step5 并行化用，模块级供 Pool 调用）。
@@ -549,6 +569,21 @@ def _process_month_worker(args: tuple) -> tuple:
         else:
             print(f"[Worker {month}] ⚠️ 合成样本为 0（88 维模式才支持）, 跳过", flush=True)
 
+    # ── 特征视图（2026-09-26 实验开关）──
+    # 默认 full 时，_apply_feature_view 就是 reshape(n,-1)，与改动前**逐字节一致**；
+    # 放在合成增强之后，保证 X_tr_enh 已是最终训练块（含合成样本）。
+    feature_view = getattr(cfg, "feature_view", "full")
+    X_tr_2d = _apply_feature_view(X_tr, feature_view)
+    X_tr_2d_enh = _apply_feature_view(X_tr_enh, feature_view)
+    if feature_view != "full":
+        n_full = X_tr_enh.shape[1] * X_tr_enh.shape[2]
+        print(f"[Worker {month}] 特征视图={feature_view} → 训练维度 "
+              f"{X_tr_2d_enh.shape[1]:,}（full 模式为 {n_full:,}）", flush=True)
+        if not skip_t4:
+            print(f"[Worker {month}] ⚠️ feature_view={feature_view} 需完整序列，T4 不支持 → 跳过 T4",
+                  flush=True)
+            skip_t4 = True
+
     # ── 训练 T2 ──
     print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr_enh)})...", flush=True)
     from sequoia_x.model_selection_v2.models.tree_reg import train_reg
@@ -630,7 +665,8 @@ def _process_month_worker(args: tuple) -> tuple:
     n_valid = len(X_pred)
     if n_valid == 0:
         return month, None
-    X_pred_2d = X_pred.reshape(n_valid, -1)
+    # 预测侧必须用与训练侧**同一个特征视图**，否则维度/语义都不匹配
+    X_pred_2d = _apply_feature_view(X_pred, getattr(cfg, "feature_view", "full"))
     pred_t2 = predict_reg(t2_model, X_pred_2d).flatten()
     pred_t1 = predict_cls(t1_model, X_pred_2d).flatten()
     pred_t3 = predict_vol(t3_model, X_pred_2d).flatten()
@@ -783,6 +819,7 @@ def build_cache(
     synth_file: str = "",
     synth_ratio: float = 1.0,
     synth_series_dir: str = "",
+    feature_view: str = "full",
 ) -> dict:
     """构建预测缓存（串行逐月，稳定可靠）。
 
@@ -867,6 +904,7 @@ def build_cache(
     cfg_dict = {
         "window": cfg.window, "n_jobs": 1, "random_seed": cfg.random_seed,
         "extra_features": include_extra,
+        "feature_view": feature_view,   # 2026-09-26 实验开关（默认 "full" = 原行为）
     }
 
     total_start = time.time()
@@ -951,9 +989,16 @@ def main():
     parser.add_argument("--no-extra", action="store_true",
                         help="实验用: 强制 88 维（覆盖 config 的 extra_features, 不动生产配置）")
     parser.add_argument("--synth-ratio", type=float, default=1.0,
-                        help="合成注入比例（1.0=全量24%, 0.25≈5%, 0.5≈10%; 占比试调）")
+                        # 2026-09-26: 原文案含裸 `%` → argparse 的 help 格式化会抛
+                        #   ValueError: unsupported format character ',' → **--help 一直崩**。
+                        #   argparse 对 help 做 %-格式化，字面百分号须写成 `%%`。
+                        help="合成注入比例（1.0=全量24%%，0.25≈5%%，0.5≈10%%；占比试调）")
     parser.add_argument("--synth-series", type=str, default="",
                         help="V3 修订二: 合成完整序列目录（真·数据增强, 优先于 --synth-file）")
+    parser.add_argument("--feature-view", type=str, default="full", choices=list(FEATURE_VIEWS),
+                        help="特征视图（实验开关, 默认 full 保持原行为）。"
+                             "full=(120天×129维)展平=15,480维; "
+                             "lastday_agg=最后一天+窗口均值+窗口标准差=387维（训练快 ~13.7 倍）")
     args = parser.parse_args()
 
     cfg = get_config()
@@ -973,7 +1018,8 @@ def main():
     build_cache(cfg, engine, test_months, args.max_stocks,
                 output_path=Path(args.output), skip_t4=args.skip_t4,
                 synth_file=args.synth_file, synth_ratio=args.synth_ratio,
-                synth_series_dir=args.synth_series)
+                synth_series_dir=args.synth_series,
+                feature_view=args.feature_view)
 
 
 if __name__ == "__main__":
