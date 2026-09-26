@@ -41,6 +41,14 @@ CACHES = {
     "V4": ROOT / "output/backtest_v2/prediction_cache_v4_60m.json",
     "V5": ROOT / "output/backtest_v2/prediction_cache_v5_60m.json",
 }
+# 额外缓存：命令行 --cache 标签=路径（用于 purge 对照等）
+# 给了 --cache 就**只用**它（否则会与默认的 V4/V5 月份数不一致而断言失败）
+_extra = [a for a in sys.argv[1:] if a.startswith("--cache=")]
+if _extra:
+    CACHES = {}
+for _a in _extra:
+    _t, _p = _a[len("--cache="):].split("=", 1)
+    CACHES[_t] = Path(_p)
 OUT = Path(__file__).resolve().parent / "out"
 H = 20          # T2 预测期（交易日）
 CLIP = 0.5
@@ -69,8 +77,10 @@ def main() -> int:
     print(f"  个股 {len(close_map):,} 只 / 交易日 {len(cal):,} 天", flush=True)
 
     caches = {k: json.load(open(v)) for k, v in CACHES.items()}
-    months = sorted(caches["V5"])
-    assert months == sorted(caches["V4"]), "两份缓存的月份不一致"
+    # 月份取交集（允许两边覆盖不同月份数，如 purge 对照的中间态）
+    _sets = [set(v) for v in caches.values()]
+    months = sorted(set.intersection(*_sets))
+    print(f"  各缓存月份数: { {k: len(v) for k, v in caches.items()} } → 取交集 {len(months)} 个月", flush=True)
 
     rows = []
     for i, m in enumerate(months, 1):
@@ -125,20 +135,20 @@ def main() -> int:
     print("\n" + "=" * 88)
     print("【预测质量对比：已实现 Rank IC（70 个月，同口径同月份）】")
     print("=" * 88)
-    for tag in ("V4", "V5"):
+    for tag in caches:
         c = df[f"{tag}_ic"].dropna()
         tops = df[f"{tag}_top10_ret"].dropna()
         print(f"  {tag}: 有效月数 {len(c)}  |  均值 IC={c.mean():+.4f}  std={c.std(ddof=1):.4f}  "
               f"ICIR={c.mean()/c.std(ddof=1):+.3f}  IC>0 占比 {(c>0).mean()*100:.0f}%"
               f"  |  TOP10 事后月均超额={tops.mean()*100:+.2f}%")
-    c4, c5 = df["V4_ic"].dropna(), df["V5_ic"].dropna()
-    com = df.dropna(subset=["V4_ic", "V5_ic"])
-    d = com["V5_ic"] - com["V4_ic"]
-    from scipy import stats
-    t, p = stats.ttest_rel(com["V5_ic"], com["V4_ic"])
-    print(f"\n  配对（n={len(com)} 个月）：V5 − V4 均值差={d.mean():+.4f}  "
-          f"t={t:+.2f}  p={p:.4f}  {'✅ 显著' if p<0.05 else '❌ 不显著'}")
-    print(f"  V5 更好的月份: {(d>0).sum()}/{len(d)}")
+    if "V4" in caches and "V5" in caches:
+        com = df.dropna(subset=["V4_ic", "V5_ic"])
+        d = com["V5_ic"] - com["V4_ic"]
+        from scipy import stats
+        t, p = stats.ttest_rel(com["V5_ic"], com["V4_ic"])
+        print(f"\n  配对（n={len(com)} 个月）：V5 − V4 均值差={d.mean():+.4f}  "
+              f"t={t:+.2f}  p={p:.4f}  {'✅ 显著' if p<0.05 else '❌ 不显著'}")
+        print(f"  V5 更好的月份: {(d>0).sum()}/{len(d)}")
     print(f"\n明细: {OUT/'monthly_ic.csv'}")
     return 0
 

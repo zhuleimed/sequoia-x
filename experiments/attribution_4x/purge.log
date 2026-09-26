@@ -41,3 +41,28 @@ Early stopping, best iteration is:
                                训练完成: best_iteration=161                     
   2026-02-06 → 2026-02-27  leaky   IC=+0.1502
 Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[417]	valid_0's rmse: 0.0985576
+[2026-09-26 14:01:33] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=417                     
+  2026-02-27 → 2026-03-06  leaky   IC=+0.2724
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[172]	valid_0's rmse: 0.108963
+[2026-09-26 14:02:55] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=172                     
+  2026-03-20 → 2026-04-08  leaky   IC=+0.1519
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[174]	valid_0's rmse: 0.128377
+[2026-09-26 14:04:17] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=174                     
+  2026-04-22 → 2026-05-12  leaky   IC=+0.0048
+
+======================================================================
+  leaky （现状：训练到最后采样日）  均值 IC=+0.0860  n=10
+/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/attribution_4x/purge_test.py:51: RuntimeWarning: Mean of empty slice
+  print(f"  purged（训练窗口前推 25 交易日） 均值 IC={P.mean():+.4f}  n={len(P)}")
+/home/zhulei/anaconda3/envs/zhulei_py312/lib/python3.12/site-packages/numpy/_core/_methods.py:142: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+  purged（训练窗口前推 25 交易日） 均值 IC=+nan  n=0

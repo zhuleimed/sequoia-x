@@ -499,6 +499,21 @@ def _process_month_worker(args: tuple) -> tuple:
         (f"{prev_y}-{prev_m:02d}-01", month + "-01"),
     ).fetchone()
     train_end_date = last_date_row[0] if last_date_row and last_date_row[0] else (month + "-01")
+    # ── 2026-09-26 实验开关：训练样本 purge（默认 0 = 与既有行为完全一致）──
+    # 为什么要它：采样日 D 的标签 y2 = D **之后** 20 个交易日的收益。若 D 距 train_end
+    #   不足 20 个交易日，该标签就用到了 train_end 之后的数据 —— 而 train_end 之后
+    #   正是**被预测的那个月** → 模型等于用答案训练。
+    #   `MAX_TRAIN_SAMPLES=5000` 取尾部 ~1.8 个采样日，使该泄漏覆盖 **100% 训练集**。
+    # V2_TRAIN_PURGE_DAYS=N：只保留"标签已完整"的样本（D ≤ train_end 往前 N 个交易日）。
+    import os as _os
+    _purge = int(_os.environ.get("V2_TRAIN_PURGE_DAYS", "0") or 0)
+    _purge_cutoff = ""
+    if _purge > 0:
+        _cal = [r[0] for r in conn.execute(
+            "SELECT DISTINCT date FROM stock_daily WHERE date <= ? ORDER BY date",
+            (train_end_date,)).fetchall()]
+        if len(_cal) > _purge:
+            _purge_cutoff = _cal[-_purge - 1]
     # 从缓存文件读取标准股票池（由父进程 baostock 获取）
     stock_pool_path = _Path(db_path).parent.parent / "output/backtest_v2/.stock_pool.json"
     if stock_pool_path.exists():
@@ -516,6 +531,10 @@ def _process_month_worker(args: tuple) -> tuple:
         sm += 12; sy -= 1
     train_start = f"{sy}-{sm:02d}-01"
     mask = (dates_arr >= train_start) & (dates_arr <= train_end_date)
+    if _purge_cutoff:
+        mask &= (dates_arr <= _purge_cutoff)
+        print(f"[Worker {month}] ⚠️ 训练 purge={_purge} 交易日 → 上界 {_purge_cutoff}"
+              f"（原 {train_end_date}），剩余样本 {int(mask.sum()):,}", flush=True)
     n_train = mask.sum()
     if n_train < 100:
         return month, None
@@ -527,13 +546,26 @@ def _process_month_worker(args: tuple) -> tuple:
     y3_tr = y3[mask]
 
     # 抽样 5000
+    # 2026-09-26 实验开关 V2_TRAIN_SAMPLE_MODE：
+    #   tail(默认) = X_tr[-5000:] 取**时间上最后**的 5000 条 → 全部落在窗口末端，
+    #                其标签（未来 20 交易日）跨过 train_end 进到被预测月 → 泄漏
+    #   random     = 从同窗口**随机**抽 5000 条（固定种子）→ 时间跨度完整，泄漏比例按
+    #                抽样比例稀释。样本量与窗口**完全相同**，只有"取哪 5000 条"不同。
     MAX_TRAIN_SAMPLES = 5000
     if n_train > MAX_TRAIN_SAMPLES:
-        X_tr = X_tr[-MAX_TRAIN_SAMPLES:]
-        y_tr = y_tr[-MAX_TRAIN_SAMPLES:]
+        _mode = _os.environ.get("V2_TRAIN_SAMPLE_MODE", "tail")
+        if _mode == "random":
+            _sel = np.random.RandomState(42).choice(n_train, MAX_TRAIN_SAMPLES, replace=False)
+            _sel.sort()                     # 保持时间序（下游有依赖时序的假设）
+            print(f"[Worker {month}] 取样模式=random（跨度 {dates_arr[mask][_sel][0]} ~ "
+                  f"{dates_arr[mask][_sel][-1]}）", flush=True)
+        else:
+            _sel = np.arange(n_train - MAX_TRAIN_SAMPLES, n_train)
+        X_tr = X_tr[_sel]
+        y_tr = y_tr[_sel]
+        y1_tr = y1_tr[_sel]
+        y3_tr = y3_tr[_sel]
         X_tr_2d = X_tr.reshape(len(X_tr), -1)
-        y1_tr = y1_tr[-MAX_TRAIN_SAMPLES:]
-        y3_tr = y3_tr[-MAX_TRAIN_SAMPLES:]
 
     # ── 重建 cfg ──
     from sequoia_x.model_selection_v2.config import V2Config
