@@ -94,6 +94,20 @@ def _last_lines(path: Path, n: int = 3) -> str:
         return "(日志读取失败)"
 
 
+def _read_conclusions() -> str:
+    """读入人工维护的关键结论（docs/RESEARCH_CONCLUSIONS.md）。
+
+    2026-09-26 新增：RESEARCH_STATE.md 是**自动生成**的，人工结论直接写进去会被
+    下次生成覆盖。故把结论放在独立文件里，由本函数带入快照。
+    """
+    p = ROOT / "docs" / "RESEARCH_CONCLUSIONS.md"
+    if not p.exists():
+        return "（尚无 `docs/RESEARCH_CONCLUSIONS.md`）"
+    txt = p.read_text(encoding="utf-8").strip()
+    # 去掉一级标题（快照已有自己的章节标题），其余原样带入
+    return "\n".join(l for l in txt.splitlines() if not l.startswith("# "))
+
+
 def _ic_summary(csv_path: str) -> str:
     p = ROOT / csv_path
     if not p.exists():
@@ -152,6 +166,14 @@ def generate(print_summary: bool = False) -> str:
         "",
         "- 方向一/二/三/四均已完结（前三完成 70 个月, 方向四 3a+3b 证伪）",
         "- 后续: 融合矩阵实验 / 72 组回测验证 / 2026-07 月补测",
+        "",
+        # 2026-09-26：本文件是**自动生成**的，人工结论不能写进来（会被覆盖）。
+        # 改为从 docs/RESEARCH_CONCLUSIONS.md 读入 —— 改那个文件即可带入状态快照。
+        "## 五、关键结论（人工维护）",
+        "",
+        "> 改 `docs/RESEARCH_CONCLUSIONS.md`，本段随之更新（勿直接改本文件）",
+        "",
+        _read_conclusions(),
         "",
     ]
     text = "\n".join(lines)

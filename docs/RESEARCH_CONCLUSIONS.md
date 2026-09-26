@@ -1,36 +1,4 @@
-# 研究状态快照（RESEARCH_STATE）
-
-> 自动生成: 2026-09-26 18:52:42 | 生成器: scripts/save_research_state.py | 铁律七
-> 本文件是研究状态的**单一事实源**——会话启动/恢复时优先读取，1 分钟重建全部状态。
-> 详细过程记录见 `V3研究方向与实验研究记录.md`；教训/规则见 memory/。
-
-## 一、各方向实验状态
-
-| 方向 | 状态 | 进度 | 关键结果 | 日志尾部 |
-|------|------|------|---------|---------|
-| 方向一 LGBMRanker |  证伪（ADR V3-03） | 70/70 个月 | 70 个月明细 | (无日志) |
-| 方向二 DLinear |  证伪（ADR V3-05） | 70/70 个月 | 70 个月明细 | (无日志) |
-| 方向三 RankIC-LSTM |  证伪（ADR V3-15） | 70/70 个月 | 70 个月明细 | (无日志) |
-| 方向四 Kronos |  3b 证伪（ADR V3-20）, 方向四收尾 | — | — | — |
-| 方向五 PatchTST |  终止（ADR V3-22, 不启动） | — | — | — |
-
-## 二、运行进程
-
-无相关进程（实验/监督/管线均未运行）
-
-## 三、监督链状态
-
-监督日志尾部: 已保存: /public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/output/backtest_v2/expe | [supervisor] ✅ 分析完成 2026年 08月 07日 星期五 15:38:08 CST — 结果见 /public/home/hpc/zhulei/superman/quant/code | [supervisor] ═══ 监督链结束 2026年 08月 07日 星期五 15:38:08 CST ═══
-
-## 四、待办（详见 V3 文档 §14）
-
-- 方向一/二/三/四均已完结（前三完成 70 个月, 方向四 3a+3b 证伪）
-- 后续: 融合矩阵实验 / 72 组回测验证 / 2026-07 月补测
-
-## 五、关键结论（人工维护）
-
-> 改 `docs/RESEARCH_CONCLUSIONS.md`，本段随之更新（勿直接改本文件）
-
+# 关键结论（人工维护）
 
 > 本文件由人维护；`scripts/save_research_state.py` 会把它整段带入 `RESEARCH_STATE.md` 第五节。
 > **不要直接改 RESEARCH_STATE.md**（自动生成，会被覆盖）。新增结论请**追加**到本文件。
