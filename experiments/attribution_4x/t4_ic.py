@@ -58,9 +58,9 @@ CLIP = 0.5              # y 的截断（与 labels.py 一致，防极端值主�
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     cx = sqlite3.connect(ROOT / "data/sequoia_v2.db")
-    print("加载行情（2024-12 起）...", flush=True)
+    print("加载行情（2019-12 起，覆盖 70 个月口径）...", flush=True)
     px = pd.read_sql(
-        "SELECT symbol,date,close FROM stock_daily WHERE date>='2024-12-01' AND close>0 "
+        "SELECT symbol,date,close FROM stock_daily WHERE date>='2019-12-01' AND close>0 "
         "ORDER BY symbol,date", cx)
     idx = pd.read_sql(
         "SELECT date,close FROM index_daily WHERE symbol='sh.000300' ORDER BY date", cx)
