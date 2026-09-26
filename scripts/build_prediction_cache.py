@@ -632,12 +632,9 @@ def _process_month_worker(args: tuple) -> tuple:
     X_tr_2d_enh = _apply_feature_view(X_tr_enh, feature_view)
     if feature_view != "full":
         n_full = X_tr_enh.shape[1] * X_tr_enh.shape[2]
-        print(f"[Worker {month}] 特征视图={feature_view} → 训练维度 "
-              f"{X_tr_2d_enh.shape[1]:,}（full 模式为 {n_full:,}）", flush=True)
-        if not skip_t4:
-            print(f"[Worker {month}] ⚠️ feature_view={feature_view} 需完整序列，T4 不支持 → 跳过 T4",
-                  flush=True)
-            skip_t4 = True
+        print(f"[Worker {month}] 特征视图={feature_view} → 树模型训练维度 "
+              f"{X_tr_2d_enh.shape[1]:,}（full 模式为 {n_full:,}）；T4 仍用 3D 序列不受影响",
+              flush=True)
 
     # ── 训练 T2 ──
     # 2026-09-26 实验开关 V2_T2_ALGO（默认 lightgbm = 原行为）：验证"IC≈0 是不是算法问题"。
@@ -681,8 +678,13 @@ def _process_month_worker(args: tuple) -> tuple:
             from sequoia_x.model_selection_v2.models.deep_lstm import train_lstm
             t4_model = train_lstm(X_tr_enh, y_tr_enh, cfg, search_optuna=False,
                                   model_id=f"cache_{month}")
-        except Exception:
-            pass
+        except Exception as e:
+            # 2026-09-26：原来是 `except Exception: pass` —— T4 训练失败会被**完全静默**，
+            #   该月输出里 t4 全 0 却无任何提示（生产 T2+T4 融合选股会悄悄少一半信号，
+            #   且事后无法区分"T4 没能力"与"T4 没跑成"）。失败必须可见。
+            import traceback as _tb
+            print(f"\n[Worker {month}] ❌ T4(LSTM) 训练失败，该月 t4 将为全 0："
+                  f"{type(e).__name__}: {e}\n{_tb.format_exc()}", flush=True)
 
     # ── 预测：一次 SQL 预加载 OHLCV → 内存特征构建（消除 SQLite 锁竞争）──
     print(f"[Worker {month}] Step4: OHLCV预加载...", flush=True)
