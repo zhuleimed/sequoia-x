@@ -552,7 +552,10 @@ def _process_month_worker(args: tuple) -> tuple:
     # 把 IC 从 0.015 抬到 0.22。
     if not _allow_leak:
         _need = _cal[-21] if len(_cal) > 20 else train_end_date
-        _maxd = str(dates_arr[mask].max())
+        # 注意：dates_arr 是**字符串**数组，np 的 .max() 会走 np.maximum 并抛
+        #   UFuncNoLoopError（dtype('<U10') 无 loop）——用 Python 内建 max（ISO 日期
+        #   字典序 = 时序）✓
+        _maxd = max(dates_arr[mask])
         if _maxd > _need:
             raise RuntimeError(
                 f"[{month}] 防回归断言失败：训练集最晚采样日 {_maxd} > 允许上界 {_need}"
@@ -637,9 +640,28 @@ def _process_month_worker(args: tuple) -> tuple:
             skip_t4 = True
 
     # ── 训练 T2 ──
+    # 2026-09-26 实验开关 V2_T2_ALGO（默认 lightgbm = 原行为）：验证"IC≈0 是不是算法问题"。
+    # 后两者用固定轮数（不做早停）——与 LightGBM 的 early_stopping 口径略有差异，
+    # 仅用于"换算法会不会变好"的粗判，不作为精细调参结论。
     print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr_enh)})...", flush=True)
-    from sequoia_x.model_selection_v2.models.tree_reg import train_reg
-    t2_model = train_reg(X_tr_2d_enh, y_tr_enh, cfg, search_optuna=False)
+    _t2_algo = _os.environ.get("V2_T2_ALGO", "lightgbm").lower()
+    if _t2_algo == "xgboost":
+        from xgboost import XGBRegressor
+        t2_model = XGBRegressor(
+            n_estimators=500, learning_rate=0.05, max_depth=6, subsample=0.8,
+            colsample_bytree=0.8, n_jobs=cfg.n_jobs, random_state=cfg.random_seed)
+        t2_model.fit(X_tr_2d_enh, y_tr_enh)
+        print(f"[Worker {month}] 算法=xgboost", flush=True)
+    elif _t2_algo == "catboost":
+        from catboost import CatBoostRegressor
+        t2_model = CatBoostRegressor(
+            iterations=800, learning_rate=0.05, depth=6, verbose=0,
+            random_seed=cfg.random_seed, thread_count=cfg.n_jobs)
+        t2_model.fit(X_tr_2d_enh, y_tr_enh)
+        print(f"[Worker {month}] 算法=catboost", flush=True)
+    else:
+        from sequoia_x.model_selection_v2.models.tree_reg import train_reg
+        t2_model = train_reg(X_tr_2d_enh, y_tr_enh, cfg, search_optuna=False)
 
     # ── 训练 T1 ──
     print(f"[Worker {month}] Step2: T1训练...", flush=True)
