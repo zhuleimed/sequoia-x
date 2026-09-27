@@ -241,10 +241,16 @@ class MonthlyBacktestEngine:
         #   现在它 = 等权融合。另可选 "ic_weighted"（§25 方案1，实验开关，曾以 11 月样本证伪）。
         fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
-        eom_sell_price: str = "open",  # 2026-09-27（审计实验 a）：月末清仓用哪个价？
-                                       #   "open"(默认,历史口径) | "close"(=**生产**口径：
-                                       #   simulation/engine.py::liquidate_all_at_close 用收盘价)。
-                                       #   两者差"末日开盘→收盘"= +0.41%/月(69 月≈+34%) ⇒ 第 5 处回测↔生产口径差。
+        eom_sell_price: str = "close",  # 2026-09-27（审计实验 a 后**默认翻转为生产口径**）
+                                       #   "close"=**生产**口径（simulation/engine.py::liquidate_all_at_close
+                                       #     用月末**收盘价**清仓）；"open"=回测历史口径（月末**开盘价**）。
+                                       #   实测两者差很大（`experiments/compare_eom_price.py`）：
+                                       #     E1 +87.6%(open) → **+167.2%(close)**、B +152.1% → **+244.7%**，
+                                       #     夏普 0.42→0.65 / 0.57→0.75，回撤同时改善
+                                       #   ⇒ 回测此前**系统性低估收益**（第 5 处回测↔生产口径差，方向是"回测悲观"）。
+                                       #   ⚠️ 本默认值翻转影响**所有**不显式传参的回测调用方
+                                       #     （run_shared_backtest / run_comprehensive / v4_robustness_check /
+                                       #      各 plot / 各 experiments）⇒ 与 09-27 之前的历史回测数字**不可直接比**。
         hard_stop_pct: float | None = -0.12,  # 2026-09-27（用户选定 E1）：**默认为 -0.12**。
                                              #   依据：69 月 A/B —— 全规则 +23.9% ｜ 硬止损-8% +44.8%
                                              #   ｜ **硬止损-12% +87.6%（夏普 0.42）** ｜ 纯持有 +152.1%。
