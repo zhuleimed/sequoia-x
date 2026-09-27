@@ -258,9 +258,16 @@ def main():
         modes = RISK_MODES
     elif args.top_n and args.mode:
         top_n_list = [args.top_n]
-        periods = PERIODS if not args.period else [
-            (p[0], p[1], p[2]) for p in PERIODS if args.period in p[0]
-        ] or PERIODS
+        # 2026-09-27 修：单组合分支原先**静默忽略 `--period full`** ——
+        #   原写法只在 PERIODS（2025年/2026年/全周期11月）里按子串匹配，
+        #   "full" 匹配不到 → `or PERIODS` 回退成**跑全部短时段**（约 11 个月而非 70 个月）。
+        #   这也是记忆「V4回测70月口径铁律」的坑源之一。现在显式支持 full。
+        if args.period == "full":
+            periods = FULL_PERIODS
+        else:
+            periods = PERIODS if not args.period else [
+                (p[0], p[1], p[2]) for p in PERIODS if args.period in p[0]
+            ] or PERIODS
         modes = [(args.mode, args.mode)]
     else:
         parser.print_help()
@@ -334,6 +341,12 @@ def main():
 
                 elapsed = time.time() - t_group
                 row = {
+                    # 2026-09-27 补：把逐月收益序列挂进汇总行 —— save_monthly_matrix 读的正是
+                    #   这两个下划线键，但原先组装 row 时没带上 ⇒ `monthly_returns.csv`
+                    #   **从未生成过**（静默 return），导致"回测差异是否显著"无法检验
+                    #   （09-27 的 tail/random A/B 只能靠 σ 估算，做不了配对检验）。
+                    "_monthly_labels": metrics.get("_monthly_labels", []),
+                    "_monthly_returns": metrics.get("monthly_returns", []),
                     "风控模式": mode_name,
                     "TOP_N": top_n,
                     "时段": period_name,
