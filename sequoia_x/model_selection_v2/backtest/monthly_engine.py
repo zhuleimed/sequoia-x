@@ -241,6 +241,8 @@ class MonthlyBacktestEngine:
         #   现在它 = 等权融合。另可选 "ic_weighted"（§25 方案1，实验开关，曾以 11 月样本证伪）。
         fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
+        hard_stop_pct: float | None = None,  # 2026-09-27 第五臂 E：覆盖硬止损阈值（如 -0.12）；
+                                             #   None = 用 config 的 -0.08（**默认不改变既有行为**）
         intra_exit_policy: str = "all",  # 月内规则卖出政策(2026-09-05 A/B): "all"(现状,月内跑全套规则) |
                                          #   "none"(纯持有) | "hard_stop_only"(只留-8%) |
                                          #   "post_entry"(2026-09-27 D 臂: 动量规则**只读入场以来**的数据) |
@@ -260,6 +262,7 @@ class MonthlyBacktestEngine:
         self.fusion_method = fusion_method
         self.keep_survivors = keep_survivors
         self.intra_exit_policy = intra_exit_policy
+        self.hard_stop_pct = hard_stop_pct
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -1180,6 +1183,7 @@ class MonthlyBacktestEngine:
                     today_opened=False,
                     day_open=float(prev_bar["open"]) if prev_bar is not None else None,
                     only_hard_stop=only_hard_stop,
+                    hard_stop_loss=self.hard_stop_pct,
                 )
 
                 if result.should_exit:

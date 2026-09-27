@@ -51,17 +51,18 @@ TOP_N = 10
 RISK_MODE = "M4"
 INITIAL_CAPITAL = 500_000.0
 
-POLICIES = ["all", "none", "hard_stop_only", "post_entry"]  # 臂按此顺序跑（all 顺带验证复现当前基线）
-# 2026-09-27 新增 D 臂 post_entry：动量规则只读"入场以来"的数据（治"入场即被判弱"的误伤）
-POLICY_LABEL = {
-    "all": "A现状:月内全规则",
-    "none": "B纯持有:月末清仓",
-    "hard_stop_only": "C只留硬止损-8%",
-    "post_entry": "D动量规则只读入场后",
-}
+# 2026-09-27 第五臂 E：把"地板深度"做成可调 —— 回答"能不能既保住地板、又拿到纯持有的收益"。
+# 每项 = (policy, hard_stop_pct, label)；hard_stop_pct=None 表示用 config 默认(-0.08)。
+ARMS = [
+    ("all",            None,   "A现状:月内全规则"),
+    ("hard_stop_only", -0.08,  "C只留硬止损-8%（回归检查）"),
+    ("hard_stop_only", -0.12,  "E1硬止损-12%"),
+    ("hard_stop_only", -0.15,  "E2硬止损-15%"),
+    ("none",           None,   "B纯持有:月末清仓(参照)"),
+]
 
 
-def run_one(policy: str, prediction_cache: dict) -> dict:
+def run_one(policy: str, hard_stop_pct, label: str, prediction_cache: dict) -> dict:
     """跑一组回测，返回指标 + 交易统计。"""
     bt = MonthlyBacktestEngine(
         cfg=get_config(),
@@ -74,6 +75,7 @@ def run_one(policy: str, prediction_cache: dict) -> dict:
         fusion_method="pred_std",
         keep_survivors=False,            # 模式 A：月末强制清仓 = 月内出场的基线场景
         intra_exit_policy=policy,
+        hard_stop_pct=hard_stop_pct,
     )
     t0 = time.time()
     metrics = bt.run(START_MONTH, END_MONTH)
@@ -93,7 +95,8 @@ def run_one(policy: str, prediction_cache: dict) -> dict:
 
     result = {
         "policy": policy,
-        "label": POLICY_LABEL[policy],
+        "hard_stop_pct": hard_stop_pct,
+        "label": label,
         **{k: v for k, v in metrics.items()
            if k not in ("daily_records", "trades", "monthly_returns", "_monthly_labels")},
         "n_trades": len(bt.trades),
@@ -130,7 +133,7 @@ def main() -> None:
     prediction_cache = json.loads(cache_path.read_text())
     logger.info(f"预测缓存加载: {cache_path} ({len(prediction_cache)} 个月)")
 
-    results = [run_one(p, prediction_cache) for p in POLICIES]
+    results = [run_one(p, hsp, lbl, prediction_cache) for p, hsp, lbl in ARMS]
 
     # 对比表
     print("\n" + "=" * 88)
@@ -156,18 +159,16 @@ def main() -> None:
 
     # 逐月收益 diff 表（B-A 与 C-A 的每月收益差）
     months = a.get("_monthly_labels", [])
-    rA, rB, rC = results[0], results[1], results[2]
-    print("\n逐月月度收益对比(%)（前30月节选） month | A现状 | B纯持有 | C硬止损 | Δ(B-A) | Δ(C-A)")
-    for i, m in enumerate(months):
-        ma = rA["monthly_returns"][i] * 100
-        mb = rB["monthly_returns"][i] * 100
-        mc = rC["monthly_returns"][i] * 100
-        if i < 30 or abs(mb - ma) > 15 or abs(mc - ma) > 15:
-            print(f"{m} | {ma:>7.1f} | {mb:>7.1f} | {mc:>7.1f} | {mb-ma:>+7.1f} | {mc-ma:>+7.1f}")
-    # B-A 累计胜月数
-    n_win_b = sum(1 for i in range(len(months)) if rB["monthly_returns"][i] > rA["monthly_returns"][i])
-    n_win_c = sum(1 for i in range(len(months)) if rC["monthly_returns"][i] > rA["monthly_returns"][i])
-    print(f"\nB 赢 A 的月数: {n_win_b}/{len(months)} | C 赢 A 的月数: {n_win_c}/{len(months)}")
+    print("\n各臂相对 A 的月度差异（配对 t 检验，2026-09-27 加）")
+    import numpy as _np
+    from scipy import stats as _st
+    for r in results[1:]:
+        if len(r.get("monthly_returns", [])) != len(months):
+            continue
+        d = _np.array(r["monthly_returns"]) - _np.array(a["monthly_returns"])
+        tstat, pval = _st.ttest_rel(r["monthly_returns"], a["monthly_returns"])
+        print(f"  {r['label']:26s} 月均差 {d.mean()*100:+.3f}pp  t={tstat:+.2f} p={pval:.3f} "
+              f"{'✅显著' if pval<0.05 else '❌不显著'} ｜ 更好月数 {(d>0).sum()}/{len(d)}")
 
     # 保存结果
     out_path = OUTPUT_DIR / "compare_intra_exit.json"

@@ -95,7 +95,8 @@ class ExitRuleResult:
 
 
 def _check_hard_stop(entry_price: float, current_price: float,
-                     day_open: Optional[float] = None) -> tuple[int, str]:
+                     day_open: Optional[float] = None,
+                     hard_stop_loss: Optional[float] = None) -> tuple[int, str]:
     """S1/S2 硬止损检查。
 
     双轨触发（2026-08-12 新增，修复 T+1 跳空亏损扩大问题）：
@@ -109,13 +110,16 @@ def _check_hard_stop(entry_price: float, current_price: float,
         entry_price: 持仓成本价。
         current_price: 当日收盘价。
         day_open: 当日开盘价（开盘价优先触发用；None=仅收盘确认，保持旧行为）。
+        hard_stop_loss: 覆盖硬止损阈值（如 -0.12）；**None = 用 config 的 HARD_STOP_LOSS(-0.08)**
+            （2026-09-27 加，供"地板深度"A/B；默认不改变任何既有行为）。
 
     Returns:
         (score, reason)
     """
     if entry_price <= 0:
         return 0, ""
-    stop_level = entry_price * (1 + HARD_STOP_LOSS)
+    _thr = HARD_STOP_LOSS if hard_stop_loss is None else float(hard_stop_loss)
+    stop_level = entry_price * (1 + _thr)
 
     # 双轨：开盘价优先 + 收盘确认，取两者更低者作为检查价
     check_price = current_price
@@ -376,6 +380,7 @@ def evaluate_exit(
     today_opened: bool = False,
     day_open: Optional[float] = None,
     only_hard_stop: bool = False,
+    hard_stop_loss: Optional[float] = None,
 ) -> ExitRuleResult:
     """对单只持仓进行全维度卖出评分。
 
@@ -413,7 +418,7 @@ def evaluate_exit(
     total_score = 0
 
     # ── S 硬止损（v1.4 双轨: 开盘价优先 + 收盘确认）──
-    score, reason = _check_hard_stop(entry_price, current_price, day_open)
+    score, reason = _check_hard_stop(entry_price, current_price, day_open, hard_stop_loss)
     if score > 0:
         breakdown.append((f"S(硬止损)", score))
         total_score += score
