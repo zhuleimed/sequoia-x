@@ -26,7 +26,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import rankdata
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
@@ -294,15 +293,15 @@ def select_stocks(target_month: str) -> tuple[list[str], dict]:
             "t4_mean_top": 0.0, "buy_list": [], "signal": "空仓",
         }
 
-    # ── Rank 融合选股 ──
-    if t4.std() < 1e-9:  # T4 未完成（占位 0）
+    # ── Rank 融合选股（**统一实现**：`integration.fuse_ranks`，2026-09-27，待办 #14）──
+    # 统一前：本处是 `(rank_t2 + rank_t4)/2`（固定 0.5），而回测引擎另写了一版按 T4 离散度
+    # 自适应（0.40~0.70）—— 同一逻辑两处各写一遍、公式还不一样，8/21 的"回测↔模拟盘口径一致"
+    # 核对又恰好不含融合权重，所以差异一直存在。现统一到一个函数（**等权 0.5 = 本处原口径**，
+    # 故生产行为不变；引擎改为向生产看齐）。
+    from sequoia_x.model_selection_v2.integration import fuse_ranks
+    rank_scores, w_t4_used = fuse_ranks(t2, t4)
+    if w_t4_used == 0.0:      # T4 未完成（占位 0）→ fuse_ranks 内部已退化为纯 T2
         logger.warning("T4 预测为占位（std≈0），本次仅用 T2")
-        rank_t2 = rankdata(-t2, method="average")
-        rank_scores = rank_t2
-    else:
-        rank_t2 = rankdata(-t2, method="average")
-        rank_t4 = rankdata(-t4, method="average")
-        rank_scores = (rank_t2 + rank_t4) / 2.0
 
     order = np.argsort(rank_scores)[:TOP_N_BUY]
     buy_list = [symbols[i] for i in order]

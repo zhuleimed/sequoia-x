@@ -30,7 +30,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
@@ -237,7 +236,10 @@ class MonthlyBacktestEngine:
         use_real_t4: bool = True,
         max_pool_size: int = 0,  # 0=全量，>0=限制股票池大小（快速测试）
         prediction_cache: dict | None = None,  # 月度预测缓存，提供则跳过训练+预测
-        fusion_method: str = "pred_std",  # "pred_std"=原启发式 | "ic_weighted"=滚动IC加权（§25 方案1）
+        # 2026-09-27：默认融合已统一为**等权 0.5**（`integration.fuse_ranks`，与生产同源）。
+        #   "pred_std" 这个名字是历史遗留（原指"按 T4 离散度自适应权重"的启发式，已废弃）；
+        #   现在它 = 等权融合。另可选 "ic_weighted"（§25 方案1，实验开关，曾以 11 月样本证伪）。
+        fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
         intra_exit_policy: str = "all",  # 月内规则卖出政策(2026-09-05 A/B): "all"(现状,月内跑全套规则) |
                                          #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
@@ -873,13 +875,20 @@ class MonthlyBacktestEngine:
         pred_t2 = np.array([p["t2_pred"] for p in predictions])
         pred_t4 = np.array([p["t4_pred"] for p in predictions])
 
-        # 1. Rank 融合权重计算
-        from sequoia_x.model_selection_v2.integration import rank_fusion
+        # 1. Rank 融合 —— **统一实现** `integration.fuse_ranks`（2026-09-27，待办 #14）
+        #    统一前：本处按 T4 离散度自适应（0.40~0.70），生产 `v2_monthly_retrain.py` 固定 0.5
+        #    —— 同一逻辑写两遍、公式还不一样。现统一为**等权 0.5**（= 生产原口径 ⇒ 生产零改动）。
+        #    权重策略的选择依据（69 个月两段互验，`experiments/attribution_4x/t4_weight_sweep.py`）：
+        #    固定 0.5 vs 自适应 0.40+0.30q → 拟合段 0.0427/0.0398、检验段 0.0441/0.0507，
+        #    差异都在噪声内且互不相让 ⇒ 取更简单、更可复现的固定值；原自适应公式的
+        #    "T4 离散度 = 模型质量"代理从未被验证过。
+        from sequoia_x.model_selection_v2.integration import fuse_ranks
 
+        w_t4 = 0.5   # 默认等权（= 生产口径）
         if self.fusion_method == "ic_weighted":
-            # ── §25 方案1：滚动 IC 动态加权 ──
+            # ── §25 方案1：滚动 IC 动态加权（实验开关，非默认；曾以 11 个月样本证伪）──
             # 用过去最多 6 个月的真实月度 Rank IC 决定 T2/T4 权重
-            #（IC<0 取 0：负 IC 表示模型反向，不给权重；历史不足时回退 pred_std）
+            #（IC<0 取 0：负 IC 表示模型反向，不给权重；历史不足时回退等权 0.5）
             hist = [x for x in self.rolling_ics if x.get("t2_ic") is not None][-6:]
             if len(hist) >= 2:
                 ic_t2 = float(np.mean([max(x["t2_ic"], 0.0) for x in hist]))
@@ -891,37 +900,13 @@ class MonthlyBacktestEngine:
                 w_t4 = 1.0 - w_t2
                 logger.info(
                     f"  IC加权: 近{len(hist)}月 IC T2={ic_t2:.4f} T4={ic_t4:.4f} "
-                    f"→ T2权重={w_t2:.2f} T4权重={w_t4:.2f}"
+                    f"→ T2权重={1-w_t4:.2f} T4权重={w_t4:.2f}"
                 )
             else:
-                # 滚动历史不足（<2 个月）：回退 pred_std 启发式
-                t4_std = float(np.std(pred_t4))
-                t4_quality = min(t4_std / 0.02, 1.0)
-                # 2026-09-27：与下方 pred_std 分支同步上调（同依据，见该处注释）
-                w_t4 = 0.40 + 0.30 * t4_quality
-                w_t2 = 1.0 - w_t4
-                logger.info(f"  IC加权: 历史不足({len(hist)}月)，回退 pred_std"
-                            f"（w_t2={w_t2:.2f} w_t4={w_t4:.2f}）")
-        else:
-            # ── 原逻辑：T4 预测离散度启发式 ──
-            # 用 T4 预测标准差判断信号质量：std<0.01→信号弱→降权
-            # 2026-09-27：下限 0.25 → **0.40**（上限 0.50 → 0.70）。
-            #   依据：`experiments/attribution_4x/t4_weight_sweep.py` 在 69 个月 random 缓存上扫 w_t4，
-            #   **四段一致**地显示"w_t4 越高越好，直到 ~0.7~0.8"（纯 T4 略回落）；
-            #   检验段(2024+)纯 T2(w=0) 的 TOP10 事后超额是 **−1.44%**（比市场差），而 w≥0.4 全为正。
-            #   保守起见**只抬下限、不精调**（最优值两段不一致：拟合段 0.4 / 检验段 0.8 ⇒ 样本内优化，
-            #   不该钉死某个点）。改后范围 [0.40, 0.70]，**恰好把生产固定用的 0.5 包进去**。
-            t4_std = float(np.std(pred_t4))
-            t4_quality = min(t4_std / 0.02, 1.0)  # 归一化到 [0, 1]
-            w_t4 = 0.40 + 0.30 * t4_quality  # 范围 [0.40, 0.70]（2026-09-27 由 [0.25,0.50] 上调）
-            w_t2 = 1.0 - w_t4
-            # 注：原 `if w_t4 < 0.40`（T4 弱则提示）在 2026-09-27 上调下限后**恒不成立** → 改为无条件记录，
-            #   保留可观测性（权重是多少、当时 T4 的离散度多大）。
-            logger.debug(f"  融合权重: w_t2={w_t2:.2f} w_t4={w_t4:.2f} (T4 std={t4_std:.4f})")
-        # 加权排名
-        rank_t2 = rankdata(-pred_t2, method="average")
-        rank_t4 = rankdata(-pred_t4, method="average")
-        rank_scores = w_t2 * rank_t2 + w_t4 * rank_t4
+                logger.info(f"  IC加权: 历史不足({len(hist)}月)，回退等权 0.5")
+        # 融合（权重计算与排序唯一实现在 fuse_ranks 内；T4 占位时它自动退化为纯 T2）
+        rank_scores, w_t4_used = fuse_ranks(pred_t2, pred_t4, w_t4=w_t4)
+        logger.debug(f"  融合权重: w_t2={1-w_t4_used:.2f} w_t4={w_t4_used:.2f}")
 
         # 1b. T2 预测分布预警：最优 100 只的 T2 预测均值 < -5% → 系统性看空，本月空仓
         top100_idx = np.argsort(-pred_t2)[:min(100, n)]

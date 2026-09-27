@@ -32,26 +32,50 @@ logger = get_logger(__name__)
 #  Rank 融合信号生成
 # ════════════════════════════════════════════════════════
 
-def rank_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray) -> np.ndarray:
-    """Rank 融合：两个模型预测排名的平均值。
+def fuse_ranks(pred_t2: np.ndarray, pred_t4: np.ndarray,
+               w_t4: float = 0.5) -> tuple[np.ndarray, float]:
+    """**唯一的 Rank 融合实现** —— 回测与生产必须都调它。
 
-    每个模型的预测值各自排名（值越大排名越靠前），
-    取两个排名的平均作为最终排名。
-    自动过滤分歧——T2看好但T4不看好 → 排名居中 → 不会被选中。
+    2026-09-27 新增（待办 #14）：此前**两处各写一遍、且公式不同** ——
+      · 回测 `monthly_engine.py`：按 T4 预测离散度自适应 `w_t4 = 0.40 + 0.30·min(std/0.02,1)`
+      · 生产 `v2_monthly_retrain.py`：固定 `w_t4 = 0.5`（`(rank_t2+rank_t4)/2`）
+    同一逻辑写两遍必然漂移（8/21 那次"回测↔模拟盘口径一致"核对**不含融合权重**，
+    所以这条差异一直存在没人发现）。现在统一到本函数。
+
+    **权重策略定为固定 0.5**（依据 `experiments/attribution_4x/t4_weight_sweep.py`）：
+    在 69 个月上把"固定 0.5"与"自适应 0.40+0.30q"两段互验对照 ——
+    拟合段 0.0427 vs 0.0398、检验段 0.0441 vs 0.0507（差异都在噪声内，无显著优劣）
+    ⇒ 取更简单、更可复现、且**生产零改动**的固定 0.5。
+    （替代的原自适应公式其"离散度=模型质量"的代理**从未被验证**。）
 
     Args:
-        pred_t2: T2 (LightGBM) 预测值，shape (n_stocks,)
-        pred_t4: T4 (LSTM) 预测值，shape (n_stocks,)
+        pred_t2: T2 (LightGBM) 预测值，(n_stocks,)
+        pred_t4: T4 (LSTM) 预测值，(n_stocks,)
+        w_t4: T4 权重；0.5=等权（默认，= 生产口径）。实验用途可调（如 ic_weighted 模式）
 
     Returns:
-        融合排名，shape (n_stocks,)，值越小（排名越靠前）越好。
+        (融合排名分, 实际使用的 w_t4)。分数越小越靠前；
+        **若 T4 为占位（std≈0）→ 返回纯 T2 排名且 w_t4=0.0**（调用方据此可记日志）。
     """
-    # 排名: 值越大排名越靠前 (1=最好)
-    rank_t2 = rankdata(-pred_t2, method="average")
-    rank_t4 = rankdata(-pred_t4, method="average")
-    # 平均排名 → 越小越好
-    avg_rank = (rank_t2 + rank_t4) / 2.0
-    return avg_rank
+    p2 = np.asarray(pred_t2, dtype=float)
+    p4 = np.asarray(pred_t4, dtype=float)
+    # 退化保护：T4 未完成/全 0（缓存里是占位）→ 退化为纯 T2。
+    # 注：把常数与排名的加权和做排序，其结果与纯 T2 排名**完全一致**（加常数不改序），
+    # 所以这里显式退化只是为了**意图清晰 + 可上报**，不改变数值。
+    if p4.size == 0 or float(np.std(p4)) < 1e-9:
+        return rankdata(-p2, method="average"), 0.0
+    rank_t2 = rankdata(-p2, method="average")   # 值越大排名越靠前（1=最好）
+    rank_t4 = rankdata(-p4, method="average")
+    return (1.0 - w_t4) * rank_t2 + w_t4 * rank_t4, float(w_t4)
+
+
+def rank_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray) -> np.ndarray:
+    """等权（w_t4=0.5）Rank 融合 —— 保留的旧接口；新代码请直接用 `fuse_ranks`。
+
+    每个模型的预测值各自排名（值越大越靠前），取平均；
+    自动过滤分歧——T2 看好但 T4 不看好 → 排名居中 → 不会被选中。
+    """
+    return fuse_ranks(pred_t2, pred_t4, 0.5)[0]
 
 
 def dynamic_weight_fusion(pred_t2: np.ndarray, pred_t4: np.ndarray,

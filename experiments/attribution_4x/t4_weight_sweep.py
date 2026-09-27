@@ -183,10 +183,48 @@ def main() -> int:
     for seg in ["全段"] + [s[0] for s in SEGS]:
         show(seg)
 
-    # ── 结论提示 ──
+    # ── 候选"权重策略"对照（2026-09-27 追加：共享函数该用哪条公式？）──
+    #   背景：回测引擎用自适应 0.40+0.30q（q=min(std_t4/0.02,1)），生产用固定 0.5。
+    #   抽成共享函数必须二选一 ⇒ 用同一批数据把两个候选比出来，别凭喜好定。
+    print(f"\n{'='*104}")
+    print("【权重策略对照】固定 0.5（=生产现状） vs 自适应 0.40+0.30q（=引擎现状）")
+    print("=" * 104)
+    policies = {
+        "固定 0.50（生产现状）": lambda std, n: np.full(n, 0.50),
+        "自适应 0.40+0.30q（引擎现状）": lambda std, n: np.full(n, 0.40 + 0.30 * min(std / 0.02, 1.0)),
+        "固定 0.60": lambda std, n: np.full(n, 0.60),
+    }
+    for seg_name, lo, hi in SEGS:
+        print(f"\n  【{seg_name}】")
+        print(f"  {'策略':26s} {'IC20':>9s} {'ICIR20':>7s} {'中性化IC20':>10s} {'TOP10超额':>9s} {'IC60':>9s}")
+        for pname, pol in policies.items():
+            ic20, icn20, tops, ic60 = [], [], [], []
+            for m, rec in per.items():
+                if not (lo <= m <= hi):
+                    continue
+                for H, acc in ((20, ic20), (60, ic60)):
+                    if H not in rec:
+                        continue
+                    y, y_neu, p2, p4 = rec[H]
+                    r2 = pd.Series(p2).rank().to_numpy()
+                    r4 = pd.Series(p4).rank().to_numpy()
+                    w4 = float(pol(float(np.std(p4)), 1)[0])
+                    score = w4 * r4 + (1 - w4) * r2
+                    acc.append(spearmanr(score, y).statistic)
+                    if H == 20:
+                        icn20.append(spearmanr(score, y_neu).statistic)
+                        k = min(10, len(y))
+                        tops.append(float(np.mean(y[np.argsort(-score)[:k]])))
+            a = np.array(ic20, float); a = a[~np.isnan(a)]
+            if len(a) < 10:
+                continue
+            print(f"  {pname:26s} {a.mean():>+9.4f} {a.mean()/a.std(ddof=1):>+7.3f} "
+                  f"{np.nanmean(icn20):>+10.4f} {np.mean(tops)*100:>+8.2f}% "
+                  f"{np.nanmean(ic60):>+9.4f}")
+
     print(f"\n{'='*104}")
     print("【怎么读】只认两段**一致**的结论：若拟合段与检验段的最优 w_t4 不同，")
-    print("  说明'最优权重'是噪声（样本内优化），应维持现状（0.25~0.5 启发式）或改走动态加权。")
+    print("  说明'最优权重'是噪声（样本内优化），应维持现状或改走动态加权。")
     print(f"明细: {OUT}/t4_weight_sweep_{TAG}.csv")
     return 0
 
