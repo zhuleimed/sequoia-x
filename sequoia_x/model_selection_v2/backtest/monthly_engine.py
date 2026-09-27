@@ -241,9 +241,14 @@ class MonthlyBacktestEngine:
         #   现在它 = 等权融合。另可选 "ic_weighted"（§25 方案1，实验开关，曾以 11 月样本证伪）。
         fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
-        hard_stop_pct: float | None = None,  # 2026-09-27 第五臂 E：覆盖硬止损阈值（如 -0.12）；
-                                             #   None = 用 config 的 -0.08（**默认不改变既有行为**）
-        intra_exit_policy: str = "all",  # 月内规则卖出政策(2026-09-05 A/B): "all"(现状,月内跑全套规则) |
+        hard_stop_pct: float | None = -0.12,  # 2026-09-27（用户选定 E1）：**默认为 -0.12**。
+                                             #   依据：69 月 A/B —— 全规则 +23.9% ｜ 硬止损-8% +44.8%
+                                             #   ｜ **硬止损-12% +87.6%（夏普 0.42）** ｜ 纯持有 +152.1%。
+                                             #   传 None 可回到 config 的 -0.08（旧行为；A/B 回归检查用）
+        intra_exit_policy: str = "hard_stop_only",  # 2026-09-27（用户选定 E1）：**默认改为"只留硬止损"**。
+                                         #   依据：动量规则（死叉/负夏普/相对弱势）在月持有期下结构性自我拆台
+                                         #   （月末平均只剩 0.09 只持仓），09-27 五臂 A/B 见 docs/待办清单.md #18。
+                                         #   政策(2026-09-05 A/B): "all"(旧默认,月内跑全套规则) |
                                          #   "none"(纯持有) | "hard_stop_only"(只留-8%) |
                                          #   "post_entry"(2026-09-27 D 臂: 动量规则**只读入场以来**的数据) |
                                          #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
