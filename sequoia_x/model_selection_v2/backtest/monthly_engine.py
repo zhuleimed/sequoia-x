@@ -242,10 +242,13 @@ class MonthlyBacktestEngine:
         fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
         intra_exit_policy: str = "all",  # 月内规则卖出政策(2026-09-05 A/B): "all"(现状,月内跑全套规则) |
+                                         #   "none"(纯持有) | "hard_stop_only"(只留-8%) |
+                                         #   "post_entry"(2026-09-27 D 臂: 动量规则**只读入场以来**的数据) |
                                          #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
     ):
-        if intra_exit_policy not in ("all", "none", "hard_stop_only"):
-            raise ValueError(f"intra_exit_policy 必须是 all/none/hard_stop_only, 收到 {intra_exit_policy!r}")
+        if intra_exit_policy not in ("all", "none", "hard_stop_only", "post_entry"):
+            raise ValueError(f"intra_exit_policy 必须是 all/none/hard_stop_only/post_entry, "
+                             f"收到 {intra_exit_policy!r}")
         self.cfg = cfg or get_config()
         self.engine = engine or DataEngine(Settings())
         self.top_n = top_n
@@ -1132,6 +1135,13 @@ class MonthlyBacktestEngine:
             # 三种策略都保留下面的月末 _sell_all_positions (模式A) 强制清仓。
             only_hard_stop = (self.intra_exit_policy == "hard_stop_only")
             skip_rules = (self.intra_exit_policy == "none")
+            # D 臂(2026-09-27)：动量规则(死叉/负夏普/相对弱势)**只读入场以来的数据**。
+            #   动机：原实现传 symbol_df.tail(60)，窗口含**买入前**的走势 ⇒ 一只"入场前六周就偏弱"
+            #   的股票(模型常选这类)在买入第 2~5 天就被判"弱势"卖出 —— 评估的是股票的历史，
+            #   而不是我们这笔持仓的表现(规则窗口数学见 rules.py: 死叉需≥20天/夏普10~15天/相对强弱LOOKBACK)。
+            #   结构性后果：月持有期约 20 个交易日 ⇒ 只读入场后往往凑不够窗口 ⇒ 动量规则基本不触发
+            #   ⇒ D ≈ "硬止损 + 移动止盈"（这也正是本臂要检验的问题）。
+            post_entry_hist = (self.intra_exit_policy == "post_entry")
             if skip_rules:
                 # 纯持有：不评估任何规则，直接日终估值
                 self._mark_to_market(today)
@@ -1147,6 +1157,10 @@ class MonthlyBacktestEngine:
                 if symbol_df is None or symbol_df.empty:
                     continue
                 symbol_df = symbol_df[symbol_df["date"] <= today]
+                if post_entry_hist:      # D 臂：截到入场日之后（含买入当日）
+                    symbol_df = symbol_df[symbol_df["date"] >= pos.buy_date]
+                    if symbol_df.empty:
+                        continue
 
                 # 卖出规则检查
                 # 双轨止损（2026-08-12，与实盘 SimEngine 口径一致）：
@@ -1161,7 +1175,8 @@ class MonthlyBacktestEngine:
                     hold_days=pos.hold_days,
                     symbol=sym,
                     symbol_df=symbol_df.tail(60) if len(symbol_df) >= 20 else None,
-                    index_df=idx_df.tail(60) if idx_df is not None and not idx_df.empty else None,
+                    index_df=((idx_df[idx_df["date"] >= pos.buy_date] if post_entry_hist else idx_df).tail(60)
+                              if idx_df is not None and not idx_df.empty else None),
                     today_opened=False,
                     day_open=float(prev_bar["open"]) if prev_bar is not None else None,
                     only_hard_stop=only_hard_stop,

@@ -51,11 +51,13 @@ TOP_N = 10
 RISK_MODE = "M4"
 INITIAL_CAPITAL = 500_000.0
 
-POLICIES = ["all", "none", "hard_stop_only"]  # 臂按此顺序跑（all 顺带验证复现当前基线）
+POLICIES = ["all", "none", "hard_stop_only", "post_entry"]  # 臂按此顺序跑（all 顺带验证复现当前基线）
+# 2026-09-27 新增 D 臂 post_entry：动量规则只读"入场以来"的数据（治"入场即被判弱"的误伤）
 POLICY_LABEL = {
     "all": "A现状:月内全规则",
     "none": "B纯持有:月末清仓",
     "hard_stop_only": "C只留硬止损-8%",
+    "post_entry": "D动量规则只读入场后",
 }
 
 
