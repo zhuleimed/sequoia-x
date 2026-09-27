@@ -111,15 +111,22 @@ def run_one(policy: str, prediction_cache: dict) -> dict:
 
 
 def main() -> None:
+    # 2026-09-27 加：`--cache=<路径>` 覆盖（原来写死生产缓存 prediction_cache.json，
+    #   而那份缓存的历史月份是批量回填的**泄漏版**，见 docs/RESEARCH_CONCLUSIONS.md）。
+    #   想在"干净口径"（如 .purged_70m.json / .t2_70m_random.json）上复跑本 A/B 时用这个参数。
+    cache_path = CACHE_PATH
+    for _a in sys.argv[1:]:
+        if _a.startswith("--cache="):
+            cache_path = Path(_a[len("--cache="):])
     logger.info(f"═══ A/B 月内卖出政策对比 ═══ python={sys.executable}")
     logger.info(f"np={np.__version__} | 时段 {START_MONTH}~{END_MONTH} | "
                 f"TOP_N={TOP_N} 风控={RISK_MODE}(模式A月末清仓) | 初始资金 {INITIAL_CAPITAL:,.0f}")
 
-    if not CACHE_PATH.exists():
-        logger.error(f"预测缓存不存在: {CACHE_PATH}")
+    if not cache_path.exists():
+        logger.error(f"预测缓存不存在: {cache_path}")
         sys.exit(1)
-    prediction_cache = json.loads(CACHE_PATH.read_text())
-    logger.info(f"预测缓存加载: {CACHE_PATH} ({len(prediction_cache)} 个月)")
+    prediction_cache = json.loads(cache_path.read_text())
+    logger.info(f"预测缓存加载: {cache_path} ({len(prediction_cache)} 个月)")
 
     results = [run_one(p, prediction_cache) for p in POLICIES]
 
