@@ -241,6 +241,10 @@ class MonthlyBacktestEngine:
         #   现在它 = 等权融合。另可选 "ic_weighted"（§25 方案1，实验开关，曾以 11 月样本证伪）。
         fusion_method: str = "pred_std",  # "pred_std"=等权融合(默认) | "ic_weighted"=滚动IC加权
         keep_survivors: bool = False,  # True=模式B：月末不清仓幸存者，次月只补空位（模拟盘当前行为）
+        eom_sell_price: str = "open",  # 2026-09-27（审计实验 a）：月末清仓用哪个价？
+                                       #   "open"(默认,历史口径) | "close"(=**生产**口径：
+                                       #   simulation/engine.py::liquidate_all_at_close 用收盘价)。
+                                       #   两者差"末日开盘→收盘"= +0.41%/月(69 月≈+34%) ⇒ 第 5 处回测↔生产口径差。
         hard_stop_pct: float | None = -0.12,  # 2026-09-27（用户选定 E1）：**默认为 -0.12**。
                                              #   依据：69 月 A/B —— 全规则 +23.9% ｜ 硬止损-8% +44.8%
                                              #   ｜ **硬止损-12% +87.6%（夏普 0.42）** ｜ 纯持有 +152.1%。
@@ -272,6 +276,9 @@ class MonthlyBacktestEngine:
         self.keep_survivors = keep_survivors
         self.intra_exit_policy = intra_exit_policy
         self.hard_stop_pct = hard_stop_pct
+        if eom_sell_price not in ("open", "close"):
+            raise ValueError(f"eom_sell_price 必须是 open/close，收到 {eom_sell_price!r}")
+        self.eom_sell_price = eom_sell_price
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -1072,15 +1079,15 @@ class MonthlyBacktestEngine:
                     f"剩余现金={self.cash:,.0f}")
 
     def _sell_position(self, sym: str, sell_date: str,
-                        reason: str = "") -> float:
-        """卖出一只持仓（以开盘价执行）。返回净收入。"""
+                        reason: str = "", price_col: str = "open") -> float:
+        """卖出一只持仓。price_col="open"(默认,历史口径) 或 "close"（月末清仓对齐生产）。"""
         pos = self.positions.pop(sym)
 
-        open_price = self._get_price(sym, sell_date, price_col="open")
+        open_price = self._get_price(sym, sell_date, price_col=price_col)
         if open_price is None or open_price <= 0:
             # 无行情数据：按最后已知价格处理
             open_price = pos.current_price or pos.entry_price
-            logger.warning(f"  {sym} 无{sell_date}开盘价，用最后已知价={open_price:.2f}")
+            logger.warning(f"  {sym} 无{sell_date}{price_col}价，用最后已知价={open_price:.2f}")
 
         sell_price = open_price * (1 - SLIPPAGE)
         proceeds = pos.shares * sell_price
@@ -1099,9 +1106,13 @@ class MonthlyBacktestEngine:
         return net
 
     def _sell_all_positions(self, date: str, reason: str = "") -> None:
-        """强制卖出全部持仓。"""
+        """强制卖出全部持仓（月末清仓）。
+
+        2026-09-27（审计实验 a）：卖出价列由 `self.eom_sell_price` 决定 ——
+          "open"（默认，历史口径）或 "close"（= 生产 `liquidate_all_at_close` 口径）。
+        """
         for sym in list(self.positions.keys()):
-            self._sell_position(sym, date, reason=reason)
+            self._sell_position(sym, date, reason=reason, price_col=self.eom_sell_price)
 
     # ════════════════════════════════════════════════════════
     #  日级别持仓管理循环
