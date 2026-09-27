@@ -32,10 +32,13 @@ OUT = ROOT / "experiments/attribution_4x/out/verify_eom_default.json"
 TOL = 0.01          # 总收益容差 1pp
 
 # (policy, hard_stop, 标签, 期望 close 值)
-ARMS = [("all", -0.12, "A12全规则", 0.441),
-        ("hard_stop_only", -0.12, "E1只留硬止损-12%", 0.1672),
-        ("none", None, "B纯持有", 0.2447)]
-EXPECT_OPEN_E1 = 0.0876     # 显式 open 时的 E1
+# 期望值 = 引擎返回的**小数**（0.4411 = +44.1%；1.6721 = +167.2%）。
+# 2026-09-27 教训：初版把 E1/B 写成 0.1672/0.2447（漏一位）⇒ 三个臂全报"FAIL"，
+#   而实测 0.4411/1.6721/2.4471 与 (a) 实验 close 列**逐位相同** ⇒ 是期望值写错，不是代码错。
+ARMS = [("all", -0.12, "A12全规则", 0.4411),
+        ("hard_stop_only", -0.12, "E1只留硬止损-12%", 1.6721),
+        ("none", None, "B纯持有", 2.4471)]
+EXPECT_OPEN_E1 = 0.8765     # 显式 open 时的 E1
 
 
 def run(policy, hsp, eom=None):
