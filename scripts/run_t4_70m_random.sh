@@ -83,7 +83,8 @@ fi
 MON=$!
 
 log "═══ 70 月含 T4 补测启动（2020-09~2026-06，purge 25，random，lastday_agg，4 workers × 8 线程）═══"
-log "  线程配置：TF_INTRAOP=$TF_NUM_INTRAOP_THREADS TF_INTEROP=$TF_NUM_INTEROP_THREADS OMP=$OMP_NUM_THREADS（$(nproc) 核）"
+# 注：核数用 getconf 而非 nproc —— nproc 会读 OMP_NUM_THREADS，这里 OMP=8 会误显示成"8 核"
+log "  线程配置：TF_INTRAOP=$TF_NUM_INTRAOP_THREADS TF_INTEROP=$TF_NUM_INTEROP_THREADS OMP=$OMP_NUM_THREADS（机器 $(getconf _NPROCESSORS_ONLN) 核）"
 T0=$(date +%s)
 # 注意：只清 KMP_AFFINITY（会锁核），**保留**显式设置的线程数（用 env 直接赋给子进程）
 env -u KMP_AFFINITY \
@@ -100,8 +101,11 @@ RC=$?
 T1=$(date +%s)
 kill $MON 2>/dev/null
 
-D=$(ls "$TMP"/month_*.json 2>/dev/null | wc -l)
-log "═══ 结束 exit=$RC ｜ 耗时 $(( (T1-T0)/60 ))min ｜ 完成 $D/$TOTAL 个月 ═══"
+# 注：tmp 目录在合并后会被清空，故从**输出文件**数月份（原写法恒显示 0/70，会误读成"零完成"）
+D=$("$PY" -c "import json;print(len(json.load(open('$OUT'))))" 2>/dev/null || echo 0)
+E=$(ls "$TMP"/month_*.error 2>/dev/null | wc -l)
+log "═══ 结束 exit=$RC ｜ 耗时 $(( (T1-T0)/60 ))min ｜ 输出缓存 $D/$TOTAL 个月 ｜ 失败月 $E ═══"
+log "   注：2020-09 因 purge 后 0 训练样本必然跳过 ⇒ 上限为 69 个月；exit=0 不代表无失败月"
 
 # ── 4) 自动分析：T2 / T4 各一套（多周期 + 中性化）──
 if [ -f "$OUT" ]; then

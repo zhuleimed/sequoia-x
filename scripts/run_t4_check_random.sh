@@ -71,7 +71,7 @@ fi
 MON=$!
 
 log "═══ T4 公平版补测启动（18 个月，purge 25，lastday_agg，**random 抽样**，workers=2）═══"
-log "  启动配置：$(nproc) 核 ｜ TF intraop=$(grep -m1 lstm_tf_intraop_threads sequoia_x/model_selection_v2/config.py | grep -oE '[0-9]+')"
+log "  启动配置：机器 $(getconf _NPROCESSORS_ONLN) 核 ｜ TF intraop=$(grep -m1 lstm_tf_intraop_threads sequoia_x/model_selection_v2/config.py | grep -oE '[0-9]+')"
 
 T0=$(date +%s)
 env -u KMP_AFFINITY -u OMP_NUM_THREADS "$PY" -u scripts/build_prediction_cache.py \
@@ -82,8 +82,8 @@ RC=$?
 T1=$(date +%s)
 kill $MON 2>/dev/null
 
-D=$(ls "$TMP"/month_*.json 2>/dev/null | wc -l)
-log "═══ 结束 exit=$RC ｜ 耗时 $(( (T1-T0)/60 ))min ｜ 完成 $D/18 个月 ═══"
+D=$("$PY" -c "import json;print(len(json.load(open('$OUT'))))" 2>/dev/null || echo 0)
+log "═══ 结束 exit=$RC ｜ 耗时 $(( (T1-T0)/60 ))min ｜ 输出缓存 $D/18 个月 ｜ 失败月 $(ls "$TMP"/month_*.error 2>/dev/null | wc -l) ═══"
 [ -f "$OUT" ] && log "  输出: $OUT" || log "  ⚠️ 未产出输出文件"
 
 # ── 自动分析（缓存建好后立即出 IC，省一次手工步骤）──
