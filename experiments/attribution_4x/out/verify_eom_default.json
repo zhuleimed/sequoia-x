@@ -1,0 +1,32 @@
+{
+  "A12全规则": {
+    "default_total": 0.4411,
+    "expect_close": 0.4411,
+    "pass": true,
+    "sharpe": 0.27,
+    "max_drawdown": -0.3924
+  },
+  "E1只留硬止损-12%": {
+    "default_total": 1.6721,
+    "expect_close": 1.6721,
+    "pass": true,
+    "sharpe": 0.65,
+    "max_drawdown": -0.4567
+  },
+  "B纯持有": {
+    "default_total": 2.4471,
+    "expect_close": 2.4471,
+    "pass": true,
+    "sharpe": 0.75,
+    "max_drawdown": -0.4349
+  },
+  "E1|open": {
+    "total": 0.8765,
+    "expect": 0.8765,
+    "pass": true
+  },
+  "prod_untouched": {
+    "pass": true
+  },
+  "source_artifact": "/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x/experiments/attribution_4x/out/eom_price_ab.json"
+}

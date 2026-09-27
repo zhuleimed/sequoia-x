@@ -1,0 +1,274 @@
+================================================================================================
+消融实验  cap=5000（与生产一致）  变体=['lastday', 'lastday_agg', 'nocal', 'lastday_nocal']
+基线 = experiments/d0_train_size/out/cap_5000_c<cut>.json（今天已跑，严格配对可比）
+================================================================================================
+
+[2021-08-06] 训练 5,000 条 / 2 个采样日，评估 2021-08-20 ~ 2022-02-25
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[88]	valid_0's rmse: 0.122565
+[2026-09-26 11:25:00] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=88                      
+  lastday          维度=   129      1s  均值IC=+0.0551  ICIR=+0.430
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[543]	valid_0's rmse: 0.118464
+[2026-09-26 11:25:05] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=543                     
+  lastday_agg      维度=   387      5s  均值IC=+0.0500  ICIR=+0.319
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[92]	valid_0's rmse: 0.116164
+[2026-09-26 11:25:55] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=92                      
+  nocal            维度=15,480     47s  均值IC=+0.0094  ICIR=+0.104
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[432]	valid_0's rmse: 0.122463
+[2026-09-26 11:25:58] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=432                     
+  lastday_nocal    维度=   129      2s  均值IC=+0.0420  ICIR=+0.354
+
+[2022-02-11] 训练 5,000 条 / 2 个采样日，评估 2022-02-25 ~ 2022-08-19
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[163]	valid_0's rmse: 0.0957391
+[2026-09-26 11:26:04] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=163                     
+  lastday          维度=   129      1s  均值IC=+0.0350  ICIR=+0.349
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[627]	valid_0's rmse: 0.0867804
+[2026-09-26 11:26:09] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=627                     
+  lastday_agg      维度=   387      5s  均值IC=+0.0711  ICIR=+0.617
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[97]	valid_0's rmse: 0.0938195
+[2026-09-26 11:26:58] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=97                      
+  nocal            维度=15,480     46s  均值IC=+0.0694  ICIR=+0.625
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[285]	valid_0's rmse: 0.0951154
+[2026-09-26 11:27:00] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=285                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0387  ICIR=+0.401
+
+[2022-08-05] 训练 5,000 条 / 2 个采样日，评估 2022-08-19 ~ 2023-02-21
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[157]	valid_0's rmse: 0.0948243
+[2026-09-26 11:27:05] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=157                     
+  lastday          维度=   129      1s  均值IC=+0.0520  ICIR=+0.501
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[612]	valid_0's rmse: 0.0896402
+[2026-09-26 11:27:10] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=612                     
+  lastday_agg      维度=   387      5s  均值IC=+0.0794  ICIR=+0.702
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[303]	valid_0's rmse: 0.0907992
+[2026-09-26 11:28:41] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=303                     
+  nocal            维度=15,480     88s  均值IC=+0.0855  ICIR=+1.445
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[152]	valid_0's rmse: 0.0954835
+[2026-09-26 11:28:43] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=152                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0537  ICIR=+0.893
+
+[2023-02-07] 训练 5,000 条 / 2 个采样日，评估 2023-02-21 ~ 2023-08-21
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[633]	valid_0's rmse: 0.0676448
+[2026-09-26 11:28:50] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=633                     
+  lastday          维度=   129      2s  均值IC=+0.1157  ICIR=+1.344
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[538]	valid_0's rmse: 0.061265
+[2026-09-26 11:28:55] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=538                     
+  lastday_agg      维度=   387      4s  均值IC=+0.1091  ICIR=+1.153
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[176]	valid_0's rmse: 0.0677876
+[2026-09-26 11:30:00] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=176                     
+  nocal            维度=15,480     63s  均值IC=+0.0734  ICIR=+1.233
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[279]	valid_0's rmse: 0.0688024
+[2026-09-26 11:30:03] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=279                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0995  ICIR=+1.127
+
+[2023-08-07] 训练 5,000 条 / 2 个采样日，评估 2023-08-21 ~ 2024-02-29
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[214]	valid_0's rmse: 0.0583794
+[2026-09-26 11:30:08] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=214                     
+  lastday          维度=   129      1s  均值IC=+0.0865  ICIR=+0.716
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[204]	valid_0's rmse: 0.0560125
+[2026-09-26 11:30:10] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=204                     
+  lastday_agg      维度=   387      2s  均值IC=+0.1076  ICIR=+1.213
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[113]	valid_0's rmse: 0.0578105
+[2026-09-26 11:31:01] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=113                     
+  nocal            维度=15,480     49s  均值IC=+0.0633  ICIR=+0.725
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[189]	valid_0's rmse: 0.0603374
+[2026-09-26 11:31:04] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=189                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0977  ICIR=+0.866
+
+[2024-02-07] 训练 5,000 条 / 2 个采样日，评估 2024-02-29 ~ 2024-08-21
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[213]	valid_0's rmse: 0.0915204
+[2026-09-26 11:31:09] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=213                     
+  lastday          维度=   129      1s  均值IC=+0.1292  ICIR=+0.883
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[601]	valid_0's rmse: 0.0876789
+[2026-09-26 11:31:13] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=601                     
+  lastday_agg      维度=   387      5s  均值IC=+0.1101  ICIR=+1.209
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[217]	valid_0's rmse: 0.0868695
+[2026-09-26 11:32:26] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=217                     
+  nocal            维度=15,480     71s  均值IC=+0.0668  ICIR=+0.872
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[262]	valid_0's rmse: 0.093597
+[2026-09-26 11:32:30] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=262                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.1230  ICIR=+0.772
+
+[2024-08-07] 训练 5,000 条 / 2 个采样日，评估 2024-08-21 ~ 2025-02-25
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[278]	valid_0's rmse: 0.080789
+[2026-09-26 11:32:35] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=278                     
+  lastday          维度=   129      1s  均值IC=+0.0432  ICIR=+0.489
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[569]	valid_0's rmse: 0.0786371
+[2026-09-26 11:32:40] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=569                     
+  lastday_agg      维度=   387      4s  均值IC=+0.0382  ICIR=+0.347
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[241]	valid_0's rmse: 0.0786512
+[2026-09-26 11:33:55] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=241                     
+  nocal            维度=15,480     73s  均值IC=+0.0435  ICIR=+0.406
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[101]	valid_0's rmse: 0.0820788
+[2026-09-26 11:33:57] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=101                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0680  ICIR=+0.692
+
+[2025-02-11] 训练 5,000 条 / 2 个采样日，评估 2025-02-25 ~ 2025-08-21
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[229]	valid_0's rmse: 0.09566
+[2026-09-26 11:34:02] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=229                     
+  lastday          维度=   129      1s  均值IC=+0.0198  ICIR=+0.136
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[622]	valid_0's rmse: 0.0882546
+[2026-09-26 11:34:06] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=622                     
+  lastday_agg      维度=   387      4s  均值IC=+0.0156  ICIR=+0.091
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[86]	valid_0's rmse: 0.0973104
+[2026-09-26 11:34:51] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=86                      
+  nocal            维度=15,480     42s  均值IC=+0.0233  ICIR=+0.293
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[294]	valid_0's rmse: 0.0964317
+[2026-09-26 11:34:53] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=294                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0181  ICIR=+0.113
+
+[2025-08-07] 训练 5,000 条 / 2 个采样日，评估 2025-08-21 ~ 2026-02-27
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[28]	valid_0's rmse: 0.0969537
+[2026-09-26 11:34:57] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=28                      
+  lastday          维度=   129      0s  均值IC=+0.0040  ICIR=+0.051
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[71]	valid_0's rmse: 0.0946877
+[2026-09-26 11:34:59] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=71                      
+  lastday_agg      维度=   387      1s  均值IC=+0.0129  ICIR=+0.128
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[74]	valid_0's rmse: 0.0930546
+[2026-09-26 11:35:42] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=74                      
+  nocal            维度=15,480     40s  均值IC=-0.0117  ICIR=-0.125
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[18]	valid_0's rmse: 0.100233
+[2026-09-26 11:35:44] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=18                      
+  lastday_nocal    维度=   129      0s  均值IC=+0.0058  ICIR=+0.116
+
+[2026-02-06] 训练 5,000 条 / 2 个采样日，评估 2026-02-27 ~ 2026-08-21
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[187]	valid_0's rmse: 0.104117
+[2026-09-26 11:35:49] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=187                     
+  lastday          维度=   129      1s  均值IC=+0.0292  ICIR=+0.618
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[618]	valid_0's rmse: 0.0958223
+[2026-09-26 11:35:54] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=618                     
+  lastday_agg      维度=   387      5s  均值IC=+0.0462  ICIR=+0.553
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[358]	valid_0's rmse: 0.101054
+[2026-09-26 11:37:38] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=358                     
+  nocal            维度=15,480    102s  均值IC=+0.0554  ICIR=+0.726
+Training until validation scores don't improve for 50 rounds
+Early stopping, best iteration is:
+[305]	valid_0's rmse: 0.102753
+[2026-09-26 11:37:41] INFO     sequoia_x.model_selection_v2.models.tree_reg - T2
+                               训练完成: best_iteration=305                     
+  lastday_nocal    维度=   129      1s  均值IC=+0.0346  ICIR=+0.510
+
+================================================================================================
+【配对比较：各变体 vs 生产基线（同切点、同评估日、同 cap=5000）】
+              变体    n      基线IC      变体IC       配对差       t        p  判定
+         lastday  130   +0.0507   +0.0570   +0.0063   +0.63   0.5283  — 不显著
+     lastday_agg  130   +0.0507   +0.0640   +0.0133   +1.45   0.1489  — 不显著
+           nocal  130   +0.0507   +0.0478   -0.0029   -0.83   0.4077  — 不显著
+   lastday_nocal  130   +0.0507   +0.0581   +0.0074   +0.80   0.4259  — 不显著
+
+结论解读：配对差为正 = 该变体更好；不显著 = 与现状无实质差别。
