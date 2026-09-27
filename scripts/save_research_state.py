@@ -108,6 +108,26 @@ def _read_conclusions() -> str:
     return "\n".join(l for l in txt.splitlines() if not l.startswith("# "))
 
 
+def _read_todo() -> str:
+    """读入 living 待办清单（docs/待办清单.md）的「状态总览」段。
+
+    2026-09-27 新增：原来本节是**硬编码**的旧文案（还在写"方向一/二/三/四"），
+    会随时间失真。改为只提取清单里 `<!-- STATUS:BEGIN -->...<!-- STATUS:END -->`
+    之间的表格 ⇒ 用户问"还有哪些可加固、提升 V5 的任务"时，
+    快照里就能直接看到每项的当前状态（用户要求：随时问、随时答）。
+    维护方式：改 `docs/待办清单.md`（不要在别处另记，避免散落）。
+    """
+    import re as _re
+    p = ROOT / "docs" / "待办清单.md"
+    if not p.exists():
+        return "（尚无 `docs/待办清单.md`）"
+    txt = p.read_text(encoding="utf-8")
+    m = _re.search(r"<!-- STATUS:BEGIN -->(.*?)<!-- STATUS:END -->", txt, _re.S)
+    body = (m.group(1) if m else txt).strip()
+    return (body + "\n\n> 完整清单（每项的「大白话 / 成本 / 效益 / 做法 / 依赖」）见 "
+            "`docs/待办清单.md`（living doc，完成一项就改那里的状态列）")
+
+
 def _ic_summary(csv_path: str) -> str:
     p = ROOT / csv_path
     if not p.exists():
@@ -162,10 +182,11 @@ def generate(print_summary: bool = False) -> str:
         "",
         f"监督日志尾部: {_last_lines(ROOT / 'logs' / 'exp_rankic_supervisor_20260806.log', 4)}",
         "",
-        "## 四、待办（详见 V3 文档 §14）",
+        # 2026-09-27：本节改为读 living 清单（原为硬编码旧文案，会失真）。
+        #   用户要求：问"还有哪些可加固、提升 V5 的任务"时能随时答出来。
+        "## 四、待办（living：`docs/待办清单.md`）",
         "",
-        "- 方向一/二/三/四均已完结（前三完成 70 个月, 方向四 3a+3b 证伪）",
-        "- 后续: 融合矩阵实验 / 72 组回测验证 / 2026-07 月补测",
+        _read_todo(),
         "",
         # 2026-09-26：本文件是**自动生成**的，人工结论不能写进来（会被覆盖）。
         # 改为从 docs/RESEARCH_CONCLUSIONS.md 读入 —— 改那个文件即可带入状态快照。
