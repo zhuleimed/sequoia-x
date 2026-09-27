@@ -4,7 +4,7 @@
 总分 ≥ SELL_THRESHOLD(60) 触发卖出。
 
 规则列表（分值从高到低）：
-  S1 硬止损 -8%         → 100（穿透，不经总分判断直接卖出）
+  S1 硬止损 -12%(2026-09-27 由 -8% 放宽) → 100（穿透，不经总分判断直接卖出）
   T1 移动止盈回落 8%    →  85
   D1 持有 >20日         →  75
   M  均线死叉确认       →  70
@@ -110,7 +110,7 @@ def _check_hard_stop(entry_price: float, current_price: float,
         entry_price: 持仓成本价。
         current_price: 当日收盘价。
         day_open: 当日开盘价（开盘价优先触发用；None=仅收盘确认，保持旧行为）。
-        hard_stop_loss: 覆盖硬止损阈值（如 -0.12）；**None = 用 config 的 HARD_STOP_LOSS(-0.08)**
+        hard_stop_loss: 覆盖硬止损阈值（如 -0.12）；**None = 用 config 的 HARD_STOP_LOSS（现 -0.12）**
             （2026-09-27 加，供"地板深度"A/B；默认不改变任何既有行为）。
 
     Returns:
@@ -133,7 +133,9 @@ def _check_hard_stop(entry_price: float, current_price: float,
     if check_price <= stop_level:
         return SCORE_HARD_STOP, (
             f"硬止损({trigger_src}触发): 成本{entry_price:.2f}×"
-            f"{(1+HARD_STOP_LOSS):.2f}={stop_level:.2f}, {trigger_src}{check_price:.2f}"
+            # 2026-09-27 修：原用模块常量 HARD_STOP_LOSS 拼文案 ⇒ 传覆盖值(如 -0.12)时
+            #   会打印错误的倍率（算出 -12% 的价位却显示 ×0.92）。改用 _thr。
+            f"{(1+_thr):.2f}={stop_level:.2f}, {trigger_src}{check_price:.2f}"
         )
 
     if pnl_pct <= HARD_STOP_LOSS_WARN:
@@ -402,9 +404,9 @@ def evaluate_exit(
         today_opened: 今日是否新开仓（T+1 保护）。
         day_open: 当日开盘价（v1.4: 硬止损开盘价优先触发；None=仅收盘确认）。
         only_hard_stop (v1.5, 2026-09-05): True = "纯持有 + 硬止损保险" 模式。
-            只评估 S 硬止损一档（S1 -8% 穿透型100分，或 S2 -5% 预警40分），
+            只评估 S 硬止损一档（S1 -12% 穿透型100分，或 S2 -5% 预警40分），
             完成后立即 return，跳过 T/D/M/SH/R/LSTM 月内动量规则——供
-            "买满N只 → 持有到月末，仅保留 -8% 极值回撤护栏" 的换仓策略变体使用。
+            "买满N只 → 持有到月末，仅保留 -12% 极值回撤护栏" 的换仓策略变体使用。
             默认 False 全规则评估，不改其它策略行为（LLM sim 等）。
 
     Returns:
@@ -433,8 +435,8 @@ def evaluate_exit(
             breakdown=breakdown,
         )
 
-    # v1.5: only_hard_stop —— S1 -8% 已穿透(上面早return)；S2 -5% 预警(40分)也一并按硬止损一档评估，
-    # 交给下方 should_exit(≥60) + _check_min_hold 兜底（40<60 不会触发，天然满足"仅 -8% 才杀"）。
+    # v1.5: only_hard_stop —— S1(现 -12%) 已穿透(上面早return)；S2 -5% 预警(40分)也一并按硬止损一档评估，
+    # 交给下方 should_exit(≥60) + _check_min_hold 兜底（40<60 不会触发，天然满足"仅 S1 才杀"）。
     if only_hard_stop:
         should_exit = total_score >= SELL_THRESHOLD
         if should_exit and _check_min_hold(hold_days, total_score):

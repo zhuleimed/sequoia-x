@@ -123,7 +123,7 @@ class SimEngine:
         self.push_tag = push_tag
         self._push_seq = 0  # 组内序号（卖出报告/清仓报告计数，日报为最后一条）
         # v1.5(2026-09-05) 月度"纯持有+硬止损"冻结（仅 V2 sim_v2.db 实例开启；默认 all=None 不改 LLM sim）：
-        #   sell_rules_mode = "all"(月内全规则,默认) | "hard_stop_only"(只留 -8% 硬止损,动量规则停用) | "none"(无月内规则)
+        #   sell_rules_mode = "all"(月内全规则) | "hard_stop_only"(只留 -12% 硬止损,动量规则停用; **现盘用此档**) | "none"(无月内规则)
         #   sell_rules_until = "YYYY-MM-DD"(含当天) 冻结截止；<=该日期前按 mode 简化规则，
         #      超过则自动回到 "all"（自清除，避免污染下月）。月末清仓(liquidate_all_at_close)与
         #      重训买入链不受影响。
