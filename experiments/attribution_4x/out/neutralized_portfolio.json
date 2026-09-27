@@ -1,0 +1,14 @@
+{
+  "原始": {
+    "total_return": 0.8765,
+    "annual_return": 0.1211,
+    "sharpe": 0.42,
+    "max_drawdown": -0.4949
+  },
+  "中性化": {
+    "total_return": 1.7971,
+    "annual_return": 0.2053,
+    "sharpe": 0.68,
+    "max_drawdown": -0.4929
+  }
+}

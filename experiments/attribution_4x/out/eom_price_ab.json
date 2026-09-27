@@ -1,0 +1,62 @@
+{
+  "A12全规则|open": {
+    "policy": "all",
+    "hard_stop_pct": -0.12,
+    "eom_sell_price": "open",
+    "total_return": 0.4041,
+    "annual_return": 0.0636,
+    "sharpe": 0.24,
+    "max_drawdown": -0.3946,
+    "n_trades": 1358
+  },
+  "A12全规则|close": {
+    "policy": "all",
+    "hard_stop_pct": -0.12,
+    "eom_sell_price": "close",
+    "total_return": 0.4411,
+    "annual_return": 0.0686,
+    "sharpe": 0.27,
+    "max_drawdown": -0.3924,
+    "n_trades": 1358
+  },
+  "E1只留硬止损-12%|open": {
+    "policy": "hard_stop_only",
+    "hard_stop_pct": -0.12,
+    "eom_sell_price": "open",
+    "total_return": 0.8765,
+    "annual_return": 0.1211,
+    "sharpe": 0.42,
+    "max_drawdown": -0.4949,
+    "n_trades": 1356
+  },
+  "E1只留硬止损-12%|close": {
+    "policy": "hard_stop_only",
+    "hard_stop_pct": -0.12,
+    "eom_sell_price": "close",
+    "total_return": 1.6721,
+    "annual_return": 0.1954,
+    "sharpe": 0.65,
+    "max_drawdown": -0.4567,
+    "n_trades": 1358
+  },
+  "B纯持有|open": {
+    "policy": "none",
+    "hard_stop_pct": null,
+    "eom_sell_price": "open",
+    "total_return": 1.5214,
+    "annual_return": 0.1828,
+    "sharpe": 0.57,
+    "max_drawdown": -0.4633,
+    "n_trades": 1358
+  },
+  "B纯持有|close": {
+    "policy": "none",
+    "hard_stop_pct": null,
+    "eom_sell_price": "close",
+    "total_return": 2.4471,
+    "annual_return": 0.2519,
+    "sharpe": 0.75,
+    "max_drawdown": -0.4349,
+    "n_trades": 1358
+  }
+}
