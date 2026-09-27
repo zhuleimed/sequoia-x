@@ -32,8 +32,14 @@ def main():
         ev_idx = np.where(dates == ev)[0]
         if len(ev_idx) < 100: continue
         row = {"cut": cut, "eval": ev}
-        for tag, end in [("leaky", cut), ("purged", cal[max(0, ci-H-5)])]:
-            tr = np.where((dates >= cal[max(0, ci-24)]) & (dates <= end))[0]
+        # 2026-09-27 修（审计 C1）：原来 purged 组的**上界是 cal[ci-25]、下界却是 cal[ci-24]**
+        #   ⇒ 下界 > 上界 ⇒ 掩码恒空 ⇒ `purged` 列全是 None/NaN，配对检验的守卫永不执行
+        #   （out/purge_test.json 10 行全是 purged:null；purge.log 里 "均值 IC=+nan n=0"）。
+        #   正确做法：**整个训练窗口一起前推** shift 个交易日（窗口长度不变）。
+        for tag, shift in [("leaky", 0), ("purged", H + 5)]:
+            end = cal[max(0, ci - shift)]
+            start = cal[max(0, ci - 24 - shift)]
+            tr = np.where((dates >= start) & (dates <= end))[0]
             if len(tr) < 100: row[tag] = None; continue
             tr = tr[-CAP:]
             Xtr = np.asarray(X[tr]).reshape(len(tr), -1)

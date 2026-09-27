@@ -12,6 +12,8 @@
 #   顺带验证两个 runner 修复：① `--period full` 在单组合分支不再被静默忽略（应报"全周期70月/69月"）
 #                              ② `monthly_returns.csv` 应生成
 set -u
+# 审计 I1：加 set -e —— 原来崩溃后仍打印"完成"，属静默失败
+set -e
 PROJ=/public/home/hpc/zhulei/superman/quant/code/017_workbuddy/004_sequoia-x
 PY=/home/zhulei/anaconda3/envs/zhulei_py312/bin/python
 cd "$PROJ" || exit 1
@@ -40,13 +42,15 @@ from scipy import stats
 def load(tag):
     with open(f"output/ab_sig_{tag}/monthly_returns.csv") as f:
         rows = list(csv.reader(f))
+    # 2026-09-27 修（审计 I1）：该 CSV 是**宽表** —— 表头第一格是"配置"，配置名在**数据行第一列**
+    #   （save_monthly_matrix 写的是 writerow(["配置"]+months)）。原实现去表头里找 "M4/T10"
+    #   ⇒ 必然 IndexError ⇒ 脚本崩在自己的检验段，却因为只 set -u 而照样打印"完成"（静默失败）。
     hdr = rows[0]
-    key = [h for h in hdr if "M4" in h and "T10" in h][0]
-    j = hdr.index(key)
-    out = {}
+    months = hdr[1:]
     for r in rows[1:]:
-        if len(r) > j and r[j].strip(): out[r[0]] = float(r[j])
-    return out
+        if r and r[0] == key:
+            return {m: float(v) for m, v in zip(months, r[1:]) if v.strip()}
+    raise KeyError(f"{key} 不在 {[r[0] for r in rows[1:]]}")
 
 A, B = load("tail"), load("random")            # A=tail（现行口径）, B=random
 ms = sorted(set(A) & set(B))

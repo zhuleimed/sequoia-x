@@ -253,6 +253,10 @@ class MonthlyBacktestEngine:
                                          #   "post_entry"(2026-09-27 D 臂: 动量规则**只读入场以来**的数据) |
                                          #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
     ):
+        # 2026-09-27（审计 M2）：hard_stop_pct 语义是"负的止损比例"，但参数名不含方向，
+        #   误传 +0.12 会得到 stop_level = entry×1.12 ⇒ 首次检查即全部清仓。加显式校验。
+        if hard_stop_pct is not None and not (-0.5 <= hard_stop_pct < 0):
+            raise ValueError(f"hard_stop_pct 必须是 [-0.5, 0) 的负数（如 -0.12），收到 {hard_stop_pct!r}")
         if intra_exit_policy not in ("all", "none", "hard_stop_only", "post_entry"):
             raise ValueError(f"intra_exit_policy 必须是 all/none/hard_stop_only/post_entry, "
                              f"收到 {intra_exit_policy!r}")

@@ -545,6 +545,12 @@ def _process_month_worker(args: tuple) -> tuple:
               f"（原 {train_end_date}），剩余样本 {int(mask.sum()):,}", flush=True)
     n_train = mask.sum()
     if n_train < 100:
+        # 2026-09-27（审计 I2b）：原为静默 `return month, None` —— 月份**无声消失**且退出码为 0，
+        #   于是文档写"70 月"而实际缓存只有 69 月（2020-09 purge 后样本为 0）。
+        #   样本不足属**数据边界**而非故障（不计为失败），但必须**可见**：
+        #   这里打印 + 父进程末尾汇总"跳过月"（见 build_cache 的 skipped 报告）。
+        print(f"[Worker {month}] ⚠️ 跳过该月：purge={_purge} 后训练样本仅 {int(n_train)}（<100）",
+              flush=True)
         return month, None
     # ── 防回归断言（2026-09-26）──
     # 判据**独立于**上面的 purge 逻辑：直接算"train_end 往前 20 个交易日"，要求所有
@@ -1041,8 +1047,23 @@ def build_cache(
 
     # 2026-09-26：失败必须可见 —— 原来失败只写 .error 文件、控制台不出声、退出码仍为 0，
     #   于是"训练集含前视"这类致命故障会被静默吞掉（实测：只显示 0/1 个月完成）。
+    # 2026-09-27 修（独立审计发现，有**生产风险**）：成功月份**不删除**旧的 .error，而这里按
+    #   目录里 .error **总数**计数 ⇒ 进程被 kill/崩溃留下的陈旧 .error 会在下次"同命令续跑"里
+    #   被当成本次失败 → main() 退出码 2 → 生产链 v2_monthly_retrain 见非 0 即中止 + 微信告警
+    #   （数据其实全对，却误报并中断生产重训）。改为：**只把"没有对应 month_X.json"的 .error
+    #   算作失败**（有 json = 该月已完成，其 .error 必为陈旧残留），并显式报告忽略掉的陈旧数。
     import glob as _glob
-    _errs = _glob.glob(str(tmp_dir / "month_*.error"))
+    _all_errs = _glob.glob(str(tmp_dir / "month_*.error"))
+    _errs, _stale = [], []
+    for _p in _all_errs:
+        (_stale if (tmp_dir / (Path(_p).stem + ".json")).exists() else _errs).append(_p)
+    if _stale:
+        logger.warning(f"（忽略 {len(_stale)} 个陈旧 .error：对应月份已有 month_*.json，非本次失败）")
+    # 2026-09-27（审计 I2b）：显式报告"跳过月"（worker 因样本不足 return None 的月份）
+    _skipped = [m for m in test_months if m not in cache]
+    if _skipped:
+        logger.warning(f"⚠️ {len(_skipped)} 个月份被跳过（训练样本不足，非故障）: {_skipped}"
+                       f" ⇒ 实际产出 {len(cache)}/{len(test_months)} 个月")
     if _errs:
         logger.error(f"❌ {len(_errs)} 个月份构建失败: "
                      f"{[Path(p).stem for p in _errs]}")
