@@ -1048,6 +1048,12 @@ def build_cache(
                      f"{[Path(p).stem for p in _errs]}")
         for _p in _errs[:3]:
             logger.error(f"--- {Path(_p).name} ---\n{Path(_p).read_text()[-1000:]}")
+    # 2026-09-27：把失败月挂到函数属性上，供**调用方**判断 —— 原先失败月只写日志，
+    #   退出码仍是 0，wrapper 打印"完成 0/N"、exit=0，会被误读成"零失败"（09-27 实测咬了两次）。
+    #   不用 sys.exit：本文件的调用方有两类 ——
+    #     · 子进程（v2_monthly_retrain.py）：它检查 returncode，main() 里转成退出码 2；
+    #     · 进程内（run_shared_backtest.py:97）：它取返回值 build_cache(...)，不能被杀掉。
+    build_cache.last_failed_months = [Path(p).stem for p in _errs]
 
     import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1111,6 +1117,14 @@ def main():
                 synth_file=args.synth_file, synth_ratio=args.synth_ratio,
                 synth_series_dir=args.synth_series,
                 feature_view=args.feature_view)
+
+    # 2026-09-27：失败月必须反映到**退出码**（原为 0，会被 wrapper/人工误读成"零失败"）。
+    #   调用方 v2_monthly_retrain.py 见非 0 即中止 + 微信告警（正是我们要的行为）。
+    _failed = getattr(build_cache, "last_failed_months", None)
+    if _failed:
+        logger.error(f"❌ 退出码=2：{len(_failed)} 个月份构建失败 {_failed}"
+                     f"（调用方应据此终止或重试；注意 exit=0 不代表无失败月的旧行为已废止）")
+        sys.exit(2)
 
 
 if __name__ == "__main__":
