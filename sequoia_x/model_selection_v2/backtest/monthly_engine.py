@@ -897,18 +897,27 @@ class MonthlyBacktestEngine:
                 # 滚动历史不足（<2 个月）：回退 pred_std 启发式
                 t4_std = float(np.std(pred_t4))
                 t4_quality = min(t4_std / 0.02, 1.0)
-                w_t4 = 0.25 + 0.25 * t4_quality
+                # 2026-09-27：与下方 pred_std 分支同步上调（同依据，见该处注释）
+                w_t4 = 0.40 + 0.30 * t4_quality
                 w_t2 = 1.0 - w_t4
-                logger.info(f"  IC加权: 历史不足({len(hist)}月)，回退 pred_std")
+                logger.info(f"  IC加权: 历史不足({len(hist)}月)，回退 pred_std"
+                            f"（w_t2={w_t2:.2f} w_t4={w_t4:.2f}）")
         else:
             # ── 原逻辑：T4 预测离散度启发式 ──
             # 用 T4 预测标准差判断信号质量：std<0.01→信号弱→降权
+            # 2026-09-27：下限 0.25 → **0.40**（上限 0.50 → 0.70）。
+            #   依据：`experiments/attribution_4x/t4_weight_sweep.py` 在 69 个月 random 缓存上扫 w_t4，
+            #   **四段一致**地显示"w_t4 越高越好，直到 ~0.7~0.8"（纯 T4 略回落）；
+            #   检验段(2024+)纯 T2(w=0) 的 TOP10 事后超额是 **−1.44%**（比市场差），而 w≥0.4 全为正。
+            #   保守起见**只抬下限、不精调**（最优值两段不一致：拟合段 0.4 / 检验段 0.8 ⇒ 样本内优化，
+            #   不该钉死某个点）。改后范围 [0.40, 0.70]，**恰好把生产固定用的 0.5 包进去**。
             t4_std = float(np.std(pred_t4))
             t4_quality = min(t4_std / 0.02, 1.0)  # 归一化到 [0, 1]
-            w_t4 = 0.25 + 0.25 * t4_quality  # 范围 [0.25, 0.50]
+            w_t4 = 0.40 + 0.30 * t4_quality  # 范围 [0.40, 0.70]（2026-09-27 由 [0.25,0.50] 上调）
             w_t2 = 1.0 - w_t4
-            if w_t4 < 0.40:
-                logger.debug(f"  T4信号弱(std={t4_std:.4f}), T2权重={w_t2:.2f} T4权重={w_t4:.2f}")
+            # 注：原 `if w_t4 < 0.40`（T4 弱则提示）在 2026-09-27 上调下限后**恒不成立** → 改为无条件记录，
+            #   保留可观测性（权重是多少、当时 T4 的离散度多大）。
+            logger.debug(f"  融合权重: w_t2={w_t2:.2f} w_t4={w_t4:.2f} (T4 std={t4_std:.4f})")
         # 加权排名
         rank_t2 = rankdata(-pred_t2, method="average")
         rank_t4 = rankdata(-pred_t4, method="average")
