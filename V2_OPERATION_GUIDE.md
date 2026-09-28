@@ -682,8 +682,15 @@ $PY scripts/v2_simulation_daily.py      # V2 模拟盘日常（管线 [v2_simula
 
 # ═══ 回测 / 分析 ═══
 $PY backtest_v2.py                      # 回测
-$PY scripts/analyze_monthly_ic.py       # 逐月 IC 分析
+$PY scripts/analyze_monthly_ic.py       # 逐月 IC（仅原始 IC；2026-09-28 已修锚点错位）
+$PY experiments/attribution_4x/ic_by_horizon.py --cache=<缓存> --tag=<标签> --field=t2
+                                        # ★ 推荐：多周期 + 中性化 + Newey-West，2026-09 起的新口径
 ```
+
+> ⚠️ **IC 评估前先确认锚点**：缓存里 `month=M` 的条目是 **M−1 月末**做的预测。
+> 评估锚点若取成"M 月末"，预测与目标会错配一整月，IC 会被量成接近随机
+> （该 bug 曾让泄漏潜伏 7 周，见 `docs/2026-09-28_为什么7周没查出泄漏.md`）。
+> `analyze_monthly_ic.py` 现已内置自检断言。
 
 ---
 

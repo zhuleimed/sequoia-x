@@ -341,7 +341,8 @@ bash scripts/launch_backtest_parallel.sh pred_std 24
 python3 scripts/run_comprehensive_backtest.py --period 全周期 --top-n 10 --mode M4 \
     --start-month 2020-09 --end-month 2026-06 --fusion-method pred_std
 
-# IC 分析
+# IC 分析（⚠️ 锚点必须用「上月最后交易日」——该脚本 2026-09-28 已修锚点错位并加自检；
+#          要 多周期+中性化+Newey-West 请用 experiments/attribution_4x/ic_by_horizon.py）
 python3 scripts/analyze_monthly_ic.py
 # T1 AUC 分析
 python3 scripts/analyze_t1_auc.py

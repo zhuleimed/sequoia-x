@@ -5,11 +5,22 @@
 
 方法：
   对 prediction_cache.json 的每个月份（70 个月）：
-  1. 取当月测试日（该月最后一个交易日）的 T2/T4 预测
+  1. 取**上月最后一个交易日**（= 缓存里该月的 ref_date）起算的 T2/T4 预测
   2. 从 stock_daily 计算每只股票未来 20 个交易日的收益（y2 标签同款定义）
   3. 从 index_daily 计算沪深 300 同期收益 → 超额收益 y2
   4. Rank IC = Spearman(预测, y2_actual)（当月全部股票）
-  5. 市场状态标签：按沪深300 当月收益分档（温和/极端）
+  5. 市场状态标签：按沪深300 同期收益分档（温和/极端）
+
+⚠️ **锚点修正（2026-09-28）**：原实现取的是"**当月**最后一个交易日"，比缓存语义
+   晚了一整月 —— 缓存里的 month=M 条目是**上月月末**做的预测（见
+   build_prediction_cache.py 的 train_end_date；回测日志 `[1/70] 2020-09 训练截止=2020-08-31`）。
+   错锚使预测与评估目标整体错配一个月 ⇒ IC 被量成接近随机噪声。
+   实测对比（同一 prediction_cache.json）：2026-06 错锚 +0.0956 / 正确锚 −0.0182；
+   2026-03 正确锚 **+0.6325**（泄漏指纹）却被量成 **−0.1577**。
+   ⇒ **这个 bug 让泄漏在本项目里藏了 7 周**，
+   复盘见 `docs/2026-09-28_为什么7周没查出泄漏.md`。
+   ⚠️ 本脚本只给"原始 IC"；要 **中性化 + 多周期 + Newey-West** 请用
+   `experiments/attribution_4x/ic_by_horizon.py`（2026-09 起的新口径工具）。
 
 输出：
   output/backtest_v2/monthly_ic_analysis.csv + 控制台汇总表
@@ -55,13 +66,22 @@ def analyze_month(month, cache_entry, conn, all_dates_idx):
     t2_pred = np.array(cache_entry["t2"])
     t4_pred = np.array(cache_entry["t4"])
 
-    # 当月最后一个交易日（测试日 T）
+    # 评估锚点 = **上月最后一个交易日**（即缓存里 month 这一条的 ref_date）
+    #   2026-09-28 修：原为 `date LIKE month||'%'`（当月月末）⇒ 比缓存语义晚一整月，
+    #   预测与评估目标错配 ⇒ IC 被量成接近随机（详见文件头「锚点修正」）。
     ym = month
     last_date = conn.execute(
-        "SELECT MAX(date) FROM stock_daily WHERE date LIKE ?", (ym + "%",)
+        "SELECT MAX(date) FROM stock_daily WHERE date < ?", (ym + "-01",)
     ).fetchone()[0]
     if last_date is None:
         return None
+    # ── 锚点自检（防止再次回归）──
+    #   不变量：锚点必须**早于当月首日**。日期是 ISO 字符串，字典序即时间序。
+    if last_date >= ym + "-01":
+        raise RuntimeError(
+            f"[{month}] 锚点自检失败：ref_date={last_date} 未早于当月首日。"
+            f"缓存里 month={month} 的预测是**上月月末**做的，锚点错位会让预测与评估"
+            f"目标错配一个月（2026-09-28 修掉的老 bug，勿再引入）。")
 
     # T 日全市场日期序列（用于找 T+20）
     dates_arr = [r[0] for r in conn.execute(
