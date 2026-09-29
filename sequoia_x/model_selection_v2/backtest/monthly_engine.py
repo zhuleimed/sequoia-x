@@ -1253,9 +1253,16 @@ class MonthlyBacktestEngine:
 
     def _get_month_start_value(self, cycle: MonthlyCycle) -> float:
         """获取本月起始净值（从 daily_records 中查找）。"""
-        # 找到本月买入日之前的最后一条记录
+        # 找到本月买入日**之前**的最后一条记录（= 上月末，即本月真正的起始净值）
+        # ⚠️ 2026-09-29 修（待办 #16）：原为 `<= cycle.buy_date`，会把"**买入日收盘后**"那条
+        #   记录当成基数 ⇒ 每月漏掉"买入当天（开盘买 → 当日收盘）"的涨跌，连带 `win_rate`
+        #   （= mean(monthly_returns>0)）失真。实证：同一份回测，总收益 +345.4%
+        #   而月度数列连乘只有 +274.9%（差 70.5pp；四格实测差 6.6~70.5pp）。
+        #   必须用 `<`：日循环开头会**专门记录买入日的估值**（见 _daily_loop 里
+        #   "记录买入日的估值"那句），那条正是要排除的。
+        #   注：`total_return` 走净值曲线，不受本 bug 影响（所以只是"分析用的中间数列"错）。
         for rec in reversed(self.daily_records):
-            if rec["date"] <= cycle.buy_date:
+            if rec["date"] < cycle.buy_date:
                 return rec["total_value"]
         return self.initial_capital
 
