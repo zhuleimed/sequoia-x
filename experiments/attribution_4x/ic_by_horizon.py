@@ -64,6 +64,7 @@ for _a in sys.argv[1:]:
 
 # 第 H 个交易日的口径（H=1 退化：只有 1 天，d0=d1 → 收益恒为 0，故从 2 开始）
 HORIZONS = [2, 3, 5, 10, 20, 40, 60]
+TOP_NS = [10, 30]   # ★ 主指标口径：按预测取前 N 只的事后超额（策略实际买入的东西）
 CLIP = 0.5
 
 
@@ -157,6 +158,15 @@ def main() -> int:
             beta, *_ = np.linalg.lstsq(X, d["y"].to_numpy(), rcond=None)
             resid = d["y"].to_numpy() - X @ beta
             rec[f"ic_neu_{H}"] = float(spearmanr(ps, resid).statistic)
+            # ── ★ TOP-N 事后超额（本项目**主指标**；见 docs/2026-09-29_研究计划19）──
+            # 全池 IC 衡量的是"整张榜（约 2900 只）排得准不准"（**平均**意义），
+            # 而策略只买最顶端的 N 只（TOP10 = 全市场 0.34%）⇒ 两者**可以反向**。
+            # 实证（2026-09-29）：random 的 IC 好一倍、ICIR 好近 3 倍，
+            # 但 TOP10 事后超额只有 tail 的 1/3.7，实盘钱 24/24 全输。
+            # ⇒ 评估选股改动时**先看 top10_{H}**，全池 IC 只作参考。
+            for _n in TOP_NS:
+                if len(ps) > _n:
+                    rec[f"top{_n}_{H}"] = float(np.mean(ys[np.argsort(-ps)[:_n]]))
         rows.append(rec)
 
     df = pd.DataFrame(rows)
@@ -183,6 +193,34 @@ def main() -> int:
             print(f"{H:>9d} {lbl:>6s} {c.mean():>+9.4f} {c.std(ddof=1):>7.4f} "
                   f"{c.mean()/c.std(ddof=1):>+7.3f} {(c>0).mean()*100:>4.0f}% "
                   f"{t0:>+7.2f} {tn:>+7.2f} {pn:>7.3f} {'✅' if pn<0.05 else '  ':>4s}")
+
+    # ── ★ 主指标：TOP-N 事后超额 ──
+    if any(f"top{n}_{H}" in df for n in TOP_NS for H in HORIZONS):
+        print("\n" + "=" * 100)
+        print("【★ 主指标：TOP-N 事后超额（月均）】= 策略**实际买入**的东西 —— 全池 IC 只作参考")
+        print("=" * 100)
+        hdr = f"{'H(交易日)':>9s}"
+        for n in TOP_NS:
+            hdr += f" {'TOP' + str(n):>10s} {'t':>7s} {'p':>7s}"
+        print(hdr)
+        print("-" * 100)
+        for H in HORIZONS:
+            line, shown = f"{H:>9d}", False
+            for n in TOP_NS:
+                col = f"top{n}_{H}"
+                c = df[col].dropna() if col in df else pd.Series(dtype=float)
+                if len(c) < 10:
+                    line += f" {'—':>10s} {'':>7s} {'':>7s}"
+                    continue
+                t, pv = stats.ttest_1samp(c, 0)
+                line += f" {c.mean()*100:>+9.2f}% {t:>+7.2f} {pv:>7.3f}"
+                shown = True
+            if shown:
+                print(line)
+        print("  读法：这是「策略买到的 N 只」的平均事后超额（%/月）。**判定改动好坏先看这一栏**；")
+        print("        全池 IC/ICIR 再漂亮也可能与该栏反向（本项目 2026-09 已实证 3 次）。")
+        print("        注：该指标仍属**纸面层**；Phase 0 发现它为真时实盘钱也可能不跟（第二层脱节），")
+        print("            故最终验收仍须回测组合层。见 docs/2026-09-29_研究计划19_IC与组合层脱节.md")
 
     # ── 功效分析：给定观测到的 μ 与 σ，要多少个月才能到 80% 功效 ──
     print("\n" + "=" * 100)
