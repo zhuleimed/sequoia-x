@@ -83,11 +83,15 @@ def check_code() -> None:
     except Exception as e:
         say(BAD, f"无法读取 FEATURE_VERSION: {e}")
     r = subprocess.run(["git", "status", "--porcelain"], cwd=PROJ, capture_output=True, text=True)
-    if r.stdout.strip():
-        say(WARN, "工作区有未提交改动", r.stdout.strip().replace("\n", " ｜ ")[:300] +
+    # 排除**自动生成**的文件：RESEARCH_STATE.md 由 SessionStart hook 每次会话重写时间戳，
+    # 与链条行为无关。不排除会让这条检查天天报 ⚠️ ⇒ 警告失去意义、掩盖真正的未提交改动。
+    AUTO_GEN = {"RESEARCH_STATE.md"}
+    changed = [ln for ln in r.stdout.splitlines() if ln[3:].strip() not in AUTO_GEN and ln[3:].strip()]
+    if changed:
+        say(WARN, "工作区有未提交改动", " ｜ ".join(changed)[:300] +
             "\n     ⇒ 链条会跑**当前工作区**的代码；确认这些改动是有意的")
     else:
-        say(OK, "工作区干净（链条跑的代码 = 已提交版本）")
+        say(OK, "工作区干净（链条跑的代码 = 已提交版本；已排除自动生成的 RESEARCH_STATE.md）")
 
 
 def check_stale_artifacts(today: dt.date) -> None:
