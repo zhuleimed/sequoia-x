@@ -692,6 +692,19 @@ $PY experiments/attribution_4x/ic_by_horizon.py --cache=<缓存> --tag=<标签> 
 > （该 bug 曾让泄漏潜伏 7 周，见 `docs/2026-09-28_为什么7周没查出泄漏.md`）。
 > `analyze_monthly_ic.py` 现已内置自检断言。
 
+```bash
+# ═══ 月末链就绪检查（★ 每月最后交易日**白天**先跑一次）═══
+$PY scripts/month_end_preflight.py                    # 检查今天
+$PY scripts/month_end_preflight.py --date 2026-09-30  # 指定日期
+```
+
+> **为什么要在月末白天先跑它**：月末链（19:00）是全自动的，但"自动"≠"一定成功"。
+> 该脚本**只读**，逐条查：交易日判定 / 代码版本+工作区是否干净 / **陈旧产物**
+> （尤其 `.dryrun_cache.json` —— 它会让失败的干跑"假通过"）/ 数据集缓存键（含**动态
+> sample_end，每天前移**）/ DB 时效 / 磁盘 / crontab 与关键脚本。
+> **退出码 0 = 可安全交给自动链；1 = 有阻断项，处置后再放任。**
+> 历史教训：8/31 曾出现"`.rebuild_done` 标记已写但 `_verify_caches` 崩溃、验证缺失未被发现"。
+
 ---
 
 # 附录：关键文件与目录
