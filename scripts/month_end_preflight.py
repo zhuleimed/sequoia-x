@@ -196,6 +196,9 @@ def check_cron_and_scripts() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="", help="检查哪一天（YYYY-MM-DD），默认今天")
+    ap.add_argument("--notify", action="store_true",
+                    help="发现阻断项时用 wxpusher 推送（**只在有阻断项时推**，避免刷屏）。"
+                         "供无人值守的后台/定时运行使用。")
     a = ap.parse_args()
     today = dt.date.fromisoformat(a.date) if a.date else dt.date.today()
 
@@ -215,6 +218,20 @@ def main() -> int:
         print(f"❌ 有 {len(issues)} 项阻断，**处置后再放任自动链**：")
         for i in issues:
             print(f"   · {i}")
+        if a.notify:
+            # 复用 month_end_pull 的推送路径（wxpusher），失败不阻断
+            try:
+                from wxpusher import WxPusher
+                from sequoia_x.core.config import get_settings
+                s = get_settings()
+                body = "\n".join(f"· {i}" for i in issues)
+                WxPusher.send_message(
+                    content=f"❌ 月末链就绪检查未通过（{today}）\n{body}\n"
+                            f"处置后再放任 19:00 自动链；详见 logs/preflight_{today:%Y%m%d}.log",
+                    token=s.wxpusher_token, topic_ids=s.wxpusher_topic_ids, content_type=1)
+                print("[notify] ✅ 已推送阻断告警")
+            except Exception as e:
+                print(f"[notify] ⚠️ 推送失败: {e}")
         return 1
     print("✅ 全部通过 —— 可安全交给 19:00 月末链与人肉不介入")
     print("   注：链条跑完会微信推送成功/失败；19:00–次日 03:00 请不要跑重 CPU 任务（链占 32 进程）")
