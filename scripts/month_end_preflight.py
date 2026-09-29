@@ -157,18 +157,35 @@ def check_dataset_cache(today: dt.date) -> None:
         say(BAD, f"数据集缓存键计算失败: {type(e).__name__}: {e}")
 
 
+# 日更链 18:10 启动（cron），实测整链约 37 分钟 ⇒ 数据入库约在 18:50 前后。
+# 本检查**必须区分"还没到同步时间"与"该入库却没有"** —— 否则会给出误导性的"正常"：
+# 例如 9/30 早上跑时 DB 只有 9/29 的数据，若笼统报"距今 1 天，正常"，
+# 会让人误以为当天数据已验证过（实际上那时它根本还没产生）。
+SYNC_HHMM = (18, 50)
+
+
 def check_db_freshness(today: dt.date) -> None:
-    print("── 5) 数据库时效（月末链 19:00 跑，数据由 18:10 日更链同步）──")
+    print("── 5) 数据库时效（月末链 19:00 跑，当日数据由 18:10 日更链同步）──")
     try:
         con = sqlite3.connect(f"file:{PROJ / 'data/sequoia_v2.db'}?mode=ro", uri=True)
         d = con.execute("SELECT MAX(date) FROM stock_daily").fetchone()[0]
         n = con.execute("SELECT COUNT(*) FROM stock_daily WHERE date = ?", (d,)).fetchone()[0]
         con.close()
         gap = (today - dt.date.fromisoformat(d)).days
+        running_today = (today == dt.date.today())
         if d == today.isoformat():
-            say(OK, f"DB 最后交易日 = {today}（{n} 行）⇒ 当天数据已入库")
+            say(OK, f"DB 最后交易日 = {today}（{n} 行）⇒ 当天数据已入库 ✓ 这一项真验证过了")
+        elif running_today and dt.datetime.now().time() < dt.time(*SYNC_HHMM):
+            say(OK, f"DB 最后交易日 = {d}（**当天数据尚未同步，属正常**）",
+                f"日更链 18:10 启动、约 {SYNC_HHMM[0]}:{SYNC_HHMM[1]:02d} 前后入库；"
+                f"链条 19:00 跑时应已就绪。\n"
+                f"     ⚠️ 注意：**本次并未验证到当天数据**（那时它还没产生）—— 这项要 18:50 后跑才有意义")
+        elif running_today:
+            say(BAD, f"已过 {SYNC_HHMM[0]}:{SYNC_HHMM[1]:02d}，但 DB 最后交易日仍是 {d}（无当天数据）",
+                "⇒ 日更链可能异常；19:00 月末链会缺当日数据（覆盖率检查会降级 88 维）。"
+                "请查 logs/pipeline_$(date +%Y%m%d).log")
         elif gap <= 3:
-            say(OK, f"DB 最后交易日 = {d}（距今 {gap} 天；周末/节假日属正常）")
+            say(OK, f"DB 最后交易日 = {d}（距今 {gap} 天；非目标日运行，周末/节假日属正常）")
         else:
             say(WARN, f"DB 最后交易日 = {d}，距今 {gap} 天", "确认 18:10 日更链是否正常")
     except Exception as e:
