@@ -30,7 +30,9 @@ logger = get_logger(__name__)
 # ════════════════════════════════════════════════════════════
 
 PROJECT_DIR: Path = Path(__file__).resolve().parent.parent.parent
-LLM_DB: str = str(PROJECT_DIR / "data" / "sequoia_v2.db")
+# 2026-10-01: LLM 策略已迁至独立子项目 024_llm_hs300（LLM 直接从沪深300选股），
+#   汇总改读其独立库 sim_hs300.db；原 sequoia_v2.db 的旧 LLM 已停用、不再更新。
+LLM_DB: str = str(PROJECT_DIR.parent / "024_llm_hs300" / "data" / "sim_hs300.db")
 V2_DB: str = str(PROJECT_DIR / "data" / "sim_v2.db")
 # LSTM_DB（V1 已废止 2026-08-02，不再纳入汇总）
 
@@ -130,7 +132,7 @@ def build_strategy_summary_text() -> str:
         f"Sequoia-X 策略汇总 | {today_str}",
         "=" * 40,
         _format_strategy_line(
-            "1. LLM", "LLM选股", llm_account, llm_positions, llm_trades
+            "1. LLM-HS300", "HS300模型选股", llm_account, llm_positions, llm_trades
         ),
         _format_strategy_line(
             "2. V4", "V4模型选股", v2_account, v2_positions, v2_trades
@@ -138,17 +140,17 @@ def build_strategy_summary_text() -> str:
         "",
     ]
 
-    # LLM vs V4 主力策略对比
+    # LLM-HS300 vs V4 主力策略对比
     if llm_account is not None and v2_account is not None:
         llm_ret = llm_account.get("total_return", 0.0)
         v2_ret = v2_account.get("total_return", 0.0)
         diff = llm_ret - v2_ret
         if diff > 0.01:
-            lines.append(f"LLM 领先 V4 {diff:+.2%}")
+            lines.append(f"LLM-HS300 领先 V4 {diff:+.2%}")
         elif diff < -0.01:
-            lines.append(f"V4 领先 LLM {abs(diff):+.2%}")
+            lines.append(f"V4 领先 LLM-HS300 {abs(diff):+.2%}")
         else:
-            lines.append("LLM 与 V4 累计收益接近")
+            lines.append("LLM-HS300 与 V4 累计收益接近")
         lines.append("")
 
     return "\n".join(lines)

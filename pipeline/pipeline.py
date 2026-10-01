@@ -109,6 +109,16 @@ STEPS: list[dict] = [
         "required": False,
         "timeout": 900,   # 15min
     },
+    # ── 3.1 LLM-HS300 月度报告（仅月末最后交易日触发，其余日子秒退）──
+    {
+        "id": "monthly_report_hs300",
+        "name": "LLM-HS300月度报告(024)",
+        "cmd": ["scripts/monthly_report_hs300.py", "--if-month-end"],
+        "cwd": str(PROJECT_DIR.parent / "024_llm_hs300"),
+        "python": PY312,
+        "required": False,
+        "timeout": 300,
+    },
     # ── 3.4. V2 模拟盘日常操作（LLM 模拟盘之后，独立 sim_v2.db，完全隔离）──
     {
         "id": "v2_simulation",
