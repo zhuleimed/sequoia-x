@@ -330,6 +330,18 @@ def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates, params: dict | No
     """
     import json
     cache_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-10-01 fix: 数据不变量 fail-fast —— X/y/dates 行数必须一致。
+    #   本次(09-30)故障根因正是此处不变量被破坏(X=418434 vs dates=412491)却静默保存,
+    #   直到 build_prediction_cache 的 `X[mask]` 才崩溃(且月末链自检/干跑才发现)。
+    #   提前断言, 把问题挡在源头, 不再依赖下游崩溃暴露。
+    _n = X.shape[0]
+    _ys = (y1.shape[0], y2.shape[0], y3.shape[0])
+    if any(v != _n for v in _ys) or len(dates) != _n:
+        raise AssertionError(
+            f"❌ 缓存数据不变量破坏(拒绝保存): X={_n}行, y=({_ys[0]},{_ys[1]},{_ys[2]}), "
+            f"dates={len(dates)}条 (X-dates 差={_n - len(dates)})。"
+            f"  请检查增量复用/保鲜截断是否同步处理了 X 与 dates。"
+        )
     np.save(str(cache_dir / "X.npy"), X)
     np.save(str(cache_dir / "y1.npy"), y1)
     np.save(str(cache_dir / "y2.npy"), y2)
@@ -417,6 +429,7 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
             continue
     if best is not None:
         old_dir, old_dates, old_end = best
+        keep_idx = None  # 2026-10-01: 保鲜截断时, 供调用方同步过滤 old_X/old_y(行须与 dates 对齐)
         # ── 数据面保鲜（2026-09-25 修复）──
         # 上述等价性判据只含参数 hash（n_stocks/sample_end/window/feature_version/
         # market_state/extra_features），**不含数据状态**。而扩展维度数据
@@ -428,7 +441,8 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
         if include_extra and old_dates:
             cutoff = (pd.Timestamp(sample_end) - pd.Timedelta(days=REUSE_SAFE_DAYS)
                       ).strftime("%Y-%m-%d")
-            fresh = [d for d in old_dates if d <= cutoff]
+            keep_idx = [i for i, d in enumerate(old_dates) if d <= cutoff]
+            fresh = [old_dates[i] for i in keep_idx]
             dropped = len(old_dates) - len(fresh)
             if dropped:
                 logger.info(
@@ -443,7 +457,7 @@ def _find_reusable_cache(cfg: V2Config, symbols: list[str],
             f"增量复用: 发现同参数旧缓存 {old_dir.name} "
             f"（sample_end={old_end}, {len(old_dates)} 个旧采样日）→ 只构建新增采样日"
         )
-        return old_dir, old_dates
+        return old_dir, old_dates, keep_idx
     return None
 
 
@@ -501,7 +515,7 @@ def build_training_dataset(
     old_X = old_y1 = old_y2 = old_y3 = old_dates = None
     build_dates = dates
     if reuse_from is not None:
-        old_dir, old_dates = reuse_from
+        old_dir, old_dates, keep_idx = reuse_from
         old_set = set(old_dates)
         build_dates = [d for d in dates if d not in old_set]
         if build_dates:
@@ -509,6 +523,18 @@ def build_training_dataset(
             old_y1 = np.load(str(old_dir / "y1.npy"))
             old_y2 = np.load(str(old_dir / "y2.npy"))
             old_y3 = np.load(str(old_dir / "y3.npy"))
+            # 2026-10-01 fix: 保鲜截断了 old_dates(见 _find_reusable_cache), old_X/old_y 必须
+            #   按同一 keep_idx 过滤, 否则 X 行数(旧完整) ≠ dates 行数(截断) →
+            #   拼接后 X/dates 尺寸错位 → build_prediction_cache `X[mask]` IndexError。
+            #   仅当截断确实发生时(keep_idx 非 None 且长度与 X 不同)才过滤。
+            if keep_idx is not None and len(keep_idx) != len(old_X):
+                old_X = old_X[keep_idx]
+                old_y1 = old_y1[keep_idx]
+                old_y2 = old_y2[keep_idx]
+                old_y3 = old_y3[keep_idx]
+                logger.info(
+                    f"  增量复用: 按保鲜索引过滤旧样本 → X={old_X.shape}"
+                )
             logger.info(
                 f"  增量模式: 旧缓存 {old_dir.name} X={old_X.shape} 复用, "
                 f"只构建新增采样日 {len(build_dates)} 天 "
@@ -574,7 +600,13 @@ def build_training_dataset(
         y3 = np.concatenate([old_y3] + all_y3, axis=0).astype(np.float32) if all_y3 else old_y3.astype(np.float32)
         # 注意: X 行序 = old(旧缓存原序) + new(新增构建追加序), dates 必须同序对应——
         # 不能 sort（X 不重排会导致 X/dates 行错位）。与全量构建的"追加序"语义一致。
-        all_dates = old_dates + [d for d in all_dates if d not in set(old_dates)]
+        # 2026-10-01 fix: all_dates 此处是**新增样本的 per-sample 日期**(见 line 544
+        #   `all_dates.extend([ref_date]*len(Xc))`), 必须**直接拼接**以与 X 行对齐。
+        #   旧写法 `[d for d in all_dates if d not in set(old_dates)]` 按"日期值"去重过滤,
+        #   会误删"日期值已在旧缓存集合出现过"的新增样本日期(月末增量时新增采样日常与旧集合
+        #   重叠) → X 拼接了全部新增样本、dates 却几乎没加 → 行数不匹配 → build_prediction_cache
+        #   `X[mask]` 抛 IndexError(418434 vs 412491)。80维因新增0样本未暴露, 129维新增5948样本暴露。
+        all_dates = old_dates + all_dates
     else:
         X = np.concatenate(all_X, axis=0)
         y1 = np.concatenate(all_y1, axis=0).astype(np.int32)

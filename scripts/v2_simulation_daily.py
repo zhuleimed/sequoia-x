@@ -145,6 +145,15 @@ def main() -> None:
             positions = get_all_positions(SIM_V2_DB)
             # 已实现/未实现盈亏拆分（2026-08-12 新增，日报展示）
             realized, unrealized = get_realized_unrealized_pnl(SIM_V2_DB)
+            # 2026-10-01 fix: 日报"待卖出"须排除【本日已卖出】的个股。
+            #   场景: run_daily 先评估卖出规则→标记 pending_sell(如 600363 硬止损),
+            #   随后月末清仓 liquidate_all_at_close 已将其卖出(result["sold"] 含之)。
+            #   若日报仍照搬 result["marked_sell"], 会出现"已清仓却又提示明日卖出"的矛盾。
+            _sold_syms = {t.get("symbol") for t in (result.get("sold") or [])}
+            _pending_sells = [
+                p for p in (result.get("marked_sell") or [])
+                if p.get("symbol") not in _sold_syms
+            ]
             text = build_daily_summary_text(
                 today,
                 account,
@@ -152,7 +161,7 @@ def main() -> None:
                 result.get("bought", []),
                 result.get("sold", []),
                 cancelled=result.get("cancelled"),
-                pending_sells=result.get("marked_sell"),
+                pending_sells=_pending_sells,
                 max_positions=10,
                 realized_pnl=realized,
                 unrealized_pnl=unrealized,

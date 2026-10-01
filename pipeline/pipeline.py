@@ -64,16 +64,18 @@ STEPS: list[dict] = [
         "timeout": 14400,  # 4h（baostock 慢时 3h 不够用）
     },
     # ── 2. 策略选股 + LLM（必需） ──
-    # （注: ETF 择时模拟盘不在此管线——20:30 独立 cron 运行, 全量走 019 库
-    #   [当日 ETF+指数 20:05 已入库], 见 scripts/sim_etf_timing.py）
+    # 【2026-10-01 变更】原 LLM 策略（8策略→LLM）已由独立子项目 024_llm_hs300 取代
+    #   （LLM 直接从沪深300成份股选2只）。子项目**不自己拉数据**，就着本管线
+    #   sync 完成后的位置运行 —— 与"原 LLM 策略的启动时机"一致。
+    #   数据全部来自本项目库(只读复用)。
     {
-        "id": "strategy",
-        "name": "策略选股+LLM",
-        "cmd": ["main.py"],
-        "cwd": str(PROJECT_DIR),
+        "id": "llm_hs300",
+        "name": "LLM-HS300选股(024)",
+        "cmd": ["scripts/main_hs300.py"],
+        "cwd": str(PROJECT_DIR.parent / "024_llm_hs300"),
         "python": PY312,
-        "required": False,   # 可选：失败不阻断管线
-        "timeout": 1800,  # 30min
+        "required": False,   # 失败不阻断本管线（不影响 V4）
+        "timeout": 1800,     # 30min（LLM 分析 300 只）
     },
     # ── 2.5. LSTM 增量学习（已暂停-新模型开发中） ──
     # {
@@ -96,14 +98,16 @@ STEPS: list[dict] = [
     #     "timeout": 900,  # 15min（包括股票池预测）
     # },
     # ── 3. 模拟盘更新（策略选股后执行，T+1 模式） ──
+    # 【2026-10-01 变更】原 LLM 模拟盘改由 024_llm_hs300 的 sim_update_hs300.py 承担
+    #   （独立库 sim_hs300.db，买卖/日结/收益率逻辑与原策略完全相同）。
     {
-        "id": "simulation",
-        "name": "模拟盘更新",
-        "cmd": ["main.py", "--sim-update"],
-        "cwd": str(PROJECT_DIR),
+        "id": "sim_hs300",
+        "name": "HS300模拟盘日结(024)",
+        "cmd": ["scripts/sim_update_hs300.py"],
+        "cwd": str(PROJECT_DIR.parent / "024_llm_hs300"),
         "python": PY312,
         "required": False,
-        "timeout": 600,  # 10min（主要是数据库操作）
+        "timeout": 900,   # 15min
     },
     # ── 3.4. V2 模拟盘日常操作（LLM 模拟盘之后，独立 sim_v2.db，完全隔离）──
     {

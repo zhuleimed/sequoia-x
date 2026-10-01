@@ -171,7 +171,7 @@ class SimEngine:
             "bought": [],
             "sold": [],
             "cancelled": [],
-            "marked_sell": 0,
+            "marked_sell": [],  # 2026-10-01: 统一为 list(原为 0, 与后续赋值的 list 类型不一致)
             "positions_updated": 0,
         }
 
@@ -226,7 +226,7 @@ class SimEngine:
             sold_str = " ".join(f'{c["symbol"]}({c["pnl_pct"]:+.1%})' for c in sold)
             logger.info(f"  卖出: {sold_str}")
         if results["marked_sell"]:
-            logger.info(f"  标记待卖出: {results['marked_sell']} 只")
+            logger.info(f"  标记待卖出: {len(results['marked_sell'])} 只")
         logger.info(f"  当前持仓: {results['positions_updated']} 只")
 
         return results
@@ -739,6 +739,15 @@ class SimEngine:
             account = get_account_summary(self.db_path, today_str)
             # 已实现/未实现盈亏拆分（2026-08-12 新增，日报展示）
             realized, unrealized = get_realized_unrealized_pnl(self.db_path)
+            # 2026-10-01 fix: 与 v2_simulation_daily 同一防线——"待卖出"须排除【本日已卖出】的个股。
+            #   否则若调用方在 run_daily 之后又执行了卖出(如月末清仓), 日报会显示
+            #   "已卖出却又待卖"的矛盾(见 09-30 600363 案例)。对 LLM 模拟盘无副作用
+            #   (已卖出的本就不应再列"待卖"), 但可防御引擎被复用于含清仓的场景。
+            _sold_syms = {t.get("symbol") for t in (results.get("sold") or [])}
+            _pending_sells = [
+                p for p in (results.get("marked_sell") or [])
+                if p.get("symbol") not in _sold_syms
+            ]
             text = build_daily_summary_text(
                 today_str=today_str,
                 account=account,
@@ -746,7 +755,7 @@ class SimEngine:
                 bought=results.get("bought", []),
                 sold=results.get("sold", []),
                 cancelled=results.get("cancelled", []),
-                pending_sells=results.get("marked_sell", []),
+                pending_sells=_pending_sells,
                 max_positions=self.max_positions,
                 realized_pnl=realized,
                 unrealized_pnl=unrealized,
