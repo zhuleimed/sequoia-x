@@ -373,7 +373,8 @@ def main() -> None:
     # ── Step0.5: 等待月末自动链训练缓存就绪（2026-08-07）──
     #    8/31 19:00 拉取 + 重建 2-6h, 9/1 03:00 启动时可能未完成 → 轮询等待（最长 12h）
     if not wait_for_cache_ready(target_month):
-        _notify("❌ V4 月度重训中止（缓存未就绪）", "9 月信号未产生, 请人工介入排查月末自动链")
+        _notify("❌ V4 月度重训中止（缓存未就绪）",
+                f"{target_month} 信号未产生, 请人工介入排查月末自动链")
         sys.exit(1)
     logger.info(f"训练缓存就绪，继续重训（累计 {(_time.time()-t_main)/60:.0f}min）")
 

@@ -121,6 +121,24 @@ def load_full_dataset(cfg: V2Config, engine: DataEngine, cache_dir=None):
     return X, y1, y2, y3, dates
 
 
+def _assert_pred_aligned(month: str, symbols: list, preds: dict) -> None:
+    """断言「符号 ↔ 预测数组」逐行对齐（2026-10-02 加，同属"改行数必须联动"防护）。
+
+    为什么要这道保险丝: 这份 preds 决定**买哪 10 只股票** —— symbols[i] 必须就是
+    t2/t1/t3/t4[i] 的那只。长度一旦不一致（例如日后有人把 build_batch_features 改成
+    "只过滤 X 不过滤符号"），下游 `[symbols[i] for i in argsort(-t2)]` 会**静默错位**：
+    买错股票、且不报错——这是本项目最危险的一类故障（比崩溃危险得多）。
+    与 labels.py 的缓存不变量断言、T4 合并的"按 symbol 对齐"是同一族保护。
+    """
+    n = len(symbols)
+    bad = {k: len(v) for k, v in preds.items() if len(v) != n}
+    if bad:
+        raise AssertionError(
+            f"[{month}] ❌ 符号与预测数组长度不一致: symbols={n}, 异常={bad} "
+            f"→ 拒绝写缓存（若继续, 下游按序号取股票会静默错位）"
+        )
+
+
 def extract_training_data(
     X: np.ndarray, y: np.ndarray, dates_arr: np.ndarray,
     train_end_date: str, train_months: int = 12,
@@ -267,13 +285,15 @@ def predict_full_pool(
         else:
             logger.info(f"  ✅ T4 pred: mean={pred_t4.mean():.4f} std={t4_std:.4f}")
 
-    return {
+    _preds = {
         "symbols": valid_symbols,
         "t2": [float(v) for v in pred_t2],
         "t1": [float(v) for v in pred_t1],
         "t3": [float(v) for v in pred_t3],
         "t4": [float(v) for v in pred_t4],
     }
+    _assert_pred_aligned("pred", valid_symbols, _preds)   # 行对齐保险丝（2026-10-02）
+    return _preds
 
 
 # 特征构建并行数（2026-08-02：单只股票特征计算无状态，可安全并行）
@@ -791,6 +811,7 @@ def _process_month_worker(args: tuple) -> tuple:
         "t3": [float(v) for v in pred_t3],
         "t4": [float(v) for v in pred_t4],
     }
+    _assert_pred_aligned(month, valid_symbols, preds)     # 行对齐保险丝（2026-10-02）
     return month, preds
 
 

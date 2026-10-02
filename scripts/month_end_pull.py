@@ -10,7 +10,7 @@
 2026-08-07 月末自动链（用户要求"不能人工启动"）:
   拉取完成 → 覆盖率检查(parquet 文件计数) → 训练缓存自动重建(121/88+80 维, ~2-6h)
   → 自检(维度+采样日覆盖) → 单月干跑验证(build_prediction_cache, 临时输出)
-  → 微信推送完成/失败; 9/1 03:00 v2_monthly_retrain 轮询等待缓存就绪
+  → 微信推送完成/失败; 下月 1 日 03:00 v2_monthly_retrain 轮询等待缓存就绪
 
 用法(cron):
   0 19 * * 1-5 cd <project> && py312 python scripts/month_end_pull.py >> logs/month_end_pull_$(date +%Y%m).log 2>&1
@@ -30,6 +30,19 @@ def get_trade_dates():
     import akshare as ak
     df = ak.tool_trade_date_hist_sina()
     return set(df["trade_date"].astype(str).tolist())
+
+
+def retrain_day(today: date) -> str:
+    """重训日文案 = **下月 1 号**（如 "11/1"）。
+
+    2026-10-02: 原先这些通知里把 "9/1" 写死（9 月首次上线时的遗留），跨月后每天都是错的
+    时间提示——运维照着告警找人排障会被误导。重训时间恒定在下月 1 号 03:00（见 crontab），
+    故由 today 推出即可，不必硬编码。
+    """
+    y, m = today.year, today.month + 1
+    if m > 12:
+        y, m = y + 1, 1
+    return f"{m}/1"
 
 
 def is_last_trade_day(today: date, trade_dates: set) -> bool:
@@ -143,8 +156,9 @@ def _refresh_stock_pool(today: date) -> None:
 def auto_rebuild_and_verify(today: date) -> bool:
     """自动链: 覆盖率检查 → 股票池刷新 → 缓存重建 → 自检 → 单月干跑验证。
 
-    Returns: True=全链通过（9/1 重训可直接运行）; False=某环失败（已微信告警）。
+    Returns: True=全链通过（下月 1 日重训可直接运行）; False=某环失败（已微信告警）。
     """
+    rd = retrain_day(today)          # 下月 1 号，如 "11/1"（通知文案统一用它，勿再写死）
     print(f"[{today}] ═══ 自动链开始 ═══")
 
     # 1. 覆盖率检查（2026-08-07 回退机制: 数据不全不再中止, 降级 88 维重建保底）
@@ -154,7 +168,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
     if not ok:
         degraded = True
         _notify("⚠️ 扩展维度数据不全: " + msg,
-                "自动回退 88 维重建缓存, 9/1 重训将按 88 维执行（保底机制, 月度流程不中断）")
+                f"自动回退 88 维重建缓存, {rd} 重训将按 88 维执行（保底机制, 月度流程不中断）")
         print(f"[{today}] ⚠️ {msg} → 降级 88 维重建")
     else:
         print(f"[{today}] ✅ {msg}")
@@ -199,7 +213,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
         print(f"[{today}] ② 断点续跑: 重建已完成标记存在（{rebuild_marker.name}）, 跳过重建")
     else:
         import time as _time
-        print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 9/1 重训轮询等待）...")
+        print(f"[{today}] ② 重建训练数据集缓存（{dim}, 预计 2-6h, 期间 {rd} 重训轮询等待）...")
         t_rebuild = _time.time()
         cmd = [sys.executable, str(PROJECT_DIR / "scripts/rebuild_dataset_cache.py"),
                "--workers", "16"]  # 2026-08-11: 每 job 16 worker（121/88 + 80 双 job 并行 = 32 进程,
@@ -208,7 +222,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
             cmd.append("--no-extra")
         r = subprocess.run(cmd, cwd=str(PROJECT_DIR), timeout=10 * 3600)
         if r.returncode != 0:
-            _notify("❌ 月末缓存重建失败", "9/1 重训将轮询等待后失败; 请查看 logs/month_end_pull_*.log 排查")
+            _notify("❌ 月末缓存重建失败", f"{rd} 重训将轮询等待后失败; 请查看 logs/month_end_pull_*.log 排查")
             print(f"[{today}] ❌ 缓存重建失败 exit={r.returncode} 耗时={(_time.time()-t_rebuild)/60:.0f}min")
             return False
         rebuild_marker.write_text(
@@ -235,7 +249,7 @@ def auto_rebuild_and_verify(today: date) -> bool:
          "--output", str(dry)],
         cwd=str(PROJECT_DIR), timeout=4 * 3600)
     if r.returncode != 0 or not dry.exists():
-        _notify("❌ 月末干跑验证失败", "88/129 维预测链路未验证通过, 9/1 重训前需人工排查")
+        _notify("❌ 月末干跑验证失败", f"88/129 维预测链路未验证通过, {rd} 重训前需人工排查")
         print(f"[{today}] ❌ 干跑验证失败 exit={r.returncode} 耗时={(_time.time()-t_dry)/60:.0f}min")
         return False
     print(f"[{today}] ✅ 干跑验证通过 耗时={(_time.time()-t_dry)/60:.0f}min")
@@ -253,11 +267,11 @@ def auto_rebuild_and_verify(today: date) -> bool:
 
     if degraded:
         _notify("✅ 月末全链完成（已回退 88 维）",
-                f"{month} 数据拉取完成但扩展维度不全 → 88 维缓存已重建并验证, 9/1 按 88 维重训。"
+                f"{month} 数据拉取完成但扩展维度不全 → 88 维缓存已重建并验证, {rd} 按 88 维重训。"
                 f"下次月末将自动重试 129 维")
     else:
         _notify("✅ 月末扩展维度全链完成",
-                f"{month} 数据拉取 + 129 维缓存重建 + 自检 + 干跑全部通过, 9/1 03:00 重训可直接运行")
+                f"{month} 数据拉取 + 129 维缓存重建 + 自检 + 干跑全部通过, {rd} 03:00 重训可直接运行")
     print(f"[{today}] ═══ 自动链全部完成（{'降级 88 维' if degraded else '129 维'}）═══")
     return True
 

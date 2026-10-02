@@ -146,6 +146,15 @@ def main() -> int:
     n = len(e.get("symbols", []))
     print(f"── 1) 存在性与非退化（{n} 只）──")
     say("✅" if n > 500 else "❌", f"符号数 = {n}")
+    # 2026-10-02 加固: 行对齐 —— symbols[i] 必须就是 t1/t2/t3/t4[i] 的那只股票。
+    #   错位**不会崩溃**, 只会"按序号取股票"时**买错票**（本项目最危险的一类故障,
+    #   见 9/30 缓存 X/dates 错位同一族）。只查"存在但长度不符"的情况;
+    #   整个数组缺失(如 T4 未跑)由下面的标准差=0 项负责。
+    _mis = {f: len(e.get(f)) for f in ("t1", "t2", "t3", "t4")
+            if (e.get(f) or []) and len(e.get(f)) != n}
+    say("✅" if not _mis else "❌", "符号↔预测 行对齐",
+        f"symbols={n}, 长度异常={_mis} ⇒ **错位=会买错股票**，禁止按此名单买入"
+        if _mis else f"t1/t2/t3/t4 长度均等于符号数 ({n})")
     for f in ("t2", "t4"):
         v = np.asarray(e.get(f) or [], float)
         s = float(np.std(v)) if v.size else 0.0

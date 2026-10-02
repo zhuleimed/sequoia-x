@@ -389,6 +389,24 @@ class MonthlyBacktestEngine:
 
                 # 组装为统一格式
                 cached_t4 = cache_entry.get("t4", [])
+                # ── 行对齐保险丝（2026-10-02 加，"改行数不联动"系统排查的产物）──
+                #   原写法逐项 `cached_t2[i] if i < len(cached_t2) else 0.0`：缓存一旦行数少
+                #   一截，缺失的尾部股票会**静默拿到假预测**（t2/t4=0.0、t1=0.5、t3=0.25），
+                #   回测结果被扭曲却无任何报错 —— 正是本项目最怕的静默失败。
+                #   区分两种情形:
+                #     空数组            = 合法（如 --skip-t4 构建的缓存，t4 本就为空）→ 保持原默认
+                #     有值但长度≠symbols = 缓存损坏 → **拒绝使用并报错**（fail loud，不静默）
+                _n_sym = len(cached_symbols)
+                _mis = {}
+                for _k in ("t1", "t2", "t3", "t4"):
+                    _a = cache_entry.get(_k) or []
+                    if _a and len(_a) != _n_sym:
+                        _mis[_k] = len(_a)
+                if _mis:
+                    raise RuntimeError(
+                        f"[{cycle.month}] 预测缓存行不对齐: symbols={_n_sym}, 异常={_mis} —— "
+                        f"按原逻辑会静默给缺失股票填假预测(0.0/0.5/0.25)，回测结果失真且不报错。"
+                        f"请重建该缓存，不要复用。")
                 predictions = []
                 for i, sym in enumerate(cached_symbols):
                     predictions.append({
