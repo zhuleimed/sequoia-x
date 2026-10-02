@@ -256,8 +256,21 @@ def update_cache(month: str, symbols: list[str], pred: np.ndarray):
     out_file = TMP_DIR / f"t4_{month}.json"
     if month in cache:
         # 主缓存已有该月（T2/T1/T3 就绪）→ 直接更新 t4 字段
+        logger = logging.getLogger(f"t4_{month}")   # 与 setup_logger 同名 → 写同一个 t4_<month>.log
         t4_map = dict(zip(symbols, [float(v) for v in pred]))
-        cache[month]["t4"] = [t4_map.get(s, 0.0) for s in cache[month]["symbols"]]
+        _syms = cache[month]["symbols"]
+        missing = [s for s in _syms if s not in t4_map]
+        cache[month]["t4"] = [t4_map.get(s, 0.0) for s in _syms]
+        if missing:
+            # 2026-10-02: 给填充**留痕迹**。缺失仍填 0.0（项目约定：特征/预测值填 0，
+            #   不引入 NaN —— NaN 会让验收的 std 退化判据静默失效，见 memory
+            #   nan-vs-null-layer-convention），但静默填充会让这些股票"无声地"在融合排序里
+            #   落到中游、永不入选，所以必须可见（实测 74 个月从未触发，出现即需查链路）。
+            logger.warning(
+                f"⚠️ T4 未覆盖 {len(missing)}/{len(_syms)} 只 → 其 t4 填 0.0（约定填 0, 不放 NaN）"
+                f"；示例: {missing[:20]}{' …' if len(missing) > 20 else ''}"
+                f"；若数量继续增大, 查 T4 特征链路（_extract_per_day_features 的 80 维分支）"
+            )
 
         # 原子写入（写临时 + rename）
         tmp_path = CACHE_PATH.with_suffix(".json.tmp")

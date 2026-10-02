@@ -155,6 +155,21 @@ def main() -> int:
     say("✅" if not _mis else "❌", "符号↔预测 行对齐",
         f"symbols={n}, 长度异常={_mis} ⇒ **错位=会买错股票**，禁止按此名单买入"
         if _mis else f"t1/t2/t3/t4 长度均等于符号数 ({n})")
+    # 2026-10-02 加固: 无 NaN/Inf —— 项目约定"数据里不放 NaN"（缺失填 0）。
+    #   **必须显式查, 因为 NaN 会让下面的 std 退化判据静默失效**:
+    #   np.std([...NaN...]) → nan, 而 `nan < 1e-12` 是 False ⇒ 真退化会被显示成 ✅,
+    #   告警被关掉（实测确认）。把约定变成被强制的不变量。
+    #   变量名勿用 `a`：main() 里 `a` 是 argparse 命名空间（结尾 `a.notify` 要用），
+    #   遮蔽它会让**告警路径**AttributeError 崩溃 —— 恰恰在最需要告警时炸（实测踩过）。
+    _nonfinite = {}
+    for f in ("t1", "t2", "t3", "t4"):
+        _arr = np.asarray(e.get(f) or [], float)
+        k = int((~np.isfinite(_arr)).sum())
+        if k:
+            _nonfinite[f] = k
+    say("✅" if not _nonfinite else "❌", "无 NaN/Inf",
+        f"非有限值={_nonfinite} ⇒ **会让 std 退化判据失效（告警被关掉）**，禁止按此名单买入"
+        if _nonfinite else "t1/t2/t3/t4 全为有限值（约定：缺失填 0，不放 NaN）")
     for f in ("t2", "t4"):
         v = np.asarray(e.get(f) or [], float)
         s = float(np.std(v)) if v.size else 0.0
