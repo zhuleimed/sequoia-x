@@ -102,6 +102,20 @@ def load_full_dataset(cfg: V2Config, engine: DataEngine, cache_dir=None):
     with open(cache_path / "dates.json") as f:
         dates = _json.load(f)
 
+    # ── 加载侧不变量 fail-fast（2026-10-02 新增）──
+    #   与 labels.py::_save_dataset_cache 的保存侧断言对称。9/30 事故就是坏缓存被
+    #   静默加载, 一路走到 _process_month_worker 的 `X[mask]` 才抛 IndexError
+    #   (X=418434 vs dates=412491) —— 报错点离病根很远, 排障多花数小时。
+    #   这里提前报错: 病根(cache_dir)直接写在错误信息里。
+    _n = X.shape[0]
+    _ys = (y1.shape[0], y2.shape[0], y3.shape[0])
+    if len(dates) != _n or any(v != _n for v in _ys):
+        raise AssertionError(
+            f"❌ 训练缓存数据不变量破坏: {cache_path.name} "
+            f"X={_n}行, y=({_ys[0]},{_ys[1]},{_ys[2]}), dates={len(dates)}条"
+            f"（X-dates 差={_n - len(dates)}）。该缓存不可信, 请删除后重建, 不要复用。"
+        )
+
     elapsed = time.time() - t0
     logger.info(f"数据集加载完成: X={X.shape}, {len(set(dates))} 采样日期, {elapsed:.0f}s")
     return X, y1, y2, y3, dates
@@ -944,8 +958,9 @@ def build_cache(
             stock_pool = _filter_stock_pool(engine.get_local_symbols(), engine.db_path)
             logger.warning(f"baostock 失败，本地过滤: {len(stock_pool)} 只")
 
-    # 1a. 特征拼接开关（2026-08-07）: cfg.extra_features=True → 88+33=121 维
-    #     自动降级（回退机制）: 配置要 121 维但缓存未就绪（月末自动链未完成/数据不全回退）
+    # 1a. 特征拼接开关（2026-08-07）: cfg.extra_features=True → 88+扩展N 维
+    #     （N 随 feature_version 变: V3=121, V4/V5=129 —— 实际值读缓存 metadata, 见下）
+    #     自动降级（回退机制）: 配置要扩展维但缓存未就绪（月末自动链未完成/数据不全回退）
     #     → 自动回退 88 维兜底, 不中断月度流程（微信告知）
     from sequoia_x.model_selection_v2.labels import _dataset_cache_path
     include_extra = bool(getattr(cfg, "extra_features", False))
@@ -954,19 +969,26 @@ def build_cache(
                                       include_extra=True)
         if not (d121 / "metadata.json").exists():
             include_extra = False
-            logger.warning("⚠️ 121 维训练缓存未就绪 → 自动回退 88 维（预测特征同步 88 维）")
+            logger.warning("⚠️ 扩展维度训练缓存未就绪 → 自动回退 88 维（预测特征同步 88 维）")
             try:
                 from wxpusher import WxPusher
                 from sequoia_x.core.config import get_settings
                 _s = get_settings()
                 WxPusher.send_message(
-                    content=f"⚠️ V2 重训自动回退 88 维\n121 维缓存未就绪（{d121.name} 缺失）, "
+                    content=f"⚠️ V2 重训自动回退 88 维\n扩展维度缓存未就绪（{d121.name} 缺失）, "
                             f"本次按 88 维重训（扩展维度数据不全的保底机制）",
                     token=_s.wxpusher_token, topic_ids=_s.wxpusher_topic_ids, content_type=1)
             except Exception:
                 pass
         else:
-            logger.info("🔧 扩展特征已启用: 88+33=121 维（训练缓存+预测特征一致）")
+            # 2026-10-02 修正: 原文案写死"88+33=121 维"（V3 时代），V4/V5 实为 129 维——
+            #   陈旧文案在 9/30 事故复盘时误导过一次（日志说 121、缓存实为 129）。
+            #   改为读该缓存 metadata 的**实际**维度, 以后升版本也不必再改这行。
+            try:
+                _dim = json.loads((d121 / "metadata.json").read_text())["X_shape"][2]
+            except Exception:
+                _dim = "?"
+            logger.info(f"🔧 扩展特征已启用: 88+扩展={_dim} 维（训练缓存+预测特征一致）")
 
     # 1b. 训练数据集缓存目录（按 include_extra 哈希; 121 维走新目录）
     cache_dir, _ = _dataset_cache_path(cfg, stock_pool, include_market_state=True,

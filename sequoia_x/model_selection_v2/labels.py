@@ -296,7 +296,10 @@ def _dataset_cache_path(cfg: V2Config, symbols: list[str], include_market_state:
 
 
 def _load_cached_dataset(cache_dir: Path, metadata_path: Path):
-    """从缓存加载数据集。不存在则返回 None。"""
+    """从缓存加载数据集。不存在/文件损坏则返回 None；**数据不变量破坏则直接报错**。
+
+    2026-10-02 加固: 加载侧不变量 fail-fast，与 _save_dataset_cache 的保存侧断言对称。
+    """
     import json
     if not metadata_path.exists():
         return None
@@ -310,14 +313,27 @@ def _load_cached_dataset(cache_dir: Path, metadata_path: Path):
         y3 = np.load(str(cache_dir / "y3.npy"))
         with open(cache_dir / "dates.json") as f:
             dates = json.load(f)
-        logger.info(
-            f"从缓存加载数据集: {meta['n_samples']} 样本, "
-            f"X={meta['X_shape']}, 缓存={cache_dir}"
-        )
-        return X, y1, y2, y3, dates
     except Exception as e:
         logger.warning(f"缓存加载失败({e})，将重新构建")
         return None
+    # ── 加载侧不变量 fail-fast（2026-10-02 新增）──
+    #   放在 try **之外**、且用 AssertionError: 损坏缓存必须直接报错, 不能被上面的
+    #   except 兜成"重新构建"——静默重建是小时级开销, 且会掩盖真正的数据完整性问题。
+    #   9/30 事故形态: 坏缓存被静默加载, 直到 build_prediction_cache 的 `X[mask]`
+    #   才以难懂的 IndexError 暴露（X=418434 vs dates=412491）。
+    _n = X.shape[0]
+    _ys = (y1.shape[0], y2.shape[0], y3.shape[0])
+    if len(dates) != _n or any(v != _n for v in _ys):
+        raise AssertionError(
+            f"❌ 缓存数据不变量破坏(拒绝加载): {cache_dir.name} "
+            f"X={_n}行, y=({_ys[0]},{_ys[1]},{_ys[2]}), dates={len(dates)}条"
+            f"（X-dates 差={_n - len(dates)}）。该缓存不可信, 请删除后重建, 不要复用。"
+        )
+    logger.info(
+        f"从缓存加载数据集: {meta['n_samples']} 样本, "
+        f"X={meta['X_shape']}, 缓存={cache_dir}"
+    )
+    return X, y1, y2, y3, dates
 
 
 def _save_dataset_cache(cache_dir: Path, X, y1, y2, y3, dates, params: dict | None = None):

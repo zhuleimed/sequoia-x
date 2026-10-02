@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -441,6 +442,27 @@ def main() -> None:
             logger.info(f"V4+LLM 月度报告已推送（{y}-{prev_m:02d}）")
     except Exception as e:
         logger.warning(f"V4+LLM 月度报告推送失败: {e}")
+
+    # ── Step7: 首跑验收（2026-10-02 新增）──
+    #   为什么挂在链尾: 10/1 那次验收是人工补跑的, 而且**跑早了**（重训未结束）→ 误报
+    #   "t4 全 0 训练失败"; 误报之后又没人重跑, 于是"本月重训是否通过验收"一直是空白。
+    #   挂在链尾 ⇒ 每月自动产生一次明确结论（通过 / 异常并推微信）, 不依赖人工记得跑。
+    #   env 放行口: 此刻本进程（重训）仍在运行, 验收脚本的前置保护会挡下自动调用 ——
+    #   故显式设置 POST_RETRAIN_VERIFY_ALLOW_RUNNING=1（人工手动跑时不要设, 见该脚本注释）。
+    try:
+        _r = subprocess.run(
+            [PYTHON, str(PROJECT_DIR / "scripts/post_retrain_verify.py"),
+             "--month", target_month, "--notify"],
+            cwd=str(PROJECT_DIR), timeout=600,
+            env=dict(os.environ, POST_RETRAIN_VERIFY_ALLOW_RUNNING="1"),
+        )
+        if _r.returncode == 0:
+            logger.info("Step7: 首跑验收通过 ✅（名单可按计划执行）")
+        else:
+            logger.error(f"Step7: 首跑验收异常 exit={_r.returncode}"
+                         f"（{'已推送告警' if _r.returncode == 1 else '执行异常'}）")
+    except Exception as e:
+        logger.warning(f"Step7: 首跑验收执行失败（不阻断重训主链）: {e}")
 
     logger.info(f"V4 月度重训完成 | 耗时见日志 | 信号待下个交易日执行")
 

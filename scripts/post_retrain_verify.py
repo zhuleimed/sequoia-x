@@ -29,13 +29,15 @@
     python scripts/post_retrain_verify.py --month 2026-10
     python scripts/post_retrain_verify.py --month 2026-10 --notify
 
-退出码：0 = 像正常产出；1 = 有异常（**先人工确认再让模拟盘买入**）。
+退出码：0 = 像正常产出；1 = 有异常（**先人工确认再让模拟盘买入**）；
+        2 = 无法验收（重训进程仍在运行，见 retrain_running —— 等结束后重跑即可）。
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -65,12 +67,67 @@ def fused(e: dict) -> np.ndarray:
     return (pd.Series(t2).rank().to_numpy() + pd.Series(t4).rank().to_numpy()) / 2.0
 
 
+def retrain_running() -> list[str]:
+    """返回仍在运行的月度重训进程（"PID 2114489 已运行 3.2min"），没有则空列表。
+
+    为什么查这个（2026-10-02 加固，源自 10/1 07:21 误报事故）：
+      那次验收在重训**跑到一半**时被执行（T4 还在训练、缓存里 t4 全 0），
+      脚本据此判"T4 训练失败"并推了微信告警；实际重训 39min 后才结束。
+      **重训未结束前的一切验收结论都不成立**，必须在入口挡住。
+
+    自匹配陷阱（教训见 scripts/chain_v5_rebuild.sh 顶部注释）：
+      `pgrep -f <字符串>` 会命中"命令行里含该字符串的任意进程"，写检查命令的动作本身
+      就可能把字符串放进自己的命令行 → 自我维持。这里用 ps 全量列出后逐行判断，
+      并显式排除本脚本自身，避免同类陷阱。
+    """
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-eo", "pid,etimes,args"],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception as e:          # ps 不可用时不阻断验收（保护失效好过验收瘫痪）
+        print(f"[warn] 无法检测重训进程（{e}），跳过该保护")
+        return []
+    hits = []
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etimes, args = parts
+        if "v2_monthly_retrain.py" not in args:
+            continue
+        if "post_retrain_verify" in args:   # 排除本脚本自身的进程行
+            continue
+        try:
+            mins = f"{int(etimes) / 60:.1f}min"
+        except ValueError:
+            mins = "?"
+        hits.append(f"PID {pid} 已运行 {mins}")
+    return hits
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="", help="验收哪个月（YYYY-MM），默认当前月")
     ap.add_argument("--notify", action="store_true", help="有异常时推微信")
     a = ap.parse_args()
     month = a.month or dt.datetime.now().strftime("%Y-%m")
+
+    # ── 0) 前置保护: 重训进程未结束 → 拒绝验收（2026-10-02）──
+    #   放行口: 环境变量 POST_RETRAIN_VERIFY_ALLOW_RUNNING=1
+    #   仅由 v2_monthly_retrain.py 在链尾自动调用本脚本时设置——那一刻重训进程
+    #   （父进程）必然在运行, 不设此变量会把合法的自动调用一并挡掉。
+    #   人工手动跑不要设它（那正是 10/1 误报的场景）。
+    #   取值必须是 "1"（而非"存在即放行"）：万一有人设成 0/false 想关掉保护,
+    #   默认也是**保护生效**——安全方向默认收紧。
+    if os.environ.get("POST_RETRAIN_VERIFY_ALLOW_RUNNING") != "1":
+        running = retrain_running()
+        if running:
+            print("=" * 78)
+            print(f"  ⏸  拒绝验收：月度重训仍在运行（{'; '.join(running)}）")
+            print("     T4 等步骤可能尚未写入缓存 → 此时任何结论都无意义（10/1 07:21 误报即此因）。")
+            print("     等重训结束后**用同一命令重跑**即可。")
+            print("=" * 78)
+            return 2
 
     print("=" * 78)
     print(f"  月度重训首跑验收 | 目标月 {month} | {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
