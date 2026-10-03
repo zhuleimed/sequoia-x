@@ -30,6 +30,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize  # 组合优化（风险平价/最小方差）求解器，P0 方向一
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
@@ -211,6 +212,220 @@ def min_variance_sizing(
 
 
 # ════════════════════════════════════════════════════════════
+#  组合优化仓位调节器（2026-10-03，P0 方向一「分钱方法」）
+# ════════════════════════════════════════════════════════════
+# 与上面两个方法的区别：**用到股票之间的相关性**（协方差矩阵），而非只看单只波动率。
+#   · 反比方差（min_variance_sizing，上面）：只看每只自己的波动 σ_i，忽略相关性
+#   · 风险平价（risk_parity_sizing）：让每只股票**对组合风险的贡献相等**
+#   · 最小方差（min_variance_opt_sizing）：直接解"整组波动最小"的权重（含相关性）
+# 口径与上面的方法一致：weight 的**均值=1**（执行层 `budget = cash/N × weight × exposure`），
+# 故内部解出的"和为 1"的权重最后要 × N。数据不足/求解失败一律**回退等权**并记日志。
+#
+# 权重约定说明：
+#   cap=0.15 是"和为 1"口径下的单票上限（= 单票最多占组合 15%，P0 方案 §2.1 约定）。
+#   industry_cap=0.30 是同一级行业（申万一级，`tdx_stock_industry.industry_l1`）合计上限。
+
+SIZING_LOOKBACK: int = 120        # 协方差估计窗口（交易日）≈ 半年
+SIZING_MIN_SAMPLES: int = 40      # 对齐后最少样本数，不足则回退等权
+SIZING_MAX_CAP: float = 0.15      # 单票上限（和为 1 口径）
+SIZING_INDUSTRY_CAP: float = 0.30  # 单行业上限（和为 1 口径）
+
+
+def _load_industry_map(db_path: str | None) -> dict[str, str]:
+    """symbol → 申万一级行业（缺失时返回空 dict，调用方退化为不加行业约束）。"""
+    if not db_path:
+        return {}
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT symbol, industry_l1 FROM tdx_stock_industry").fetchall()
+        return {r[0]: r[1] for r in rows if r[1]}
+    except Exception as e:  # 表不存在/字段缺失都不应让回测崩
+        logger.warning(f"  行业映射加载失败（不加行业约束）: {e}")
+        return {}
+
+
+def _estimate_cov(signals: list[dict], engine: DataEngine, ref_date: str,
+                  lookback: int = SIZING_LOOKBACK):
+    """估计信号股的日收益协方差矩阵（含收缩）。
+
+    口径与防前视：
+      · 只用 ref_date（= 训练截止日，早于买入日）及之前的数据
+      · 用**不复权实际收盘价**算日收益（全库统一口径；除权跳空属真实成交价）
+      · 收益率 clip 到 ±11%（A 股涨跌停 10%+取整；超出者必是数据异常/除权跳空）
+      · 日期**内连接对齐**（所有股票都有行情的交易日才计入），对齐后样本 < SIZING_MIN_SAMPLES 则放弃
+      · 收缩：优先 sklearn Ledoit-Wolf；不可用时退化为"向对角阵收缩 10%"
+
+    Returns:
+        (symbols, cov, n_samples)；任何一步不满足返回 (None, None, 0)。
+    """
+    if not ref_date:
+        return None, None, 0
+    closes: dict[str, pd.Series] = {}
+    for sig in signals:
+        sym = sig["symbol"]
+        df = engine.get_ohlcv(sym)
+        if df is None or df.empty:
+            continue
+        df = df[df["date"] <= ref_date][["date", "close"]].tail(lookback + 1)
+        if len(df) < SIZING_MIN_SAMPLES:
+            continue
+        closes[sym] = df.set_index("date")["close"]
+
+    if len(closes) < 3:
+        return None, None, 0
+
+    panel = pd.DataFrame(closes).dropna()
+    if len(panel) < SIZING_MIN_SAMPLES:
+        return None, None, 0
+
+    rets = panel.pct_change().dropna().values
+    rets = np.clip(rets, -0.11, 0.11)
+    if rets.shape[0] < SIZING_MIN_SAMPLES:
+        return None, None, 0
+
+    try:
+        from sklearn.covariance import LedoitWolf
+        cov = LedoitWolf().fit(rets).covariance_
+    except Exception:
+        cov = np.cov(rets, rowvar=False)
+        cov = 0.9 * cov + 0.1 * np.diag(np.diag(cov))  # 简易收缩兜底
+    return list(panel.columns), cov, rets.shape[0]
+
+
+def _solve_risk_parity(cov: np.ndarray, cap: float) -> np.ndarray | None:
+    """等风险贡献权重（和为 1）。目标：各股风险贡献 RC_i = w_i·(Σw)_i 尽量相等。"""
+    n = cov.shape[0]
+    inv_vol = 1.0 / np.sqrt(np.diag(cov))
+    w0 = inv_vol / inv_vol.sum()          # 反比波动率作起点（通常已接近解）
+
+    def obj(w: np.ndarray) -> float:
+        rc = w * (cov @ w)
+        return float(np.sum((rc[:, None] - rc[None, :]) ** 2) * 1e6)  # 放大尺度便于收敛
+
+    res = minimize(
+        obj, w0, method="SLSQP",
+        bounds=[(1e-6, cap)] * n,
+        constraints=[{"type": "eq", "fun": lambda w: w.sum() - 1.0}],
+        options={"maxiter": 500, "ftol": 1e-12},
+    )
+    if not res.success or not np.all(np.isfinite(res.x)):
+        return None
+    w = np.clip(res.x, 0, None)
+    s = w.sum()
+    return w / s if s > 0 else None
+
+
+def _solve_min_variance(cov: np.ndarray, cap: float,
+                        industry_idx: list[list[int]], industry_cap: float) -> np.ndarray | None:
+    """最小方差权重（和为 1），含单票上限与行业上限（SLSQP 线性约束）。"""
+    n = cov.shape[0]
+    cons: list[dict] = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+    for idxs in industry_idx:
+        cons.append({"type": "ineq", "fun": (lambda ii: (lambda w: industry_cap - w[ii].sum()))(idxs)})
+    res = minimize(
+        lambda w: float(w @ cov @ w), np.ones(n) / n, method="SLSQP",
+        bounds=[(0.0, cap)] * n, constraints=cons,
+        options={"maxiter": 500, "ftol": 1e-12},
+    )
+    if not res.success or not np.all(np.isfinite(res.x)):
+        return None
+    w = np.clip(res.x, 0, None)
+    s = w.sum()
+    return w / s if s > 0 else None
+
+
+def _cov_based_sizing(signals: list[dict], engine: DataEngine, ref_date: str,
+                      solver, db_path: str | None = None,
+                      lookback: int = SIZING_LOOKBACK, cap: float = SIZING_MAX_CAP,
+                      industry_cap: float = SIZING_INDUSTRY_CAP,
+                      industry_constraint: bool = True) -> list[dict]:
+    """协方差类权重的公共外壳：估协方差 → 求解 → 归一化到"均值=1" → 写回 weight。
+
+    失败（数据不足/求解失败）一律回退等权（weight=1.0），并记 warning——
+    回退次数会在日志里可见，便于判断某臂是否"名不副实"。
+    """
+    n = len(signals)
+    if n < 3:
+        return signals  # 太少不值得优化（也与现有方法"<2 直接返回"一致）
+
+    symbols, cov, n_samples = _estimate_cov(signals, engine, ref_date, lookback)
+    if cov is None:
+        logger.warning(f"  组合优化: 协方差估计样本不足（{n} 只），回退等权")
+        for sig in signals:
+            sig.setdefault("weight", 1.0)
+        return signals
+
+    # 协方差矩阵的行序可能少于信号数（个别股数据不足被剔除）→ 只对有效股求解，其余等权
+    valid = [s for s in signals if s["symbol"] in symbols]
+    rest = [s for s in signals if s["symbol"] not in symbols]
+
+    industry_idx: list[list[int]] = []
+    if industry_constraint:
+        ind_map = _load_industry_map(db_path)
+        groups: dict[str, list[int]] = {}
+        for i, s in enumerate(valid):
+            ind = ind_map.get(s["symbol"], "")
+            if ind:
+                groups.setdefault(ind, []).append(i)
+        industry_idx = [v for v in groups.values() if len(v) > 1]
+
+    w = solver(cov, cap, industry_idx, industry_cap) if solver is _solve_min_variance \
+        else solver(cov, cap)
+    if w is None:
+        logger.warning("  组合优化: 求解失败，回退等权")
+        for sig in signals:
+            sig.setdefault("weight", 1.0)
+        return signals
+
+    m = len(valid)
+    for sig, wi in zip(valid, w):
+        sig["weight"] = round(float(wi) * m, 2)   # 和为 1 → 均值 1
+    for sig in rest:
+        sig.setdefault("weight", 1.0)
+    logger.info(f"  组合优化: n={m} 样本={n_samples}日 "
+                f"max_w={max(w):.1%} min_w={min(w):.1%}（和为1口径）")
+    return signals
+
+
+def risk_parity_sizing(signals: list[dict], engine: DataEngine, ref_date: str,
+                       db_path: str | None = None, lookback: int = SIZING_LOOKBACK,
+                       cap: float = SIZING_MAX_CAP) -> list[dict]:
+    """风险平价：让每只股票对组合风险的贡献相等（需协方差矩阵）。"""
+    return _cov_based_sizing(signals, engine, ref_date, _solve_risk_parity,
+                             db_path=db_path, lookback=lookback, cap=cap,
+                             industry_constraint=False)
+
+
+def min_variance_opt_sizing(signals: list[dict], engine: DataEngine, ref_date: str,
+                            db_path: str | None = None, lookback: int = SIZING_LOOKBACK,
+                            cap: float = SIZING_MAX_CAP,
+                            industry_cap: float = SIZING_INDUSTRY_CAP) -> list[dict]:
+    """真·最小方差：min wᵀΣw（含相关性 + 单票/行业上限约束）。"""
+    return _cov_based_sizing(signals, engine, ref_date, _solve_min_variance,
+                             db_path=db_path, lookback=lookback, cap=cap,
+                             industry_cap=industry_cap, industry_constraint=True)
+
+
+def apply_sizing(method: str, signals: list[dict], engine: DataEngine,
+                 ref_date: str | None = None, db_path: str | None = None) -> list[dict]:
+    """按名字应用一种分钱方法（A/B 实验用；生产默认不走这里，见 sizing_method 参数）。"""
+    if method == "equal":
+        for sig in signals:
+            sig["weight"] = 1.0
+        return signals
+    if method == "ic_weighted":
+        return ic_weighted_sizing(signals, len(signals))
+    if method == "inv_var":
+        return min_variance_sizing(signals, engine, ref_date or "", lookback=60)
+    if method == "risk_parity":
+        return risk_parity_sizing(signals, engine, ref_date or "", db_path=db_path)
+    if method == "min_variance":
+        return min_variance_opt_sizing(signals, engine, ref_date or "", db_path=db_path)
+    raise ValueError(f"sizing_method 必须是 equal/ic_weighted/inv_var/risk_parity/min_variance，收到 {method!r}")
+
+
+# ════════════════════════════════════════════════════════════
 #  月度回测引擎
 # ════════════════════════════════════════════════════════════
 
@@ -262,6 +477,11 @@ class MonthlyBacktestEngine:
                                          #   "none"(纯持有) | "hard_stop_only"(只留-8%) |
                                          #   "post_entry"(2026-09-27 D 臂: 动量规则**只读入场以来**的数据) |
                                          #   "none"(纯持有,月内不出场,仅月末清仓) | "hard_stop_only"(只留-8%硬止损护栏)
+        sizing_method: str | None = None,  # 2026-10-03（P0 方向一）：独立"分钱方法"开关，A/B 实验用。
+                                         #   None = 沿用 risk_mode 决定的权重（生产行为不变）；
+                                         #   "equal"=等权 | "ic_weighted"=排名递减 | "inv_var"=反比方差
+                                         #   | "risk_parity"=风险平价 | "min_variance"=真·最小方差（含相关性）。
+                                         #   设置后**覆盖** t3/IC 加权，用于"同一风控下只变权重"的对比。
     ):
         # 2026-09-27（审计 M2）：hard_stop_pct 语义是"负的止损比例"，但参数名不含方向，
         #   误传 +0.12 会得到 stop_level = entry×1.12 ⇒ 首次检查即全部清仓。加显式校验。
@@ -285,6 +505,12 @@ class MonthlyBacktestEngine:
         if eom_sell_price not in ("open", "close"):
             raise ValueError(f"eom_sell_price 必须是 open/close，收到 {eom_sell_price!r}")
         self.eom_sell_price = eom_sell_price
+        if sizing_method is not None and sizing_method not in (
+                "equal", "ic_weighted", "inv_var", "risk_parity", "min_variance"):
+            raise ValueError(
+                "sizing_method 必须是 None/equal/ic_weighted/inv_var/risk_parity/min_variance，"
+                f"收到 {sizing_method!r}")
+        self.sizing_method = sizing_method
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -468,6 +694,7 @@ class MonthlyBacktestEngine:
             # 4e. 生成月度信号
             signals = self._generate_monthly_signals(
                 predictions, market_state, risk_manager, vol_sizer,
+                ref_date=cycle.train_end_date,  # 组合优化的协方差只用"训练截止日"及之前（防前视）
             )
             logger.info(f"  信号: {len(signals)} 只 (原始 TOP_N={self.top_n})")
 
@@ -910,6 +1137,7 @@ class MonthlyBacktestEngine:
         market_state: dict,
         risk_manager=None,
         vol_sizer=None,
+        ref_date: str | None = None,
     ) -> list[dict]:
         """Rank 融合 → 选股 → 风控管线。
 
@@ -1027,6 +1255,16 @@ class MonthlyBacktestEngine:
             logger.info(
                 f"  市场状态仓位: {market_state.get('state', '?')} "
                 f"→ exposure={_exp:.0%}（渐进降仓）"
+            )
+
+        # 6.8 【2026-10-03 P0 方向一】独立"分钱方法"开关（A/B 实验用）
+        #   非 None 时**覆盖**上面由 risk_mode 决定的权重（t3 波动率/IC 加权）——
+        #   目的是在**同一套风控**下只变"每只买多少"这一个变量做对比。
+        #   默认 None = 完全沿用原行为（生产回测不受影响）。
+        if self.sizing_method and signals:
+            signals = apply_sizing(
+                self.sizing_method, signals, self.engine,
+                ref_date=ref_date, db_path=self._db_path,
             )
 
         # 7. 默认等权
