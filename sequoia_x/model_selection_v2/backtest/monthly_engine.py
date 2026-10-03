@@ -968,11 +968,12 @@ class MonthlyBacktestEngine:
         order = np.argsort(rank_scores)
         initial_top_n = self.top_n
 
-        # 市场状态降仓
+        # 市场状态降仓（2026-10-03 改为渐进式）
+        #   原实现: 只在 is_extreme 时 TOP_N 减半 —— ① 语义不符(减股票数≠降仓,
+        #   仍是满仓) ② 只在极端触发, 平时完全无效。
+        #   新实现: 不在此减 TOP_N, 改为把 advised_exposure(0.3~1.0) 作为
+        #   【总仓位系数】在下方统一写入信号, 由执行层按比例少买(留现金)。
         effective_top_n = initial_top_n
-        if self._use_market_state and market_state.get("is_extreme"):
-            effective_top_n = max(3, initial_top_n // 2)
-            logger.info(f"  极端市场降仓: TOP_N {initial_top_n}→{effective_top_n}")
 
         # 2. 构建信号
         signals = []
@@ -1016,6 +1017,18 @@ class MonthlyBacktestEngine:
         if self._use_ic_weight and signals:
             signals = ic_weighted_sizing(signals, effective_top_n)
 
+        # 6.5 【2026-10-03】市场状态 → 总仓位系数 exposure（M3/M5，渐进式降仓）
+        #   把 advised_exposure(0.3/0.5/0.7/1.0) 写入每个信号, 由执行层乘到买入金额上。
+        #   （若 vol_sizer 已设过 exposure, 值同源, setdefault 不覆盖）
+        if self._use_market_state and signals:
+            _exp = float(market_state.get("advised_exposure", 1.0))
+            for sig in signals:
+                sig.setdefault("exposure", round(_exp, 4))
+            logger.info(
+                f"  市场状态仓位: {market_state.get('state', '?')} "
+                f"→ exposure={_exp:.0%}（渐进降仓）"
+            )
+
         # 7. 默认等权
         for sig in signals:
             if "weight" not in sig:
@@ -1045,6 +1058,10 @@ class MonthlyBacktestEngine:
             if sym in self.positions:
                 continue
             weight = sig.get("weight", 1.0)
+            # 2026-10-03: 应用【总仓位系数 exposure】(来自市场状态 advised_exposure)。
+            #   原 bug: 只乘 weight, 把择时/降仓系数丢了 → M2/M3/M5 失效。
+            #   exposure<1 时按比例少买(留现金), 即"降仓"。
+            exposure = sig.get("exposure", 1.0)
 
             open_price = self._get_price(sym, buy_date, price_col="open")
             prev_close = self._get_price(sym, buy_date, price_col=None)  # 用 close 判断涨跌停
@@ -1069,7 +1086,8 @@ class MonthlyBacktestEngine:
             buy_price = open_price * (1 + SLIPPAGE)
 
             # 计算可买股数（整手）
-            available = budget_per_stock * weight
+            # 2026-10-03: × exposure（市场择时总仓位系数）——原缺失导致风控无效
+            available = budget_per_stock * weight * exposure
             shares = int(available / buy_price / 100) * 100
             if shares < 100:
                 continue

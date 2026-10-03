@@ -70,6 +70,7 @@ class VolatilitySizer:
             for sig in signals:
                 sig["weight"] = 1.0
                 sig["budget"] = round(base_budget * market_exposure, 2)
+                sig["exposure"] = round(float(market_exposure), 4)   # 见上方说明
             return signals
 
         # 1. 计算每只股票的波动率权重
@@ -100,6 +101,10 @@ class VolatilitySizer:
         for sig, w in zip(signals, weights):
             sig["weight"] = round(float(w), 2)
             sig["budget"] = round(float(base_budget * w * market_exposure), 2)
+            # 2026-10-03: 额外输出【总仓位系数】供执行层使用。
+            #   原 bug: 回测买入只用 weight(=波动率权重), 把 market_exposure(市场择时)
+            #   丢了 → M2/M3/M5 的择时/降仓从未生效(回测 M0=M2=M3=M5 的根源)。
+            sig["exposure"] = round(float(market_exposure), 4)
             sig["vol_pred"] = round(float(vols[len(sized)]), 4)
             sized.append(sig)
 
