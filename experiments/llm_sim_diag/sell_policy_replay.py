@@ -74,12 +74,13 @@ from sequoia_x.simulation.models import init_sim_tables  # noqa: E402
 
 logger = get_logger(__name__)
 
-# 四臂：名称 → rule_groups（None=全规则；S 硬止损恒开，见 rules.evaluate_exit）
+# 四臂：名称 → 配置（groups=None 表示全规则；S 硬止损恒开，见 rules.evaluate_exit）
+#   hard_stop_loss / sell_rules_mode 为 None 时用生产默认（-12% 硬止损、全规则）
 ARMS: dict[str, dict] = {
-    "A_all":          {"groups": None,               "note": "现状：全规则（硬止损/移动止盈/时间/死叉/夏普/相对弱势）"},
-    "B_hard_only":    {"groups": {"S"},              "note": "只留 -12% 硬止损（V2 的 E1 档）"},
-    "C_s_plus_d":     {"groups": {"S", "D"},         "note": "硬止损 + 20日时间止损（去掉 移动止盈/M/SH/R）"},
-    "D_s_t_d":        {"groups": {"S", "T", "D"},    "note": "硬止损 + 移动止盈 + 时间止损（去掉 M/SH/R）"},
+    "A_all":          {"groups": None,            "note": "现状：全规则（硬止损/移动止盈/时间/死叉/夏普/相对弱势）"},
+    "B_hard_only":    {"groups": {"S"},           "note": "只留 -12% 硬止损（V2 的 E1 档）"},
+    "C_s_plus_d":     {"groups": {"S", "D"},      "note": "硬止损 + 20日时间止损（去掉 移动止盈/M/SH/R）"},
+    "D_s_t_d":        {"groups": {"S", "T", "D"}, "note": "硬止损 + 移动止盈 + 时间止损（去掉 M/SH/R）"},
 }
 
 # ── 推送屏蔽（绝不发微信）────────────────────────────────
@@ -123,16 +124,23 @@ def build_arm_db(arm: str, signals: list[dict]) -> Path:
     return db
 
 
-def run_arm(arm: str, groups: set[str] | None, days: list[str], signals: list[dict]) -> dict:
-    """按日回放一个档位，返回账户曲线与交易统计。"""
+def run_arm(arm: str, cfg: dict, days: list[str], signals: list[dict]) -> dict:
+    """按日回放一个档位，返回账户曲线与交易统计。
+
+    cfg 键：groups（规则组，None=全部）/ hard_stop_loss（覆盖硬止损，None=生产 -12%）
+            / sell_rules_mode（"all"/"none"/"hard_stop_only"，None="all"）
+    """
     from functools import partial
 
     db = build_arm_db(arm, signals)
     settings = get_settings()
     # 引擎：行情读主库（settings.db_path），模拟盘状态写临时库（db_path）
-    sim = SimEngine(settings, db_path=str(db), push_tag="")
-    # 仅替换卖出规则集合（None=全部，行为与生产一致）
-    _eng.evaluate_exit = partial(_rules.evaluate_exit, rule_groups=groups)
+    sim = SimEngine(settings, db_path=str(db), push_tag="",
+                    sell_rules_mode=cfg.get("sell_rules_mode") or "all")
+    # 仅替换卖出规则集合 / 硬止损阈值（None=按默认，行为与生产一致）
+    _eng.evaluate_exit = partial(_rules.evaluate_exit,
+                                 rule_groups=cfg.get("groups"),
+                                 hard_stop_loss=cfg.get("hard_stop_loss"))
 
     for i, d in enumerate(days, 1):
         _FakeDate._current = _REAL_DATE.fromisoformat(d)
@@ -207,7 +215,7 @@ def main() -> int:
             print(f"未知臂: {k}")
             continue
         print(f"\n═══ 臂 {name} —— {ARMS[name]['note']} ═══")
-        results.append(run_arm(name, ARMS[name]["groups"], days, signals))
+        results.append(run_arm(name, ARMS[name], days, signals))
 
     # ── 汇总 ───────────────────────────────────────────────
     print("\n" + "=" * 96)
