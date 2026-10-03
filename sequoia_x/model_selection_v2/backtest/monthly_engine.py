@@ -1386,6 +1386,9 @@ class MonthlyBacktestEngine:
                 "total_return": 0.0, "annual_return": 0.0,
                 "sharpe": 0.0, "max_drawdown": 0.0,
                 "win_rate": 0.0, "n_months": 0, "n_trades": 0,
+                # 评估改进字段（占位，避免下游 KeyError）
+                "return_ex_top1": 0.0, "return_ex_top2": 0.0, "return_ex_top3": 0.0,
+                "top2_pnl_share": 0.0, "median_trade_pct": 0.0, "median_monthly_return": 0.0,
             }
 
         values = np.array([r["total_value"] for r in self.daily_records])
@@ -1428,6 +1431,25 @@ class MonthlyBacktestEngine:
         avg_win = np.mean([t.pnl for t in win_trades]) if win_trades else 0.0
         avg_loss = np.mean([t.pnl for t in lose_trades]) if lose_trades else 0.0
 
+        # ── 2026-10-03 评估改进：抗极端个例（诊断 2026-03 收益集中问题）──
+        #   动机：总收益易被极少数"连续涨停"个股主导(实测 2026 年回测中前2只占 50% 盈亏)。
+        #   下列指标衡量"去掉极端个例后还剩多少"，用于判断收益的**可复制性**。
+        _pnls = np.array([t.pnl for t in sells], dtype=float) if sells else np.array([])
+        _pnl_pcts = np.array(
+            [t.pnl / (t.amount - t.pnl) for t in sells if (t.amount - t.pnl) > 0], dtype=float
+        ) if sells else np.array([])
+        _total_pnl = float(_pnls.sum()) if _pnls.size else 0.0
+        _desc = np.sort(_pnls)[::-1] if _pnls.size else np.array([])
+        # 剔除贡献最大的 1/2/3 只后的总盈亏（÷初始资金 = 相应收益率）
+        ex_top1 = float(_desc[1:].sum()) if _desc.size > 1 else 0.0
+        ex_top2 = float(_desc[2:].sum()) if _desc.size > 2 else 0.0
+        ex_top3 = float(_desc[3:].sum()) if _desc.size > 3 else 0.0
+        # 收益集中度：前 2 只占总盈亏比例（越高越依赖极端个例）
+        top2_share = float(_desc[:2].sum() / _total_pnl) if abs(_total_pnl) > 1e-9 else 0.0
+        # 单笔收益中位数（抗极端）与月度收益中位数
+        median_trade_pct = float(np.median(_pnl_pcts)) if _pnl_pcts.size else 0.0
+        median_monthly = float(np.median(self.monthly_returns)) if self.monthly_returns else 0.0
+
         return {
             "total_return": round(total_return, 4),
             "annual_return": round(annual_return, 4),
@@ -1442,6 +1464,13 @@ class MonthlyBacktestEngine:
             "win_trade_pct": round(len(win_trades) / len(sells), 4) if sells else 0.0,
             "avg_win": round(avg_win, 2),
             "avg_loss": round(avg_loss, 2),
+            # ── 评估改进（抗极端个例）──
+            "return_ex_top1": round(ex_top1 / initial, 4),   # 剔除最赚1只后的收益率
+            "return_ex_top2": round(ex_top2 / initial, 4),   # 剔除最赚2只后
+            "return_ex_top3": round(ex_top3 / initial, 4),   # 剔除最赚3只后
+            "top2_pnl_share": round(top2_share, 4),          # 前2只占总盈亏比(集中度)
+            "median_trade_pct": round(median_trade_pct, 4),  # 单笔收益中位数
+            "median_monthly_return": round(median_monthly, 4),  # 月度收益中位数
             "final_value": round(self.cash, 2),
             "daily_records": self.daily_records,
             "monthly_returns": [round(r, 4) for r in self.monthly_returns],
