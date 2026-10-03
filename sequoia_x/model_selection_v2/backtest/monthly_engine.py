@@ -296,6 +296,9 @@ def _estimate_cov(signals: list[dict], engine: DataEngine, ref_date: str,
 def _solve_risk_parity(cov: np.ndarray, cap: float) -> np.ndarray | None:
     """等风险贡献权重（和为 1）。目标：各股风险贡献 RC_i = w_i·(Σw)_i 尽量相等。"""
     n = cov.shape[0]
+    # 可行性保护：n × cap 必须 ≥ 1，否则约束无解（如 N=2 时 cap=0.15 ⇒ 最多 0.30 < 1）。
+    #   取 max(cap, 1/n)：N 小的时候退化为"必满仓、上限≈均分"，不改变大 N 的行为。
+    cap = max(cap, 1.0 / n + 1e-9)
     inv_vol = 1.0 / np.sqrt(np.diag(cov))
     w0 = inv_vol / inv_vol.sum()          # 反比波动率作起点（通常已接近解）
 
@@ -320,6 +323,7 @@ def _solve_min_variance(cov: np.ndarray, cap: float,
                         industry_idx: list[list[int]], industry_cap: float) -> np.ndarray | None:
     """最小方差权重（和为 1），含单票上限与行业上限（SLSQP 线性约束）。"""
     n = cov.shape[0]
+    cap = max(cap, 1.0 / n + 1e-9)   # 可行性保护，同 _solve_risk_parity
     cons: list[dict] = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
     for idxs in industry_idx:
         cons.append({"type": "ineq", "fun": (lambda ii: (lambda w: industry_cap - w[ii].sum()))(idxs)})
@@ -408,8 +412,14 @@ def min_variance_opt_sizing(signals: list[dict], engine: DataEngine, ref_date: s
 
 
 def apply_sizing(method: str, signals: list[dict], engine: DataEngine,
-                 ref_date: str | None = None, db_path: str | None = None) -> list[dict]:
-    """按名字应用一种分钱方法（A/B 实验用；生产默认不走这里，见 sizing_method 参数）。"""
+                 ref_date: str | None = None, db_path: str | None = None,
+                 params: dict | None = None) -> list[dict]:
+    """按名字应用一种分钱方法（A/B 实验用；生产默认不走这里，见 sizing_method 参数）。
+
+    params: 可选覆盖 {"lookback": int, "cap": float, "industry_cap": float}
+            （参数敏感性实验用；不传则用 SIZING_* 默认）。
+    """
+    p = params or {}
     if method == "equal":
         for sig in signals:
             sig["weight"] = 1.0
@@ -417,11 +427,17 @@ def apply_sizing(method: str, signals: list[dict], engine: DataEngine,
     if method == "ic_weighted":
         return ic_weighted_sizing(signals, len(signals))
     if method == "inv_var":
-        return min_variance_sizing(signals, engine, ref_date or "", lookback=60)
+        return min_variance_sizing(signals, engine, ref_date or "",
+                                   lookback=p.get("lookback", 60))
     if method == "risk_parity":
-        return risk_parity_sizing(signals, engine, ref_date or "", db_path=db_path)
+        return risk_parity_sizing(signals, engine, ref_date or "", db_path=db_path,
+                                  lookback=p.get("lookback", SIZING_LOOKBACK),
+                                  cap=p.get("cap", SIZING_MAX_CAP))
     if method == "min_variance":
-        return min_variance_opt_sizing(signals, engine, ref_date or "", db_path=db_path)
+        return min_variance_opt_sizing(signals, engine, ref_date or "", db_path=db_path,
+                                       lookback=p.get("lookback", SIZING_LOOKBACK),
+                                       cap=p.get("cap", SIZING_MAX_CAP),
+                                       industry_cap=p.get("industry_cap", SIZING_INDUSTRY_CAP))
     raise ValueError(f"sizing_method 必须是 equal/ic_weighted/inv_var/risk_parity/min_variance，收到 {method!r}")
 
 
@@ -482,6 +498,8 @@ class MonthlyBacktestEngine:
                                          #   "equal"=等权 | "ic_weighted"=排名递减 | "inv_var"=反比方差
                                          #   | "risk_parity"=风险平价 | "min_variance"=真·最小方差（含相关性）。
                                          #   设置后**覆盖** t3/IC 加权，用于"同一风控下只变权重"的对比。
+        sizing_params: dict | None = None,  # {"lookback":120, "cap":0.15, "industry_cap":0.30}
+                                         #   参数敏感性实验用；None=用 SIZING_* 默认常量。
     ):
         # 2026-09-27（审计 M2）：hard_stop_pct 语义是"负的止损比例"，但参数名不含方向，
         #   误传 +0.12 会得到 stop_level = entry×1.12 ⇒ 首次检查即全部清仓。加显式校验。
@@ -511,6 +529,7 @@ class MonthlyBacktestEngine:
                 "sizing_method 必须是 None/equal/ic_weighted/inv_var/risk_parity/min_variance，"
                 f"收到 {sizing_method!r}")
         self.sizing_method = sizing_method
+        self.sizing_params = sizing_params or {}
         self.rolling_ics: list[dict] = []  # 滚动 IC 历史 [{month, t2_ic, t4_ic}]
 
         # 解析风控模式
@@ -1264,7 +1283,7 @@ class MonthlyBacktestEngine:
         if self.sizing_method and signals:
             signals = apply_sizing(
                 self.sizing_method, signals, self.engine,
-                ref_date=ref_date, db_path=self._db_path,
+                ref_date=ref_date, db_path=self._db_path, params=self.sizing_params,
             )
 
         # 7. 默认等权

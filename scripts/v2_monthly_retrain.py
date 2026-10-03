@@ -347,6 +347,40 @@ def push_recommendation(target_month: str, pred_info: dict) -> None:
         logger.warning(f"V4 荐股推送失败: {e}")
 
 
+def _compute_buy_weights(buy_list: list[str]) -> list[float] | None:
+    """按 `config.BUY_WEIGHT_METHOD` 计算目标权重（2026-10-03，P0 方向一）。
+
+    口径与回测一致：**均值 1**（每只买入金额 = 基准预算 × 权重）。
+    返回 None = 不启用/计算失败 → 调用方按等权处理（老行为，绝不阻塞信号入库）。
+    参考数据只用**主库最新日期及之前**（= 本次训练截止日），无前视。
+    """
+    from sequoia_x.simulation.config import BUY_WEIGHT_METHOD, BUY_WEIGHT_PARAMS
+    if not BUY_WEIGHT_METHOD:
+        logger.info("BUY_WEIGHT_METHOD 为空 → 按等权提交信号（旧行为）")
+        return None
+    try:
+        import sqlite3
+        from sequoia_x.data.engine import DataEngine
+        from sequoia_x.model_selection_v2.backtest.monthly_engine import apply_sizing
+
+        settings = get_settings()
+        with sqlite3.connect(settings.db_path) as conn:
+            ref = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()[0]
+        sigs = apply_sizing(
+            BUY_WEIGHT_METHOD,
+            [{"symbol": s, "rank": i + 1} for i, s in enumerate(buy_list)],
+            DataEngine(settings), ref_date=ref, db_path=settings.db_path,
+            params=BUY_WEIGHT_PARAMS,
+        )
+        weights = [float(s.get("weight", 1.0)) for s in sigs]
+        logger.info(f"目标权重[{BUY_WEIGHT_METHOD}] ref={ref}: "
+                    + " ".join(f"{s['symbol']}={s['weight']}" for s in sigs))
+        return weights
+    except Exception as e:
+        logger.exception(f"目标权重计算失败，回退等权（不影响信号入库）: {e}")
+        return None
+
+
 def main() -> None:
     import time as _time
     t_main = _time.time()
@@ -402,12 +436,18 @@ def main() -> None:
                 f"T2 头部均值={pred_info.get('t2_mean_top', 0):+.2%} | "
                 f"T4 头部均值={pred_info.get('t4_mean_top', 0):+.2%}")
 
+    # ── Step3.5: 目标权重（2026-10-03，P0 方向一"分钱方法"）──
+    # 依据：69 个月回测，最小方差 > 等权（等权最差），见 docs/2026-10-03_P0实施记录 §七。
+    # 失败/未启用 → None → 等权（旧行为），不影响信号入库。
+    buy_weights = _compute_buy_weights(buy_list)
+
     # ── Step4: 信号入库 sim_v2.db（strategy_from="V2"）──
     n = submit_buy_signals(
         db_path=SIM_V2_DB,
         symbols=buy_list,
         strategy_name="V2",
         top_n=TOP_N_BUY,
+        weights=buy_weights,
     )
     logger.info(f"V4 买入信号已写入 sim_v2.db: {n} 条")
 

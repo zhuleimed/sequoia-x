@@ -101,6 +101,7 @@ class SimEngine:
         allow_same_day: bool = False,
         push_tag: str = "",
         equal_weight_cash: bool = False,
+        use_weights: bool = True,
         sell_rules_mode: str = "all",
         sell_rules_until: str | None = None,
     ) -> None:
@@ -115,6 +116,10 @@ class SimEngine:
         #   随账户资金放大(如 100万→200万 时每只预算同步放大), 避免固定预算导致的
         #   末只超额/资金闲置。仅 V4(sim_v2.db) 开启; LLM 模拟盘默认 False 保持原逻辑。
         self.equal_weight_cash = equal_weight_cash
+        # 2026-10-03（P0 方向一）：是否按信号携带的 target_weight 分配买入预算。
+        #   默认 True 但**只在信号确实带权重时生效**（NULL→按 1.0 处理 = 等权），
+        #   故对老信号完全无影响；需要"一键回纯等权"时传 use_weights=False。
+        self.use_weights = use_weights
         # V4 专用：True 时当日信号当日执行（重训信号凌晨产生，交易日当晚以当日开盘价买入；
         # LLM 模拟盘默认 False=严格 T+1 不变）
         self.allow_same_day = allow_same_day
@@ -444,15 +449,27 @@ class SimEngine:
 
             if _ew_budget is not None:
                 # V4 等权满仓: 每只预算 = 均摊预算(min 当前现金), 随账户资金放大
-                budget = min(_ew_budget, cash_balance)
+                base_budget = min(_ew_budget, cash_balance)
             else:
                 # 原逻辑: 每只固定预算上限
-                budget = min(_PER_BUDGET, cash_balance)
+                base_budget = min(_PER_BUDGET, cash_balance)
+            # 2026-10-03（P0 方向一）：按信号携带的目标权重分配预算。
+            #   · target_weight 为 NULL（老数据 / 未启用）→ 权重 1.0 = 等权，行为与历史**完全一致**
+            #   · 口径与回测一致（均值 1）：每只预算 = 基准预算 × 权重
+            #   · 回滚开关：SimEngine(use_weights=False) → 忽略权重，回纯等权
+            _w = signal.get("target_weight")
+            if not self.use_weights or _w is None or _w <= 0:
+                _w = 1.0
+            budget = min(base_budget * _w, cash_balance)
             buy_price = open_price * (1 + SLIPPAGE)
             max_shares = int(budget // buy_price // 100) * 100
 
             if max_shares <= 0:
-                cancel_reason = f"资金不足（预算{budget:.0f}，不够1手）"
+                if _w == 0:
+                    # 组合优化给 0 权重 = 明确"不买这只"（回测同口径：预算 0 自然买不进）
+                    cancel_reason = "组合优化权重为0（不买入）"
+                else:
+                    cancel_reason = f"资金不足（预算{budget:.0f}，不够1手）"
                 mark_signal_cancelled(self.db_path, signal["id"], cancel_reason)
                 cancelled.append({"symbol": sym, "reason": cancel_reason})
                 continue

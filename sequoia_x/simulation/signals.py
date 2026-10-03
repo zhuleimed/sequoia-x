@@ -328,6 +328,7 @@ def submit_buy_signals(
     symbols: list[str],
     strategy_name: str = "自定义策略",
     top_n: int = 2,
+    weights: Optional[list[float]] = None,
 ) -> int:
     """【公开接口】任意策略直接向模拟盘提交买入信号。
 
@@ -386,8 +387,13 @@ def submit_buy_signals(
         logger.info("submit_buy_signals: 全部去重跳过，无新信号")
         return 0
 
+    # 目标权重（2026-10-03，P0 方向一）：weights 与 symbols **按下标对应**，
+    #   口径=均值 1（每只预算 = 基准预算 × 权重）；None 或不传 = 等权（老行为）。
+    #   去重后下标会错位，故先建 symbol→weight 映射再取。
+    wmap = ({s: w for s, w in zip(symbols, weights)} if weights else {})
     signals = [
-        {"symbol": s, "strategy_from": strategy_name, "llm_score": None}
+        {"symbol": s, "strategy_from": strategy_name, "llm_score": None,
+         "target_weight": wmap.get(s)}
         for s in deduped
     ]
 

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS sim_buy_signals (
     symbol        TEXT    NOT NULL,
     strategy_from TEXT    NOT NULL DEFAULT '',
     llm_score     REAL,
+    target_weight REAL,
     buy_date      TEXT    NOT NULL,
     status        TEXT    NOT NULL DEFAULT 'pending'
                         CHECK(status IN ('pending','executed','cancelled')),
@@ -121,6 +122,9 @@ def init_sim_tables(db_path: str) -> None:
         for col_sql in [
             "ALTER TABLE sim_positions ADD COLUMN pending_sell_reason TEXT",
             "ALTER TABLE sim_positions ADD COLUMN llm_override_count INTEGER DEFAULT 0",
+            # 2026-10-03（P0 方向一）：目标权重。NULL = 等权（老信号/未启用，行为不变）；
+            # 口径与回测一致 = 均值 1（每只预算 = 基准预算 × target_weight）。
+            "ALTER TABLE sim_buy_signals ADD COLUMN target_weight REAL",
         ]:
             try:
                 conn.execute(col_sql)
@@ -144,13 +148,18 @@ def init_sim_tables(db_path: str) -> None:
 
 
 def insert_buy_signal(db_path: str, symbol: str, strategy_from: str,
-                      llm_score: Optional[float] = None) -> Optional[int]:
-    """写入一条买入信号，返回 id。"""
+                      llm_score: Optional[float] = None,
+                      target_weight: Optional[float] = None) -> Optional[int]:
+    """写入一条买入信号，返回 id。
+
+    target_weight（2026-10-03 P0 方向一）：目标权重，均值 1 口径；None = 等权。
+    """
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
-            "INSERT INTO sim_buy_signals (symbol, strategy_from, llm_score, buy_date, status) "
-            "VALUES (?, ?, ?, ?, 'pending')",
-            (symbol, strategy_from, llm_score, date.today().isoformat()),
+            "INSERT INTO sim_buy_signals "
+            "(symbol, strategy_from, llm_score, target_weight, buy_date, status) "
+            "VALUES (?, ?, ?, ?, ?, 'pending')",
+            (symbol, strategy_from, llm_score, target_weight, date.today().isoformat()),
         )
         conn.commit()
         return cur.lastrowid
@@ -183,9 +192,11 @@ def insert_buy_signals_batch(db_path: str, signals: list[dict]) -> int:
             if dup:
                 continue
             conn.execute(
-                "INSERT INTO sim_buy_signals (symbol, strategy_from, llm_score, buy_date, status) "
-                "VALUES (?, ?, ?, ?, 'pending')",
-                (s["symbol"], s.get("strategy_from", ""), s.get("llm_score"), today_str),
+                "INSERT INTO sim_buy_signals "
+                "(symbol, strategy_from, llm_score, target_weight, buy_date, status) "
+                "VALUES (?, ?, ?, ?, ?, 'pending')",
+                (s["symbol"], s.get("strategy_from", ""), s.get("llm_score"),
+                 s.get("target_weight"), today_str),
             )
             count += 1
         conn.commit()
@@ -211,7 +222,8 @@ def get_pending_signals(db_path: str, target_date: Optional[str] = None,
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, symbol, strategy_from, llm_score, buy_date FROM sim_buy_signals "
+            "SELECT id, symbol, strategy_from, llm_score, target_weight, buy_date "
+            "FROM sim_buy_signals "
             f"WHERE status = 'pending' AND buy_date {'<=' if allow_same_day else '<'} ? "
             "ORDER BY llm_score IS NOT NULL DESC, llm_score DESC, buy_date ASC, id ASC",
             (target_date,),
