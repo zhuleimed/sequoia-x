@@ -383,6 +383,7 @@ def evaluate_exit(
     day_open: Optional[float] = None,
     only_hard_stop: bool = False,
     hard_stop_loss: Optional[float] = None,
+    rule_groups: Optional[set[str]] = None,
 ) -> ExitRuleResult:
     """对单只持仓进行全维度卖出评分。
 
@@ -408,6 +409,10 @@ def evaluate_exit(
             完成后立即 return，跳过 T/D/M/SH/R/LSTM 月内动量规则——供
             "买满N只 → 持有到月末，仅保留 -12% 极值回撤护栏" 的换仓策略变体使用。
             默认 False 全规则评估，不改其它策略行为（LLM sim 等）。
+        rule_groups (v1.6, 2026-10-03): 允许参与评分的非 S 规则组集合，如 {"S","D"}。
+            None = 全部规则（默认，行为与历史一致）；S 硬止损恒开。用于风控档位
+            A/B 回放（见 experiments/llm_sim_diag/sell_policy_replay.py），
+            生产路径当前均未使用（V2 盘走 only_hard_stop，LLM 盘走默认全规则）。
 
     Returns:
         ExitRuleResult。
@@ -437,50 +442,55 @@ def evaluate_exit(
 
     # v1.5: only_hard_stop —— S1(现 -12%) 已穿透(上面早return)；S2 -5% 预警(40分)也一并按硬止损一档评估，
     # 交给下方 should_exit(≥60) + _check_min_hold 兜底（40<60 不会触发，天然满足"仅 S1 才杀"）。
-    if only_hard_stop:
-        should_exit = total_score >= SELL_THRESHOLD
-        if should_exit and _check_min_hold(hold_days, total_score):
-            should_exit = False
-        if should_exit:
-            return ExitRuleResult(should_exit=True, reason=reason,
-                                  score=total_score, breakdown=breakdown)
-        return ExitRuleResult(should_exit=False, score=total_score, breakdown=breakdown)
+    # v1.6 (2026-10-03): 通用化为 rule_groups —— 允许参与评分的非 S 规则组集合
+    #   （"T"移动止盈 / "D"时间止损 / "M"均线死叉 / "SH"夏普 / "R"相对弱势 / "LSTM"因子）。
+    #   None = 全部规则（默认，行为与历史完全一致）；only_hard_stop=True 等价于 {"S"}（旧调用兼容）。
+    #   S 硬止损**恒开**（所有档位都保留），rule_groups 只控制其余规则。
+    #   用途：模拟盘风控档位对比（如 "S+D"、"S+T+D" 去掉动量规则），见
+    #   docs/2026-10-03_LLM策略变更记录.md §五。
+    if only_hard_stop and rule_groups is None:
+        rule_groups = {"S"}
+
+    def _enabled(group: str) -> bool:
+        return rule_groups is None or group in rule_groups
 
     # ── T 移动止盈 ──
-    score, reason = _check_trailing_stop(entry_price, current_price, highest_price)
-    if score > 0:
-        breakdown.append((f"T(移动止盈)", score))
-        total_score += score
+    if _enabled("T"):
+        score, reason = _check_trailing_stop(entry_price, current_price, highest_price)
+        if score > 0:
+            breakdown.append((f"T(移动止盈)", score))
+            total_score += score
 
     # ── D 时间止损 ──
-    score, reason = _check_hold_days(hold_days)
-    if score > 0:
-        breakdown.append((f"D(持仓天数)", score))
-        total_score += score
+    if _enabled("D"):
+        score, reason = _check_hold_days(hold_days)
+        if score > 0:
+            breakdown.append((f"D(持仓天数)", score))
+            total_score += score
 
     # ── M 均线死叉 ──
-    if symbol_df is not None:
+    if symbol_df is not None and _enabled("M"):
         score, reason = _check_ma_death_cross(symbol_df)
         if score > 0:
             breakdown.append((f"M(均线死叉)", score))
             total_score += score
 
     # ── SH 夏普率 ──
-    if symbol_df is not None and not symbol_df.empty:
+    if symbol_df is not None and not symbol_df.empty and _enabled("SH"):
         score, reason = _check_sharpe(symbol_df["close"])
         if score > 0:
             breakdown.append((f"SH(夏普率)", score))
             total_score += score
 
     # ── R 相对弱势 ──
-    if symbol_df is not None and index_df is not None:
+    if symbol_df is not None and index_df is not None and _enabled("R"):
         score, reason = _check_relative_strength(symbol_df["close"], index_df["close"])
         if score > 0:
             breakdown.append((f"R(相对弱势)", score))
             total_score += score
 
     # ── LSTM 预测因子 (v1.3) ──
-    if symbol:
+    if symbol and _enabled("LSTM"):
         score, reason = _check_lstm_factor(symbol)
         if score != 0:
             breakdown.append(("LSTM因子", score))
