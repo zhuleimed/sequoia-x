@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -45,6 +46,7 @@ from sequoia_x.simulation.config import (
     STAMP_TAX_RATE,
     SLIPPAGE,
     INDEX_SYMBOL,
+    HARD_STOP_LOSS,
 )
 from sequoia_x.simulation.models import (
     init_sim_tables,
@@ -136,7 +138,27 @@ class SimEngine:
             raise ValueError(f"sell_rules_mode 必须是 all/none/hard_stop_only, 收到 {sell_rules_mode!r}")
         self.sell_rules_mode = sell_rules_mode
         self.sell_rules_until = sell_rules_until
+        self._log_sell_policy()   # 启动自检：把本实例的卖出档位打进日志（2026-10-04 用户要求）
         init_sim_tables(self.db_path)
+
+    def _log_sell_policy(self) -> None:
+        """启动自检：打印本实例的"月内卖出档位"，防止档位被误改而不自知。
+
+        背景（2026-10-04 用户要求）：V4 盘 = 只留硬止损（用户 09-05 拍板），
+        LLM 盘 = 全规则（有意保留）——**两个盘档位不同**，必须一眼能分清。
+        账户与库文件一一对应，故把库名写进同一行，避免看日志时混淆。
+        每次模拟盘运行（pipeline 每晚都会新建引擎）都会打印这一行，可直接 grep 校验。
+        """
+        if self.sell_rules_mode == "hard_stop_only":
+            detail = "只留硬止损（动量规则/死叉/夏普/相对弱势 全部停用）"
+        elif self.sell_rules_mode == "none":
+            detail = "完全不止损（纯持有到月末清仓）"
+        else:
+            detail = "全规则（硬止损/移动止盈/时间/死叉/夏普/相对弱势/LSTM，评分≥60卖出）"
+        logger.info(
+            f"卖出档位自检 [{Path(self.db_path).name}] mode={self.sell_rules_mode} | "
+            f"硬止损={HARD_STOP_LOSS:.0%} | 冻结截止={self.sell_rules_until or '长期'} | {detail}"
+        )
 
     def _push_trade_report(self, trade: dict) -> None:
         """推送交易报告（带分组序号前缀）。"""
