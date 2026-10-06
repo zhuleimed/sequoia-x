@@ -6,9 +6,11 @@
   y3: 20日日收益率年化波动率（回归，用于风险度量）
 """
 from __future__ import annotations
+import os
+import sqlite3
+
 import numpy as np
 import pandas as pd
-import sqlite3
 from datetime import datetime
 from sequoia_x.data.engine import DataEngine
 from sequoia_x.core.logger import get_logger
@@ -21,7 +23,13 @@ from sequoia_x.model_selection_v2.index_source import load_index_close_forward
 # 取 60 > 采集刷新窗口 40（v2_monthly_retrain Step0 --refresh-days 40），留安全边界。
 REUSE_SAFE_DAYS: int = 60
 # 当前特征版本（同时用于缓存 hash key 与复用判据，**两处必须一致**）
-FEATURE_VERSION: int = 5
+#
+# 2026-10-06 V6-A 实验：默认 5（生产不变）；设 FEATURE_V6_THS_FINANCE=1 时 →
+# 6（启用 ths_finance 组，129+5=134 维）。开关实现见
+# features_extra/build_extra_features.py::ths_finance_enabled()。
+# ★ 版本号进缓存 hash key，故 v5/v6 缓存**并存不覆盖**，可随时回跑对照。
+_E5 = os.environ.get("FEATURE_V6_THS_FINANCE") == "1"
+FEATURE_VERSION: int = 6 if _E5 else 5
 
 logger = get_logger(__name__)
 

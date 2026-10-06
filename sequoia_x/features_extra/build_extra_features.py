@@ -394,6 +394,100 @@ def _limit_up_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 # ════════════════════════════════════════════════════════════
+#  同花顺财务质量维度（V6-A 实验，2026-10-06）
+# ════════════════════════════════════════════════════════════
+#
+#  背景：004 原有 16 维财务特征偏「盈利/偿债/营运」的**规模与水平**；
+#        本组补的是「**质量**」——赚的是不是真钱、收入的现金转化、研发投入强度。
+#
+#  ★ 门控（重要）：本组受环境变量 FEATURE_V6_THS_FINANCE=1 控制才启用。
+#     原因：`groups = groups or list(FEATURE_GROUPS.keys())` 会**默认启用全部组**，
+#     若不加门控，仅"注册"就会静默改变生产行为（见 _default_groups()）。
+#
+#  ★ asof 口径：**绝不能用同花顺的 report_date_ms**（实测系统性晚一年，
+#     茅台 2023 年报真实披露 2024-04-03、接口返回 2025-04-03）。
+#     沿用 _disclose_date() 的保守法定披露日兜底。
+#
+#  数据源：data/extra_features/finance_ths_v2/{indicators,income}/{code}.parquet
+#         （023_THS 于 2026-10-06 采集，覆盖 2012 起、2020 后非空率 100%）
+
+THS_FIN_DIR = EXTRA_DIR / "finance_ths_v2"
+
+# 同花顺指标报告期编码 → 报告期末日期（"2025-3" → "2025-09-30"）
+_THS_Q_END = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
+
+
+def _ths_report_end(rep: str) -> str:
+    """'2025-3' → '2025-09-30'"""
+    y, q = str(rep).split("-")
+    return f"{y}-{_THS_Q_END[q]}"
+
+
+@lru_cache(maxsize=2048)
+def _load_ths_fin(sub: str, code: str) -> pd.DataFrame | None:
+    """读取 finance_ths_v2 的子目录（indicators / income）。
+
+    注意：该目录**嵌套两层**，与 _load() 的 {subset}/{code}.parquet 结构不同，
+    故单独实现。lru_cache 与 _load 同理（同股票被反复调用）。
+    """
+    fp = THS_FIN_DIR / sub / f"{code}.parquet"
+    if not fp.exists():
+        return None
+    try:
+        return pd.read_parquet(fp)
+    except Exception:
+        return None
+
+
+def _ths_finance_features(code: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """同花顺财务质量 5 维：现金流质量 4 项 + 研发强度 1 项。
+
+    全部按【法定披露日】asof 前向填充，缺失 fillna(0)（与 004 惯例一致，
+    保证固定列数契约）。
+    """
+    cols = _EMPTY_COLS["ths_finance"]
+    empty = pd.DataFrame(index=dates, columns=cols, dtype=float)
+
+    parts: list[pd.DataFrame] = []
+
+    # ── ① 现金流质量 4 项（来自 indicators，接口给的是百分数 → /100）──
+    ind = _load_ths_fin("indicators", code)
+    if ind is not None and len(ind) and "report" in ind.columns:
+        ev = pd.DataFrame({
+            "avail": [_disclose_date(_ths_report_end(r)) for r in ind["report"]],
+            "fin_ths_cash_quality": pd.to_numeric(
+                ind.get("net_profit_cash_content"), errors="coerce") / 100.0,
+            "fin_ths_cash_sales": pd.to_numeric(
+                ind.get("operating_cash_flow_net_divide_income"), errors="coerce") / 100.0,
+            "fin_ths_cash_index": pd.to_numeric(
+                ind.get("cash_operating_index"), errors="coerce") / 100.0,
+            "fin_ths_cash_invest": pd.to_numeric(
+                ind.get("cash_meet_invest_ratio"), errors="coerce") / 100.0,
+        })
+        parts.append(_asof_align(dates, ev, "avail", cols[:4]))
+
+    # ── ② 研发强度 = 研发费用 / 营业收入（来自利润表）──
+    inc = _load_ths_fin("income", code)
+    if inc is not None and len(inc) and "period_end_ms" in inc.columns:
+        rd = pd.to_numeric(inc.get("research_and_development_expenses"), errors="coerce")
+        oi = pd.to_numeric(inc.get("operating_income"), errors="coerce")
+        ratio = rd / oi.replace(0, np.nan)
+        ends = pd.to_datetime(inc["period_end_ms"], unit="ms", utc=True,
+                              errors="coerce").dt.tz_convert("Asia/Shanghai")
+        ev2 = pd.DataFrame({
+            "avail": [_disclose_date(d.strftime("%Y-%m-%d")) if pd.notna(d) else None
+                      for d in ends],
+            "fin_ths_rd_intensity": ratio,
+        })
+        parts.append(_asof_align(dates, ev2, "avail", ["fin_ths_rd_intensity"]))
+
+    if not parts:
+        return empty
+    out = pd.concat(parts, axis=1).reindex(columns=cols)
+    return out.fillna(0.0)
+
+
+# ════════════════════════════════════════════════════════════
 #  主入口
 # ════════════════════════════════════════════════════════════
 
@@ -411,6 +505,10 @@ FEATURE_GROUPS = {
     #   特征对 99%+ 股票恒 0 → 无信息量（数据源本身是稳定 Top30 榜）
     "dragon_tiger": _dragon_tiger_features,
     "limit_up": _limit_up_features,
+    # 2026-10-06 V6-A 实验组：同花顺财务质量 5 维
+    #   ★ 默认【不启用】—— 必须设 FEATURE_V6_THS_FINANCE=1 才生效，
+    #     门控见下方 _default_groups()（否则注册即生效，会静默改生产行为）
+    "ths_finance": _ths_finance_features,
 }
 
 # 各组固定列名模板（异常兜底时全 0 填充, 保证输出恒 33 列 → 拼接维度一致）
@@ -428,7 +526,33 @@ _EMPTY_COLS = {
     "xdxr": ["xd_yield", "xd_div_cnt_3y", "xd_song_cnt_3y"],
     "dragon_tiger": ["dt_net_buy", "dt_net_rate", "dt_cnt_30d"],
     "limit_up": ["lu_lianban", "lu_seal", "lu_cnt_30d"],
+    # V6-A 实验组（默认不启用，见 _default_groups）
+    "ths_finance": ["fin_ths_cash_quality", "fin_ths_cash_sales",
+                    "fin_ths_cash_index", "fin_ths_cash_invest",
+                    "fin_ths_rd_intensity"],
 }
+
+# ★ V6-A 实验开关：不设/≠1 时，ths_finance 组完全不参与，行为与 V5 逐位一致
+THS_FINANCE_ENV = "FEATURE_V6_THS_FINANCE"
+
+
+def ths_finance_enabled() -> bool:
+    """V6-A 实验组是否启用（默认 False = 生产行为不变）"""
+    return os.environ.get(THS_FINANCE_ENV) == "1"
+
+
+def _default_groups() -> list[str]:
+    """默认启用的特征组。
+
+    ★ 为什么需要这个函数：原实现是 `groups = groups or list(FEATURE_GROUPS.keys())`，
+      意味着**只要往 FEATURE_GROUPS 里注册新组，它就会立刻被所有调用方用上**，
+      无需任何显式开启 —— 等于"加个组"就静默改了生产行为。
+      本函数把实验组从默认集中排除，只在其环境变量显式开启时才加入。
+    """
+    gs = [g for g in FEATURE_GROUPS if not g.startswith("ths_")]
+    if ths_finance_enabled():
+        gs += [g for g in FEATURE_GROUPS if g.startswith("ths_")]
+    return gs
 
 
 def _zero_features(group: str, dates: pd.DatetimeIndex) -> pd.DataFrame:
@@ -462,7 +586,7 @@ def build_extra_with_flag(dates: pd.DatetimeIndex, close: pd.Series,
         (features_df, incomplete, coverage)
         incomplete=True → 关键数据面覆盖率 < 阈值, 训练/预测端应剔除该股票
     """
-    groups = groups or list(FEATURE_GROUPS.keys())
+    groups = groups or _default_groups()   # ★ V6-A 门控：实验组需显式开启
     feats, cov = build_extra_features(dates, close, code, groups)
     # 逐个关键面检查"有值天数占比", 任一关键面缺失(<阈值) → incomplete
     key_covs = {}
@@ -523,7 +647,7 @@ def build_extra_features(dates: pd.DatetimeIndex, close: pd.Series,
         (features_df, coverage): features_df(index=dates, columns=特征名, 稠密fillna0);
                                   coverage = {特征名: 非零比例}
     """
-    groups = groups or list(FEATURE_GROUPS.keys())
+    groups = groups or _default_groups()   # ★ V6-A 门控：实验组需显式开启
     parts = []
     for g in groups:
         try:
