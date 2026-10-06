@@ -21,7 +21,12 @@ from sequoia_x.model_selection_v2.index_source import load_index_close_forward
 # 增量复用的"数据面保鲜"天数（2026-09-25 新增，见 _find_reusable_cache）。
 # 扩展维度数据每次采集会整体重写，故只复用比 sample_end 早于该天数的采样日；
 # 取 60 > 采集刷新窗口 40（v2_monthly_retrain Step0 --refresh-days 40），留安全边界。
-REUSE_SAFE_DAYS: int = 60
+# 2026-10-06 加环境变量覆盖：V6-A 实验需要**在修复后的数据上做全量重建**，
+# 而默认的增量复用会把"修复前算的"旧采样日直接搬过来（实测：A 臂复用了
+# 旧缓存 3ccb10244903 的 406,543 样本，只重算 4 天）→ 与 B 臂数据不同源，失去可比性。
+# 设 V4_REUSE_SAFE_DAYS 为一个很大的值（如 99999）→ 所有旧采样日都落进"保鲜窗口内"
+# → 触发 `转全量构建` 分支（见下方 keep_idx 逻辑）。默认 60 不变（生产行为不变）。
+REUSE_SAFE_DAYS: int = int(os.environ.get("V4_REUSE_SAFE_DAYS", "60"))
 # 当前特征版本（同时用于缓存 hash key 与复用判据，**两处必须一致**）
 #
 # 2026-10-06 V6-A 实验：默认 5（生产不变）；设 FEATURE_V6_THS_FINANCE=1 时 →
