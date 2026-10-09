@@ -53,12 +53,16 @@ def signal_day_return(db_path: str, symbol: str, signal_date: str) -> Optional[f
     而 close 序列始终可用（除权日的跳空属于真实成交价，与模拟盘执行口径一致）。
 
     Args:
-        db_path: 数据库路径。
+        db_path: **行情库**路径（必须含 stock_daily 表）。
         symbol: 股票代码。
         signal_date: 信号日（YYYY-MM-DD）。
 
     Returns:
         单日涨幅（0.06 = 6%）；该日无数据或无法计算时返回 None。
+
+    Raises:
+        RuntimeError: db_path 里没有 stock_daily 表 —— 这是**传错库**（模拟盘台账库
+            只有 sim_* 表），不是数据缺失，必须立刻报错而不是静默放行。
     """
     try:
         with sqlite3.connect(db_path) as conn:
@@ -67,6 +71,18 @@ def signal_day_return(db_path: str, symbol: str, signal_date: str) -> Optional[f
                 "AND close > 0 ORDER BY date DESC LIMIT 2",
                 (symbol, signal_date),
             ).fetchall()
+    except sqlite3.OperationalError as e:
+        # 2026-10-09 修复：LLM-HS300（024 项目）台账库独立后，此处传的是台账库
+        #   → "no such table: stock_daily" → 静默 fail-open ⇒ **追高过滤整条失效**
+        #   （只在日志留一行警告，信号照常写入）。表不存在属配置错误，改为 fail-loud。
+        if "no such table" in str(e).lower():
+            raise RuntimeError(
+                f"signal_day_return: 库 {db_path} 里没有 stock_daily 表。"
+                f"追高过滤需要**行情库**（004 项目：data/sequoia_v2.db），"
+                f"而模拟盘台账库只有 sim_* 表 —— 请通过 price_db_path 显式指定行情库。"
+            ) from e
+        logger.warning(f"signal_day_return({symbol}) 查询失败: {e}")
+        return None
     except Exception as e:
         logger.warning(f"signal_day_return({symbol}) 查询失败: {e}")
         return None
@@ -233,18 +249,23 @@ def save_llm_recommendations(
     llm_report: Optional[str] = None,
     top_n: int = 2,
     recommended: Optional[list[str]] = None,
+    price_db_path: Optional[str] = None,
 ) -> int:
     """将 LLM 推荐结果写入买入信号表。
 
     先尝试解析 LLM 报告文本，失败则回退到多策略频率。
 
     Args:
-        db_path: 数据库路径。
+        db_path: **台账库**路径（sim_* 表写入这里）。
         strategies_results: 各策略选股结果。
         llm_report: LLM 返回的报告文本（可选）。
         top_n: 最多推荐几只。
         recommended: 已解析好的推荐（analyze 返回值，避免二次解析不一致；
             模型格式漂移时 analyze 已回退频率推荐）。
+        price_db_path: **行情库**路径（含 stock_daily 表），追高过滤要用。
+            默认 None = 与 db_path 同一个库（004 原路径：主库既是行情库又是台账库）。
+            **台账库独立的调用方必须显式传入**——否则追高过滤查不到行情，
+            2026-10-09 之前是静默失效（只留一行警告），现改为直接报错。
 
     Returns:
         写入的信号数量。
@@ -267,7 +288,9 @@ def save_llm_recommendations(
     # 追高过滤（2026-09-25）：信号日已大涨/涨停的标的不买入。
     # 不递补候选 —— 补位的股票 LLM 并未评估过，补位＝擅自换策略。
     # 全部被滤掉时当日无信号（宁可空仓），日志会说清楚。
-    recommended, _dropped = filter_chase_risk(db_path, recommended, today_str)
+    # 查的是**行情库**（price_db_path），不是台账库 db_path（2026-10-09 分离）。
+    recommended, _dropped = filter_chase_risk(
+        price_db_path or db_path, recommended, today_str)
     if not recommended:
         if _dropped:
             logger.warning(

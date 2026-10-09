@@ -102,3 +102,55 @@ def test_filter_preserves_order(db: str) -> None:
     kept, _ = filter_chase_risk(
         db, ["000003", "000002", "000004"], "2026-09-02")
     assert kept == ["000003", "000002", "000004"]
+
+
+def test_signal_day_return_raises_on_wrong_db() -> None:
+    """传递台账库（无 stock_daily）必须立刻报错，不许静默放行。
+
+    2026-10-09 回归：LLM-HS300（024）台账库独立后，此处曾静默 fail-open
+    （只留一行警告）⇒ 追高过滤整条失效。表不存在 = 传错库，属配置错误。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "ledger.db")
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE sim_positions (id INTEGER PRIMARY KEY)")
+            conn.commit()
+        with pytest.raises(RuntimeError, match="stock_daily"):
+            signal_day_return(path, "000001", "2026-09-02")
+
+
+def test_save_llm_recommendations_with_split_dbs() -> None:
+    """台账库 / 行情库分离时（024 的真实拓扑），追高过滤仍必须生效。
+
+    行情库：AAA 信号日 +10%（应被剔除）、BBB +3%（应写入台账库）。
+    """
+    from datetime import date, timedelta
+
+    from sequoia_x.simulation.signals import save_llm_recommendations
+
+    today = date.today().isoformat()
+    prev = (date.today() - timedelta(days=1)).isoformat()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = str(Path(tmp) / "sim_ledger.db")
+        prices = str(Path(tmp) / "prices.db")
+        with sqlite3.connect(prices) as conn:
+            conn.execute("CREATE TABLE stock_daily (symbol TEXT, date TEXT, "
+                         "close REAL, UNIQUE(symbol, date))")
+            conn.executemany("INSERT INTO stock_daily VALUES (?,?,?)", [
+                ("AAA", prev, 10.00), ("AAA", today, 11.00),
+                ("BBB", prev, 10.00), ("BBB", today, 10.30),
+            ])
+            conn.commit()
+
+        n = save_llm_recommendations(
+            db_path=ledger,
+            price_db_path=prices,                      # ← 关键：显式传行情库
+            strategies_results={"tag": ["AAA", "BBB"]},
+            top_n=2,
+            recommended=["AAA", "BBB"],
+        )
+        assert n == 1
+        with sqlite3.connect(ledger) as conn:
+            wrote = [r[0] for r in conn.execute("SELECT symbol FROM sim_buy_signals")]
+        assert wrote == ["BBB"]
