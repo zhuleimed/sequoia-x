@@ -39,7 +39,12 @@ logger = get_logger(__name__)
 
 SIM_V2_DB = str(PROJECT_DIR / "data" / "sim_v2.db")
 CACHE_PATH = PROJECT_DIR / "output/backtest_v2/prediction_cache.json"
-TOP_N_BUY = 10           # 每月买入数（与回测 M4+TOP_N=10 一致）
+TOP_N_BUY = 20           # 每月买入数（2026-10-13 由 10 改为 20）
+#   依据：docs/2026-10-13_模拟盘权重与持仓数变更方案.md（定位决策 C：低回撤持有）
+#   必须与 simulation/config.py 的 MAX_POSITIONS(=20) 一致 —— MAX_POSITIONS 同时是
+#   "台位数"与"每只预算的分母"（engine.py: slots_available = MAX_POSITIONS - len(positions)），
+#   二者对齐才能满仓（20 只 × 均值 1.0 的 target_weight × 现金/20 = 满仓）。
+#   ⚠️ 若将来要买 >20 只，须同时提高 MAX_POSITIONS。
 PYTHON = sys.executable
 
 

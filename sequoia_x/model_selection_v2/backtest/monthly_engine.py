@@ -1374,8 +1374,17 @@ class MonthlyBacktestEngine:
                 price=buy_price, shares=shares, amount=cost,
             ))
 
-        logger.info(f"  买入: {sum(1 for t in self.trades if t.date == buy_date)} 只, "
-                    f"剩余现金={self.cash:,.0f}")
+        _buys = [t for t in self.trades if t.date == buy_date]
+        _amt = sorted((t.amount for t in _buys), reverse=True)
+        _tot = sum(_amt) + self.cash
+        logger.info(f"  买入: {len(_buys)} 只, 剩余现金={self.cash:,.0f}")
+        # ── 2026-10-13 新增：**权重口径**的集中度（纯机械、不受收益影响）──
+        #   为什么加：判"收紧单票上限"这类改动，**不能用 `top2_pnl_share`**（那是收益口径，
+        #   在总收益≈0 时会爆表甚至变号 —— 6 月窗口实测出现 −242% / 798%）。
+        #   权重口径是**确定性**的 ⇒ 不需要多种子、也不需要长窗口。
+        if _amt and _tot > 0:
+            logger.info(f"  权重集中度: 前2大持仓权重和={(_amt[0] + (_amt[1] if len(_amt) > 1 else 0)) / _tot:.2%}"
+                        f" 最大单票={_amt[0] / _tot:.2%} 持仓数={len(_buys)}")
 
     def _sell_position(self, sym: str, sell_date: str,
                         reason: str = "", price_col: str = "open") -> float:

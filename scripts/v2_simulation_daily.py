@@ -115,7 +115,7 @@ def main() -> None:
         per_stock_budget=100_000,
         allow_same_day=True,  # 重训信号凌晨产生，交易日当晚以当日开盘价买入（回测口径）
         push_tag="V2",  # 消息加【V2 N/N】前缀，与 LLM 模拟盘分组区分
-        equal_weight_cash=True,  # 2026-09-01: V4 等权满仓——每只预算按现金/10 均摊, 随账户资金放大
+        equal_weight_cash=True,  # 每只预算 = 现金 / 可买空缺数（= MAX_POSITIONS − 当前持仓；2026-10-13 起持仓数 20 ⇒ 除数是 20，不再固定除 10）
         sell_rules_mode="hard_stop_only",  # v1.5.2 固化长期 = 只留硬止损(现-12%) + 月末清仓
     )
     result = sim.run_daily(push_report=False)  # 日报统一由本脚本推送
