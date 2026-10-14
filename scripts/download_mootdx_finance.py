@@ -271,6 +271,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="仅列出文件列表")
     parser.add_argument("--status", action="store_true", help="查看当前进度")
     parser.add_argument("--limit", type=int, default=0, help="只下载最近 N 期（0=全部）")
+    parser.add_argument("--force-recent", type=int, default=0,
+                        help="最近 N 期无条件重下（含已存在的；0=现行为不变）。"
+                             "★ 用于补全「先残缺后补全」的季报期——见 main 里的说明")
     parser.add_argument("--analyze", action="store_true", help="完成后输出列分析报告")
     args = parser.parse_args()
 
@@ -320,6 +323,22 @@ def main():
         f for f in files
         if int(f['filename'].replace('gpcw', '').replace('.zip', '')) not in completed
     ]
+
+    # ★★ 2026-10-10 新增 `--force-recent N`：**最近 N 期无条件重下**。
+    #   为什么必须加：原逻辑是"文件已存在就跳过" ⇒ **季报"先残缺后补全"时永远不会被补上**
+    #   —— 实测 `gpcw20260630` 只有 261 家（该季刚发布、还没出全），文件已存在
+    #   ⇒ 以后**永远跳过** ⇒ **永远停在 261 家**（这正是"停更"最隐蔽的一种形态）。
+    #   顺带好处：最近 N 期每月都会被重写 ⇒ **数据文件的 mtime 会按月刷新**
+    #   ⇒ preflight 就能用"文件多久没被写"来判断"采集有没有真的在跑"（比"报告期有多老"灵敏得多）。
+    #   ★ 默认 0 ⇒ **行为与以前完全一致**。
+    _force = getattr(args, "force_recent", 0)
+    if _force > 0:
+        _have = {f['filename'] for f in pending}
+        _extra = [f for f in files[-_force:] if f['filename'] not in _have]
+        if _extra:
+            logger.info(f"★ 强制重下最近 {_force} 期（含已存在的）: "
+                        f"{[f['filename'] for f in _extra]}")
+        pending = sorted(pending + _extra, key=lambda x: x['filename'])
 
     if args.limit > 0:
         pending = pending[-args.limit:]

@@ -15,6 +15,7 @@
 用法(cron):
   0 19 * * 1-5 cd <project> && py312 python scripts/month_end_pull.py >> logs/month_end_pull_$(date +%Y%m).log 2>&1
 """
+import os
 import subprocess
 import sys
 from datetime import date
@@ -328,6 +329,56 @@ def main():
     if r4.returncode != 0:
         _notify("⚠️ 历史 peTTM 重建异常", "peTTM 部分未重建, 88维该特征可能受影响；但 PE 阶段容忍")
     print(f"[{today}] 历史 peTTM 重建结束, exit={r4.returncode}")
+
+    # ── 2026-10-10 新增: 实验类维度采集（V6-D 财务深度 / V6-E 股东机构）──
+    #   ★★ 为什么必须挂进来：这两批是**季度数据**（财报按季披露）⇒ 不需要日更，
+    #      但**必须自动更新** —— 否则一旦采纳进生产，数据会停更 ⇒ **制造新的"半截列"**：
+    #      历史是全的（回测看不出问题），但实盘会慢慢失效 —— **最危险的一类**。
+    #   ★ 两者都支持增量：THS 用 --refresh（最近 4 期）、mootdx 用 --limit（最近 10 期）+ 断点续跑。
+    #   ★ 失败**不阻断整链**（这两批目前仍是实验特征）；硬闸门在 `month_end_preflight.py`
+    #      的"实验类维度新鲜度校验"里 —— **只有对应开关打开时才阻断**。但这里会推送告警。
+    #
+    # ★★ THS 采集器需要 HITHINK_FINANCE_API_KEY，**必须从 .env 读、不能依赖 ~/.bashrc**
+    #    —— cron 不加载 bashrc（项目 2026-09-24 已有此教训，见 daily_dump_verify.py:39）
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT_DIR / ".env")
+        print(f"[{today}] 已加载 .env（HITHINK_FINANCE_API_KEY "
+              f"{'在读' if os.environ.get('HITHINK_FINANCE_API_KEY') else '**仍缺失**'}）")
+    except Exception as e:
+        print(f"[{today}] ⚠️ 加载 .env 失败（{type(e).__name__}: {e}）"
+              f" ⇒ THS 采集可能因缺 key 失败")
+
+    print(f"[{today}] ★ 实验类维度刷新 ① 同花顺财务（V6-D 财务深度, 每季数据, 增量最近 4 期）...")
+    THS_COLLECT = Path("/public/home/hpc/zhulei/superman/quant/code/023_THS/scripts/collect_finance_ths_v2.py")
+    r5 = -1
+    if THS_COLLECT.exists():
+        r5 = subprocess.run([sys.executable, str(THS_COLLECT), "--subsets", "all",
+                             "--refresh", "--workers", "12"],
+                            cwd=str(THS_COLLECT.parent.parent), timeout=6 * 3600).returncode
+        print(f"[{today}] 同花顺财务刷新结束, exit={r5}")
+    else:
+        print(f"[{today}] ⚠️ 找不到采集器 {THS_COLLECT} ⇒ 跳过")
+
+    print(f"[{today}] ★ 实验类维度刷新 ② mootdx 财务（V6-E 股东/机构, 每季数据, 最近 10 期）...")
+    MOOT_DL = PROJECT_DIR / "scripts" / "download_mootdx_finance.py"
+    r6 = -1
+    if MOOT_DL.exists():
+        # ★ `--force-recent 4` 必须带：mootdx 采集器原逻辑"文件已存在就跳过" ⇒
+        #   季报**先残缺后补全**时永远补不上（实测 gpcw20260630 曾卡在 261 家、
+        #   加上这个参数后 261 → 5573 家 ✓）。顺带让最近 4 期每月都被重写 ⇒
+        #   preflight 的"采集活性"检查（看数据文件多久没被写）才有意义。
+        r6 = subprocess.run([sys.executable, str(MOOT_DL), "--limit", "10", "--force-recent", "4"],
+                            cwd=str(PROJECT_DIR), timeout=3 * 3600).returncode
+        print(f"[{today}] mootdx 财务刷新结束, exit={r6}")
+    else:
+        print(f"[{today}] ⚠️ 找不到采集器 {MOOT_DL} ⇒ 跳过")
+
+    if r5 != 0 or r6 != 0:
+        _notify("⚠️ 实验类维度刷新异常（V6-D 财务深度 / V6-E 股东机构）",
+                f"THS exit={r5}, mootdx exit={r6} ⇒ 数据可能停更。\n"
+                f"若这两批已采纳进生产，请人工介入；"
+                f"`month_end_preflight.py` 的「实验类维度新鲜度」检查会拦住（开关打开时）。")
 
     ok = auto_rebuild_and_verify(today)
     sys.exit(0 if ok else 1)

@@ -68,6 +68,40 @@ RISK_MODES = [
 INITIAL_CAPITAL = 500_000.0
 
 
+def _cache_is_complete(cache: dict, test_months: list[str],
+                       manifest_path: Path) -> tuple[bool, str]:
+    """判定预测缓存是否满足本次请求。
+
+    2026-10-08 修复（B 臂回测 exit=1 的根因）：
+      旧判据是 `months_ok >= len(test_months)` —— **永远为假**：2020-09 因 purge 后
+      训练样本为 0 被**合法跳过**，缓存永远只有 69/70 个月。
+      后果：① 每次回测都白试一次重建；② 一旦数据集缓存缺失（例如数据同步把
+      `sample_end` 推进到新的交易日 ⇒ 数据集缓存 key 变了），重建会直接
+      `FileNotFoundError` 崩掉 —— 2026-10-08 19:06 B 臂回测就是这样 exit=1 的。
+
+    新判据：优先读缓存旁边的 manifest（`build_cache` 落盘，记录 requested/produced/skipped）：
+      **`requested - produced ⊆ skipped` ⇒ 视为完整**（缺的都是合法跳过的月份）。
+      没有 manifest（旧产物）→ 退回旧判据，并在返回信息里说明**为何可能是"合法不全"**。
+    """
+    missing = [m for m in test_months if m not in cache]
+    if not missing:
+        return True, "全部月份齐备"
+    if manifest_path.exists():
+        try:
+            mf = json.loads(manifest_path.read_text())
+            skipped = set(mf.get("skipped", {}))
+            unexcused = [m for m in missing if m not in skipped]
+            if not unexcused:
+                return True, (f"缺 {len(missing)} 个月，但均在 manifest 中登记为合法跳过 "
+                              f"{sorted(missing)}")
+            return False, f"缺 {unexcused}（manifest 未登记为跳过）"
+        except Exception as e:
+            return False, f"manifest 读取失败({type(e).__name__}: {e})；缺 {missing}"
+    return False, (f"缺 {missing}（**无 manifest，无法判定是否为合法跳过**；"
+                   f"若这是 2020-09 这类「样本不足被跳过」的月份，"
+                   f"请用 build_cache 重建一次以生成 manifest）")
+
+
 def load_or_build_cache(
     cfg: V2Config,
     engine: DataEngine,
@@ -85,11 +119,12 @@ def load_or_build_cache(
     if not force_rebuild and cache_path.exists():
         with open(cache_path) as f:
             cache = json.load(f)
-        months_ok = sum(1 for m in test_months if m in cache)
-        if months_ok >= len(test_months):
-            logger.info(f"预测缓存已就绪: {len(cache)} 个月 (来自 {cache_path})")
+        _accept, _why = _cache_is_complete(cache, test_months,
+                                          Path(str(cache_path) + ".manifest.json"))
+        if _accept:
+            logger.info(f"预测缓存已就绪: {len(cache)} 个月 (来自 {cache_path})；{_why}")
             return cache
-        logger.info(f"缓存不完整 ({months_ok}/{len(test_months)} 个月)，重新构建...")
+        logger.info(f"缓存不完整（{_why}）→ 重新构建...")
     else:
         logger.info("构建预测缓存...")
 
@@ -105,6 +140,8 @@ def run_single_group(
     risk_mode: str,
     start_month: str,
     end_month: str,
+    sizing_method: str | None = None,
+    sizing_params: dict | None = None,
 ) -> dict:
     """运行单组回测（使用共享预测缓存）。
 
@@ -119,6 +156,8 @@ def run_single_group(
         initial_capital=INITIAL_CAPITAL,
         use_real_t4=False,
         prediction_cache=prediction_cache,
+        sizing_method=sizing_method,        # 2026-10-11：None=等权（历史行为）
+        sizing_params=sizing_params or {},
     )
     metrics = bt.run(start_month, end_month)
     return metrics
@@ -132,6 +171,15 @@ def save_summary_csv(all_results: list[dict]) -> None:
         "风控模式", "TOP_N", "时段", "月数",
         "总收益率", "年化收益率", "夏普比率", "最大回撤",
         "月胜率", "交易笔数", "月均换手率", "胜率(笔)", "终值",
+        # ── 2026-10-11 补：**抗极端指标**（引擎早在待办 #23 就算出来了，
+        #   但因下面 `extrasaction="ignore"` + 这里没列 → **被静默丢掉** ✗）。
+        #   为什么必须补：2026-10-11 复核发现 B 臂的"最高分"其实是
+        #   **2024-07 单月 +26.93%（买入 9 只）** 撑起来的、且**换口径就变** ——
+        #   而**汇总表里看不到这层信息**，导致"哪个配置最好"这类结论被假象误导。
+        #   ★ `return_ex_topN` = **剔除最赚 N 只**后的总收益率；腰斩 ⇒ 个别妖股撑的
+        #   ★ `top2_pnl_share` = 前 2 只占总盈亏比（集中度）；越高越可疑
+        "return_ex_top1", "return_ex_top2", "return_ex_top3",
+        "top2_pnl_share", "median_trade_pct", "median_monthly_return",
     ]
     with open(summary_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -244,7 +292,54 @@ def main():
                         help="跳过 T4 LSTM 训练")
     parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR),
                         help="输出目录")
+    # ── 2026-10-11 新增：**持仓分配方式**（补"回测 ↔ 生产"口径缺口）──
+    #   背景：生产模拟盘用 `min_variance`（最小方差、lookback 250、单票≤15%），
+    #   而本脚本**从来没传过 sizing_method** ⇒ 引擎默认 `weight=1.0` = **等权** ✗
+    #   ⇒ 于是 A/B/C/V6-* **全部是"等权"口径，与生产不是同一个策略**。
+    #   实测：生产 2026-10-01 那批权重在 **0.21 ~ 1.5**（差 7 倍）= 非等权；
+    #   而等权 TOP10 下"前 2 只占 89% 盈亏"（待办 #46）—— 生产有单票上限压着。
+    #   ★ 默认 "" ⇒ **行为与以前逐位不变**（历史结果仍可比）。
+    parser.add_argument("--sizing-method", type=str, default="",
+                        help="持仓分配方式：equal/ic_weighted/inv_var/risk_parity/"
+                             "min_variance；空=引擎默认（等权）=历史行为")
+    parser.add_argument("--sizing-lookback", type=int, default=0,
+                        help="协方差估计窗口（交易日）；0=引擎默认(120)。生产用 **250**")
+    parser.add_argument("--match-production-sizing", action="store_true",
+                        help="★ 直接读**生产配置**（sequoia_x/simulation/config.py 的 "
+                             "BUY_WEIGHT_METHOD/PARAMS）⇒ 保证回测↔生产口径一致，"
+                             "且不会因手抄参数而漂移")
+    # ── 2026-10-13 新增：**单票上限覆盖**（"收紧单票上限"实验用；默认 0 = 不改 ⇒ 行为逐位不变）──
+    #   背景：定位决策 C（低回撤持有）⇒ 主战场是组合/风控层，判据是**构造性**的
+    #   （前2只占比↓、剔最赚N只后收益↑、回撤↓），不靠统计显著性（MDE ≈1.5%/月，效应量测不出）。
+    #   ⚠️ 与 TOP_N 的耦合：cap < 1/TOP_N 时组合**装不满**（10 只 × cap 5% = 最多 50% 仓位 ⇒ 留现金）
+    #      ⇒ 低于 1/TOP_N 的 cap 会引入现金拖累，解读时要区分"分散化收益"与"减仓效应"。
+    parser.add_argument("--sizing-cap", type=float, default=0.0,
+                        help="单票权重上限（如 0.10）；0 = 用引擎/生产默认（生产为 0.15）")
     args = parser.parse_args()
+
+    # 解析持仓分配方式（★ 默认空 ⇒ 不动 ⇒ 历史行为不变）
+    _sizing_method, _sizing_params = None, {}
+    if args.match_production_sizing:
+        try:
+            from sequoia_x.simulation.config import BUY_WEIGHT_METHOD, BUY_WEIGHT_PARAMS
+            _sizing_method = BUY_WEIGHT_METHOD or None
+            _sizing_params = dict(BUY_WEIGHT_PARAMS or {})
+            logger.info(f"持仓分配 = **对齐生产**: {_sizing_method} {_sizing_params}")
+        except Exception as _e:
+            logger.error(f"❌ --match-production-sizing 读取生产配置失败: {_e}")
+            return 1
+    elif args.sizing_method:
+        _sizing_method = args.sizing_method
+        _sizing_params = {"lookback": args.sizing_lookback} if args.sizing_lookback else {}
+        logger.info(f"持仓分配 = {_sizing_method} {_sizing_params or '(引擎默认参数)'}")
+    if _sizing_method is None:
+        logger.info("持仓分配 = 引擎默认（**等权**，与历史 A/B 结果同口径）")
+    if args.sizing_cap > 0:
+        if _sizing_method is None:
+            logger.error("❌ --sizing-cap 只在指定了分配方式（含 --match-production-sizing）时才有意义")
+            return 1
+        _sizing_params["cap"] = float(args.sizing_cap)
+        logger.info(f"★ 单票上限被覆盖为 {args.sizing_cap:.1%}（其余参数不变）")
 
     # 重绑模块级 OUTPUT_DIR（三个保存函数都在调用时读它）→ --output-dir 生效
     OUTPUT_DIR = Path(args.output_dir)
@@ -333,6 +428,8 @@ def main():
                     metrics = run_single_group(
                         cfg, engine, cache, top_n, mode_name,
                         start_month, end_month,
+                        sizing_method=_sizing_method,
+                        sizing_params=_sizing_params,
                     )
                 except Exception as e:
                     logger.error(f"  ❌ 失败: {e}", exc_info=True)
@@ -360,6 +457,17 @@ def main():
                     "月均换手率": metrics.get("avg_turnover", 0),
                     "胜率(笔)": metrics.get("win_trade_pct", 0),
                     "终值": metrics.get("final_value", 0),
+                    # ── 2026-10-11 补：**抗极端指标**（说明见 save_summary_csv 的 fieldnames）──
+                    #   ⚠️ 这里才是"最后一公里"：引擎早就算出了这些字段，
+                    #   但**本行是逐字段手工映射的** ⇒ 不写进来 = 值被丢掉。
+                    #   （只往 `fieldnames` 加列名**不够** —— 2026-10-11 实测踩过：
+                    #     表头有了 6 列、**值全空** ✗）
+                    "return_ex_top1": metrics.get("return_ex_top1", 0),
+                    "return_ex_top2": metrics.get("return_ex_top2", 0),
+                    "return_ex_top3": metrics.get("return_ex_top3", 0),
+                    "top2_pnl_share": metrics.get("top2_pnl_share", 0),
+                    "median_trade_pct": metrics.get("median_trade_pct", 0),
+                    "median_monthly_return": metrics.get("median_monthly_return", 0),
                 }
                 all_results.append(row)
 
@@ -369,12 +477,69 @@ def main():
                             f"夏普={metrics.get('sharpe', 'N/A')} "
                             f"耗时={elapsed:.0f}s ({'缓存' if cache else '实时'})")
 
+    # ── 2026-10-09（待办 #25）：显式告警"M1 是空转臂" ──
+    #   M1(+T1过滤) 与 M0(裸融合) 结果**逐字段完全相同**：T1 实测 AUC=0.499（无预测能力），
+    #   过滤按设计关闭（`use_t1` 恒为 False）⇒ M1 ≡ M0。
+    #   危害有二：① 白跑 1/4 机时；② **汇总表里那行 "M1" 会让人误以为"T1 过滤被测过且无效"**。
+    #   此处显式告警（不删该臂 —— 那会改变 2x 组数、破坏与历史结果的可比性）。
+    try:
+        _by = {(r["风控模式"], r["TOP_N"]): r for r in all_results}
+        _dup = []
+        for tn in {r["TOP_N"] for r in all_results}:
+            if ("M1", tn) in _by and ("M0", tn) in _by:
+                a = {k: v for k, v in _by[("M0", tn)].items() if k != "风控模式"}
+                b = {k: v for k, v in _by[("M1", tn)].items() if k != "风控模式"}
+                if a == b:
+                    _dup.append(tn)
+        if _dup:
+            logger.warning(
+                f"⚠️ M1(+T1过滤) 与 M0(裸融合) 在 TOP_N={sorted(_dup)} 上**逐字段完全相同** "
+                f"⇒ M1 是**空转臂**（T1 实测 AUC=0.499 无预测能力、过滤按设计关闭，见待办 #25）。"
+                f"**汇总表里的 M1 行不代表「T1 过滤被测试过」，勿据此下结论。**")
+    except Exception:
+        pass
+
     total_elapsed = time.time() - t_total
 
     # Phase 3: 保存结果
     save_summary_csv(all_results)
     save_monthly_matrix(all_results)
     optimal = compute_and_save_optimal(all_results)
+
+    # ── 2026-10-11（待办 #47b）：把本次的【持仓分配口径】烙印到输出目录 + 显式提醒 ──
+    #   为什么必须做：**结论会随口径翻转，不是小数点差别** ——
+    #     同一臂只换分配方式：A 臂 51.82%→70.29%、B 臂 81.23%→39.74%（B−A 从 +26.72p 变 −29.78p）。
+    #   事后靠翻日志反推"这份结果是哪个口径"代价很高（#47 就是这么反推出来的）⇒ 让产物自带口径。
+    #   ★ 本段只写文件 + 打日志，**不碰任何计算结果** ⇒ 默认行为逐位不变。
+    _scope = ("生产口径（直读生产配置）" if args.match_production_sizing
+              else ("显式指定口径" if args.sizing_method else "等权（引擎默认）"))
+    # ★ 月份必须取**实际跑到的月份**（= 汇总行里的 _monthly_labels），不能用 actual_months：
+    #   `--months` 只截断"缓存完整性检查"用的月份，真正的回测月份由 `--period` 决定
+    #   ⇒ 用 actual_months 会写出"2 个月"而实际跑了 6 个月（2026-10-11 实测踩到）。
+    _labels = sorted({m for r in all_results for m in r.get("_monthly_labels", [])})
+    manifest = {
+        "sizing_method": _sizing_method or "equal",
+        "sizing_params": _sizing_params,
+        "scope": _scope,
+        "is_production_scope": bool(args.match_production_sizing),
+        "run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "cache": str(args.cache),
+        "months": (f"{_labels[0]}~{_labels[-1]}（{len(_labels)} 个月）" if _labels
+                   else "（无月度序列）"),
+        "n_groups": len(all_results),
+        "note": "结论随持仓分配口径会翻转 ⇒ 跨口径比总收益 = 比错东西；"
+                "要生产口径请重跑并加 --match-production-sizing。",
+    }
+    (OUTPUT_DIR / "sizing_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"口径烙印: {OUTPUT_DIR}/sizing_manifest.json ← {_scope} "
+                f"{_sizing_method or 'equal'} {_sizing_params or ''}")
+    if not args.match_production_sizing:
+        logger.warning(
+            f"⚠️ 本次持仓分配 = **{_scope}**，与生产模拟盘口径可能不一致"
+            f"（生产用最小方差 min_variance，见 sequoia_x/simulation/config.py）；"
+            f"历史教训（待办 #47b）：同一臂只换分配方式，A 臂 51.82%→70.29%、B 臂 81.23%→39.74%，"
+            f"**结论会翻转** ⇒ 需要生产口径时请加 --match-production-sizing 重跑。")
 
     logger.info(f"\n{'='*60}")
     logger.info(f"回测完成: {total_groups} 组, 总耗时={total_elapsed:.0f}s "

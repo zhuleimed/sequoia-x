@@ -34,7 +34,82 @@ REUSE_SAFE_DAYS: int = int(os.environ.get("V4_REUSE_SAFE_DAYS", "60"))
 # features_extra/build_extra_features.py::ths_finance_enabled()。
 # ★ 版本号进缓存 hash key，故 v5/v6 缓存**并存不覆盖**，可随时回跑对照。
 _E5 = os.environ.get("FEATURE_V6_THS_FINANCE") == "1"
-FEATURE_VERSION: int = 6 if _E5 else 5
+# 2026-10-08 V6-A【安慰剂对照】开关：设 V6A_PLACEBO_NOISE=1（且同时开 V6 特征）时 →
+#   FEATURE_VERSION=7。用于跑"安慰剂臂 C"：**结构与 B 完全相同（134 维）、但新增的
+#   5 列是纯噪声**，用来判定 B 胜 A 到底是"新维度的信息价值"还是"加列引起的扰动"。
+#   ★ 默认关闭 ⇒ 不设该变量时行为与以前**逐位一致**（生产/既有实验不受影响）。
+_E_PLACEBO = os.environ.get("V6A_PLACEBO_NOISE") == "1"
+# 2026-10-09 V6-C【维度缩减】开关：设 V6C_DROP_DIMS=<列名,...>（且同时开 V6 特征、
+#   非安慰剂模式）时 → FEATURE_VERSION=8。用于跑"从 V6-A 的 5 维里砍掉若干冗余列"
+#   的对照臂（如砍 2 个高相关现金流维度 ⇒ 132 维）。
+#   ★ 默认不设 ⇒ 行为与以前**逐位一致**（生产/既有实验不受影响）。
+#   ★★ 该变量**必须与 features_extra.build_extra_features.v6c_dropped_dims() 口径一致**：
+#      那边决定"实际输出几列"，这边决定"缓存 key 落在哪个目录"。
+#      两处不一致 = 新列数写进旧缓存目录，正是这类事故的典型形态。
+_E_DROP = os.environ.get("V6C_DROP_DIMS", "").strip()
+# 2026-10-09 V6-B【删半截列组】开关：设 V6B_DROP_GROUPS=<组名,...> 时 →
+#   FEATURE_VERSION=9。用于删掉整组"半截/死列"（consensus 全期死列、
+#   news/dragon_tiger/limit_up 只有近端有值 ⇒ 可能被模型当成"时间坐标"）。
+#   ★ 默认不设 ⇒ 行为与以前**逐位一致**。
+_E_BDROP = os.environ.get("V6B_DROP_GROUPS", "").strip()
+# 2026-10-10 V6-D【财务深度 14 维 + 删 consensus】：一个开关 = **一整个目标配置**
+#   → FEATURE_VERSION=10（目标 143 维 = 88 + (46 − 5 + 14)）
+#   为什么要"一个开关代表一个配置"而不是多个正交开关叠加：见下方强制校验的说明。
+_E_DEEP = os.environ.get("FEATURE_V6_DEEP_FINANCE") == "1"
+# 2026-10-10 V6-E【mootdx 股东/机构 16 维 + V6-D 的 14 维 + 删 consensus】：同样"一个开关 = 一个配置"
+#   → FEATURE_VERSION=11（目标 159 维 = 88 + (46 − 5 + 14 + 16)）
+_E_MOOT = os.environ.get("FEATURE_V6_MOOTDX_HOLDER") == "1"
+
+# ── ★★ 开关互斥/依赖的强制校验（2026-10-09 加）──
+#   为什么必须校验：`FEATURE_VERSION` 是**隔离缓存目录的唯一屏障**（SOP §3）。
+#   只要出现"两个不同的特征集对应同一个版本号"，就会发生"新列数写进旧缓存目录"
+#   —— 这正是本项目反复吃亏的那类事故（#11 / #27 / #29 / #30）。
+#   所以这里宁可**启动就报错**，也不允许一个版本号代表两种特征集。
+if _E_DROP and not _E5:
+    raise ValueError(
+        "V6C_DROP_DIMS 需要同时设 FEATURE_V6_THS_FINANCE=1："
+        "否则 ths_finance 组根本不参与、开关空转，而版本号也不会变"
+        "（特征没变但你以为变了 / 或反过来），必然对不上。")
+if _E_BDROP and not _E5:
+    raise ValueError(
+        "V6B_DROP_GROUPS 需要同时设 FEATURE_V6_THS_FINANCE=1："
+        "理由是让『版本号 ↔ 特征集』一一对应 —— 否则『开着 V6 特征删组』与"
+        "『不开 V6 特征删组』是两个不同的特征集，却会共用同一个版本号。")
+if _E_DROP and _E_BDROP:
+    raise ValueError(
+        "V6C_DROP_DIMS（组内砍列）与 V6B_DROP_GROUPS（整组删除）不能同时设置："
+        "两者叠加会得到一个『既不是 8 也不是 9』的特征集，而版本号只能记一个 ⇒ 必然撞车。")
+if _E_PLACEBO and (_E_DROP or _E_BDROP or _E_DEEP or _E_MOOT):
+    raise ValueError(
+        "安慰剂模式（V6A_PLACEBO_NOISE）不能与减列/删组/加维开关同时设置："
+        "安慰剂是『同结构 + 零信息』，叠加改动会破坏这个前提。")
+if _E_MOOT and not _E5:
+    raise ValueError(
+        "FEATURE_V6_MOOTDX_HOLDER 需要同时设 FEATURE_V6_THS_FINANCE=1："
+        "理由是让『版本号 ↔ 特征集』一一对应。")
+if _E_MOOT and (_E_DROP or _E_BDROP or _E_DEEP):
+    raise ValueError(
+        "FEATURE_V6_MOOTDX_HOLDER 不能与 V6C_DROP_DIMS / V6B_DROP_GROUPS / FEATURE_V6_DEEP_FINANCE "
+        "同时设置：V6-E 已经是『一整个目标配置』（自带 V6-D 的 14 维与删 consensus），"
+        "再叠加会得到版本号无法表达的另一种特征集。")
+if _E_DEEP and not _E5:
+    raise ValueError(
+        "FEATURE_V6_DEEP_FINANCE 需要同时设 FEATURE_V6_THS_FINANCE=1："
+        "理由是让『版本号 ↔ 特征集』一一对应 —— V6-D 的目标配置是在 V6-A 特征集基础上的。")
+if _E_DEEP and (_E_DROP or _E_BDROP):
+    raise ValueError(
+        "FEATURE_V6_DEEP_FINANCE 不能与 V6C_DROP_DIMS / V6B_DROP_GROUPS 同时设置："
+        "V6-D 已经是『一整个目标配置』（自带删 consensus），再叠加会得到版本号无法表达的第三种特征集。")
+
+FEATURE_VERSION: int = (
+    11 if _E_MOOT                              # V6-E 股东/机构 16 + 财务深度 14（159 维）
+    else 10 if _E_DEEP                         # V6-D 财务深度 14 维 + 删 consensus（143 维）
+    else 9 if _E_BDROP                         # V6-B 删半截列组（120 维）
+    else 8 if _E_DROP                          # V6-C 组内砍列（132 维）
+    else 7 if _E_PLACEBO                       # V6-A 安慰剂（134 维）
+    else 6 if _E5                              # V6-A 加 5 维（134 维）
+    else 5                                     # 生产
+)
 
 logger = get_logger(__name__)
 
