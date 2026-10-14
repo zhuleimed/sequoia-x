@@ -13,6 +13,7 @@ CPU-only 设计：TF 内部多线程并行，Optuna trial 串行（避免多模�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -415,6 +416,117 @@ class _EpochProgressLogger(tf.keras.callbacks.Callback):
 #  公开接口：train_lstm / predict_lstm
 # ════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════
+#  T4 checkpoint 有效性判据（2026-10-08 彻底方案）
+#
+#  为什么要有这一族函数：待办 #11（"缓存 key 粒度不足"）年内复发**至少 4 次**
+#  （09-27 / 09-28 / 10-07 / 10-08），每次都是"发现一个轴 → 往文件名里再加一段标签"。
+#  这个方向本身是错的：**轴是列举不完的**，只要靠"人记得还有哪些轴"就一定会再漏。
+#
+#  彻底做法：把"这份 checkpoint 还算数吗"从**隐式的、写在文件名里的、不完整的**判据，
+#  改成**显式的、由唯一函数生成的、且加载时强制校验**的判据（spec）。
+#    · 判据不可能与保存时不一致 —— 保存和加载都调 compute_t4_spec()
+#    · 数据用**内容抽样哈希**（不是 mtime，改不回去也骗不过）
+#    · 代码用**源码哈希**（不是人工版本号，改代码自动失效）
+#    · 加载时不一致 ⇒ **大声报警 + 丢弃重训**，绝不静默复用
+#  详见 docs/特征维度变更操作规程.md §9.5
+# ══════════════════════════════════════════════════════════════════════════
+
+_SPEC_SCHEMA = 2          # spec 结构本身的版本；结构一变，所有旧 spec 自动失效
+
+# 参与 code_hash 的源码文件（相对项目根）。改了它们 ⇒ 训练口径变了 ⇒ 旧 checkpoint 作废。
+# 新增训练相关模块时应加入此表（忘了加也不会静默出错：文件名里的 hash 仍随 spec 变，
+# 只是这一轴不敏感 —— 与"完全不设防"有本质区别）。
+_SPEC_CODE_FILES = [
+    "sequoia_x/model_selection_v2/models/deep_lstm.py",
+    "sequoia_x/model_selection_v2/models/tree_reg.py",
+    "sequoia_x/model_selection_v2/models/tree_cls.py",
+    "sequoia_x/model_selection_v2/models/tree_vol.py",
+]
+
+
+def _proj_root() -> Path:
+    """项目根 = models/deep_lstm.py 往上 3 层。"""
+    return Path(__file__).resolve().parents[3]
+
+
+def _code_hash() -> str:
+    """训练相关**源码内容**的哈希 ⇒ 代码一改，旧 checkpoint 自动失效（不靠人升版本号）。"""
+    h = hashlib.md5()
+    root = _proj_root()
+    for rel in _SPEC_CODE_FILES:
+        h.update(rel.encode("utf-8"))
+        try:
+            h.update((root / rel).read_bytes())
+        except Exception:
+            h.update(b"<missing>")
+    return h.hexdigest()[:10]
+
+
+def _data_sample_hash(X: np.ndarray, y: np.ndarray, n_rows: int = 256) -> str:
+    """训练数据**内容**的抽样哈希 ⇒ 数据被重写（哪怕参数没变、mtime 被改回）也能识别。
+
+    抽样均匀覆盖全样本（不是只取头部），256 行足以让"数据换了一批"必定改变哈希。
+    """
+    h = hashlib.md5()
+    try:
+        n = int(X.shape[0])
+        if n == 0:
+            return "na"
+        idx = np.linspace(0, n - 1, min(n_rows, n)).astype(int)
+        h.update(np.ascontiguousarray(X[idx]).tobytes())
+        h.update(np.ascontiguousarray(np.asarray(y)[idx]).tobytes())
+    except Exception:
+        return "na"
+    return h.hexdigest()[:10]
+
+
+def compute_t4_spec(X: np.ndarray, y: np.ndarray, cfg, model_id: str,
+                    seed: int, best_params: dict | None, data_tag: str = "") -> dict:
+    """★ T4 checkpoint 的**唯一有效性判据**。保存与加载都调用它 ⇒ 判据不可能不一致。"""
+    def _num(v):
+        try:
+            return round(float(v), 8)
+        except Exception:
+            return str(v)
+    return {
+        "schema": _SPEC_SCHEMA,
+        "model_id": str(model_id),
+        "window": int(X.shape[1]),
+        "n_features": int(X.shape[2]),
+        "n_samples": int(X.shape[0]),
+        "seed": int(seed),
+        "data_sample_hash": _data_sample_hash(X, y),
+        "data_tag": str(data_tag or "na"),
+        "code_hash": _code_hash(),
+        "params": {k: _num(v) for k, v in sorted((best_params or {}).items())},
+    }
+
+
+def _spec_fingerprint(spec: dict) -> str:
+    """spec → 短指纹（写进文件名，人也能一眼看出"是不是同一份"）。"""
+    return hashlib.md5(
+        json.dumps(spec, sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()[:12]
+
+
+def _checkpoint_spec_ok(spec_path: Path, current: dict) -> tuple[bool, str]:
+    """加载前校验：盘上的 spec 与当前请求是否逐字段一致。
+
+    Returns: (是否可用, 不一致原因)
+    """
+    if not spec_path.exists():
+        return False, "缺少 spec 文件（旧产物 / 非本机制生成）"
+    try:
+        old = json.loads(spec_path.read_text())
+    except Exception as e:
+        return False, f"spec 读取失败: {type(e).__name__}: {e}"
+    diffs = [k for k in sorted(set(old) | set(current)) if old.get(k) != current.get(k)]
+    if diffs:
+        return False, "字段不一致: " + ", ".join(diffs)
+    return True, ""
+
+
 def train_lstm(
     X: np.ndarray,
     y: np.ndarray,
@@ -422,6 +534,7 @@ def train_lstm(
     search_optuna: bool = True,
     best_params: dict | None = None,
     model_id: str = "default",
+    data_tag: str = "",
 ) -> Model:
     """训练 LSTM-Transformer 回归器（20 日超额收益率）。
 
@@ -442,6 +555,31 @@ def train_lstm(
     # ── TF 线程已在模块导入时配置（import tensorflow 之前），此处保留注释说明 ──
     # OMP_NUM_THREADS / TF_NUM_INTRAOP_THREADS / TF_NUM_INTEROP_THREADS
     # 已通过 os.environ assigment 在文件顶部设置，此处无需重复。
+
+    # ── 2026-10-08 修复：T4 训练必须设随机种子（可复现性）──
+    #   ★ 背景：本项目长期以为 `cfg.random_seed`(=42) 已让 T4 可复现，并据此论证
+    #     "跨任务复用 checkpoint 安全"（2026-09-26 会话原话："…数据相同、随机种子
+    #     相同（42）⇒ 模型逐位相同"）。但 2026-10-08 复核实测发现：
+    #     `cfg.random_seed` **只传给了树模型**（T1/T2/T3 的 random_state=），
+    #     **LSTM 从未收到它** —— 本文件此前 0 次使用 random_seed。
+    #     ⇒ T4 每次重训都换一个模型：同月/同数据/同参数两次训练，预测相关系数仅
+    #     **0.1408**（2020-10 实测），即"模型逐位相同"的前提**不成立**。
+    #   ★ 影响：任何"缓存复用 vs 现场训练"的对比都不同源 —— 2026-10-07 V6-A 的
+    #     A/B 结论（B 24/24 组全输、中位 −69.9pp）即因此作废。
+    #   ★ 修法：`tf.keras.utils.set_random_seed` 一次性覆盖 python / numpy / tf 三处 RNG。
+    #     每次 train_lstm 调用都重设 ⇒ **同输入必得同模型**（10-08 已验证：同月两次训练
+    #     t4 逐位完全相同，最大差 0.000e+00、0/2540 不同）。
+    #   ★ 种子必须**按月派生**，不能全校区一个常量：固定常量会让 69 个月共享同一套初始
+    #     权重 → 若该初始化恰落在差盆地，所有月份（以及 A/B 两臂）会被**同方向**带偏，
+    #     把"随机噪声"变成"系统性偏差"。按月派生 ⇒ 同月必得同种子（可复现），
+    #     不同月仍有各自的初始化（保留多样性）。
+    #   ★ 必须用 md5 而非 Python 内置 hash()：后者受 PYTHONHASHSEED 影响、
+    #     **跨进程不稳定**，会直接破坏可复现性。
+    _seed_src = str(model_id) if model_id else "default"
+    _seed = int(getattr(cfg, "random_seed", 42)) + \
+        int(hashlib.md5(_seed_src.encode("utf-8")).hexdigest()[:8], 16) % 1_000_000
+    tf.keras.utils.set_random_seed(_seed)
+    logger.info(f"T4 随机种子已设定: {_seed}（源 model_id={_seed_src}，按月派生）")
 
     n_samples = X.shape[0]
     logger.info(f"T4 LSTM 训练开始 | 样本={n_samples}, "
@@ -546,8 +684,39 @@ def train_lstm(
             logger.info(f"T4 使用配置默认参数: {best_params}")
 
     # ── Phase 2: 全量训练（支持断点续跑）──
-    checkpoint_path = str(cfg.model_dir_path / f"t4_checkpoint_{model_id}.keras")
-    logger.info("T4 Phase 2: 全量训练")
+    # 2026-10-07 修复：缓存名必须带上特征维度 X.shape[2]。
+    #   原命名只按 model_id(月份) 区分 → B 臂(134 维)会命中 A 臂时代(129 维)存下的
+    #   同名缓存 → load_model 因输入宽度不符抛 ValueError → 被上层 except 吞掉 →
+    #   该月 t4 静默全 0（实测：B 臂 2020-10/2021-01/2021-07 均 0/2540 非零，
+    #   而 A 臂同月 2540/2540）。维度是 Keras 输入层的硬约束，用它做键即可保证
+    #   缓存只被同宽度的特征集复用。
+    # ── 2026-10-08 二次修复：缓存名必须**同时**带上「特征维度」与「随机种子」──
+    #   ★ 只带维度不够：10-07 那批 `_f134` 是**无种子**时代训练的，与 10-08 起
+    #     **有种子**时代训练出的模型**同名** ⇒ 程序分不出来 ⇒ 本次 B 臂 t4-only 的
+    #     69 个月**全部恢复了旧的无种子模型**（日志 69 次"从 checkpoint 恢复"、0 次训练），
+    #     而 t4 自检**查不出**（旧 t4 也是非零的）⇒ B 臂结果作废。
+    #   ★ 把 `_seed` 写进文件名 ⇒ 种子方案一变（或回到无种子），命名空间自动隔离，
+    #     **旧 checkpoint 永远撞不上**。这比"人工记得归档旧文件"可靠。
+    #   ★ 这是"缓存 key 粒度不足"（待办 #11）的**第 4 个轴**：训练制度/代码版本。
+    #   ── 2026-10-08 三次修复：再加上「数据集指纹」（第 ② 个轴）──
+    #   ★ 为什么必须带：扩展维度数据（fund_flow/finance/…）**每次采集都会整体重写**，
+    #     而数据集缓存的 hash **只含参数、不含数据状态** ⇒ 同样的参数下数据被换掉，
+    #     旧 checkpoint 会被静默复用。`data_tag` 由调用方按
+    #     「数据集缓存目录名 + X.npy 的 mtime/size」构造 ⇒ 参数变或数据被重写都会变。
+    #   ★ 至此 4 个轴全部进文件名：①维度 `_f` ②数据集 `_d` ③训练随机性 `_s` ④（隐含于前者的组合）。
+    # ── 2026-10-08 四次（彻底）修复：改用 **spec 指纹**，不再靠"列举轴" ──
+    #   保存与加载都用 compute_t4_spec() 生成判据 ⇒ 判据不可能不一致；
+    #   文件名保留可读的 dim/seed 便于人工核对，**权威键是 spec 指纹 `_h{hash}`**；
+    #   并落一份 `{checkpoint}.spec.json`（自描述），加载前逐字段校验，
+    #   不符则 **大声报警 + 丢弃重训**（绝不静默复用）。
+    _spec = compute_t4_spec(X, y, cfg, model_id, _seed, best_params, data_tag)
+    _spec_hash = _spec_fingerprint(_spec)
+    checkpoint_path = str(cfg.model_dir_path /
+                         f"t4_checkpoint_{model_id}_f{X.shape[2]}_s{_seed % 1_000_000}"
+                         f"_h{_spec_hash}.keras")
+    _spec_path = Path(str(checkpoint_path) + ".spec.json")
+    logger.info(f"T4 Phase 2: 全量训练 | spec={_spec_hash} "
+                f"(code={_spec['code_hash']} data={_spec['data_sample_hash']} seed={_seed})")
 
     # 分离训练参数与模型架构参数
     batch_size = best_params.pop("batch_size", cfg.lstm_batch_size)
@@ -572,14 +741,24 @@ def train_lstm(
 
     # ── 断点续跑：检查是否已有训练好的模型 ──
     if Path(checkpoint_path).exists():
-        logger.info(f"  T4 Phase 2: 从 checkpoint 恢复 ({checkpoint_path})")
-        model = tf.keras.models.load_model(
-            checkpoint_path,
-            custom_objects={"TransformerBlock": TransformerBlock},
-        )
-        val_loss = model.evaluate(X_val, y_val, verbose=0)[0]
-        logger.info(f"  T4 Phase 2: checkpoint 加载完成, val_loss={val_loss:.4f}")
-        return model
+        _ok, _why = _checkpoint_spec_ok(_spec_path, _spec)
+        if _ok:
+            logger.info(f"  T4 Phase 2: 从 checkpoint 恢复 ({checkpoint_path})")
+            model = tf.keras.models.load_model(
+                checkpoint_path,
+                custom_objects={"TransformerBlock": TransformerBlock},
+            )
+            val_loss = model.evaluate(X_val, y_val, verbose=0)[0]
+            logger.info(f"  T4 Phase 2: checkpoint 加载完成, val_loss={val_loss:.4f}")
+            return model
+        # ★ 口径不符 ⇒ 报警 + 丢弃重训。**绝不静默复用** —— 这一步正是过去反复出事的关卡
+        #   （10-07 维度不符被 except 吞掉 → t4 全 0；10-08 制度不符静默恢复 → B 臂作废）。
+        logger.warning(
+            f"  ⚠️⚠️ T4 checkpoint 口径不符 → **丢弃并重训**：{_why}\n"
+            f"       文件={checkpoint_path}\n"
+            f"       （若此类告警频繁出现，说明有因素没进 spec → 请补 compute_t4_spec 的字段）")
+    elif _spec_path.exists():
+        logger.warning(f"  ⚠️ 发现孤立 spec（无对应模型文件）→ 忽略：{_spec_path}")
 
     model = _create_lstm_model(
         window=X.shape[1],
@@ -645,6 +824,14 @@ def train_lstm(
         f"耗时={elapsed:.0f}s ({elapsed/60:.1f}min), "
         f"checkpoint={checkpoint_path}"
     )
+
+    # ★ 落盘 spec（自描述）：下次加载前据此逐字段校验口径；不符则报警 + 重训。
+    #   写在 fit 之后 ⇒ 只有真的产出模型文件了才写 spec（避免"有 spec 无模型"的孤立体）。
+    try:
+        _spec_path.write_text(json.dumps(_spec, ensure_ascii=False, indent=2,
+                                         sort_keys=True, default=str))
+    except Exception as _e:
+        logger.warning(f"  ⚠️ T4 spec 落盘失败（下次加载会因缺 spec 而重训）: {_e}")
 
     # ── 铁律一：训练后预测方差验证（防止常数预测 Bug 无声通过）──
     _n_sanity = min(500, len(X_val))

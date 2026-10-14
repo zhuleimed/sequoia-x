@@ -487,6 +487,12 @@ def _process_month_worker(args: tuple) -> tuple:
         (month, predictions_dict) 或 (month, None) 若失败。
     """
     month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra, synth_file, synth_ratio, synth_series_dir = args[:10]
+    # 2026-10-08 新增 `--t4-only` 模式：T4 因"无种子"修复而必须重算时，T1/T2/T3 是
+    #   **确定性可复现**的（树模型传了 random_state=cfg.random_seed），**不必重训**。
+    #   已实测：两次独立全量构建的 t1/t2/t3（含 symbols）在 11 个重叠月份上**逐位一致**。
+    #   本模式跳过 Step1~3 的树模型训练与预测，只重训 T4；拼接由父进程完成
+    #   （见 _merge_temp_files 的 t4_only 分支，含 symbols 硬断言）。
+    t4_only = bool(args[10]) if len(args) > 10 else False
 
     import json as _json
     import sqlite3
@@ -614,7 +620,11 @@ def _process_month_worker(args: tuple) -> tuple:
     #                其标签（未来 20 交易日）跨过 train_end 进到被预测月 → 泄漏
     #   random     = 从同窗口**随机**抽 5000 条（固定种子）→ 时间跨度完整，泄漏比例按
     #                抽样比例稀释。样本量与窗口**完全相同**，只有"取哪 5000 条"不同。
-    MAX_TRAIN_SAMPLES = 5000
+    # 2026-10-09 D0 实验开关 V2_MAX_TRAIN_SAMPLES（**默认 5000 ⇒ 生产行为逐位不变**）：
+    #   默认 5000 → 取时间尾部 5000 条 ≈ **最近约 1.8 个采样日**（见 docs/2026-09_特征时效性与训练窗口的结构性约束.md）
+    #   设为很大的值（如 999999）→ 不再截断，用满整个训练窗口
+    #   ⚠️ 放开窗口会改变"半截列"的风险性质（窗口内会同时出现"有值/无值"样本）—— 见 V6-B 设计文档 §3.5
+    MAX_TRAIN_SAMPLES = int(_os.environ.get("V2_MAX_TRAIN_SAMPLES", "5000"))
     if n_train > MAX_TRAIN_SAMPLES:
         _mode = _os.environ.get("V2_TRAIN_SAMPLE_MODE", "tail")
         if _mode == "random":
@@ -629,6 +639,12 @@ def _process_month_worker(args: tuple) -> tuple:
         y1_tr = y1_tr[_sel]
         y3_tr = y3_tr[_sel]
         X_tr_2d = X_tr.reshape(len(X_tr), -1)
+        _take, _desc = len(X_tr), _mode
+    else:
+        _take, _desc = n_train, "全量(未截断)"
+    # 这一行是 D0 实验的"判决项之一"：实取了多少样本、窗口本来有多少
+    print(f"[Worker {month}] 训练样本: 窗口 {n_train} → 实取 {_take}"
+          f"  (V2_MAX_TRAIN_SAMPLES={MAX_TRAIN_SAMPLES}, {_desc})", flush=True)
 
     # ── 重建 cfg ──
     from sequoia_x.model_selection_v2.config import V2Config
@@ -676,48 +692,74 @@ def _process_month_worker(args: tuple) -> tuple:
               f"{X_tr_2d_enh.shape[1]:,}（full 模式为 {n_full:,}）；T4 仍用 3D 序列不受影响",
               flush=True)
 
-    # ── 训练 T2 ──
-    # 2026-09-26 实验开关 V2_T2_ALGO（默认 lightgbm = 原行为）：验证"IC≈0 是不是算法问题"。
-    # 后两者用固定轮数（不做早停）——与 LightGBM 的 early_stopping 口径略有差异，
-    # 仅用于"换算法会不会变好"的粗判，不作为精细调参结论。
-    print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr_enh)})...", flush=True)
-    _t2_algo = _os.environ.get("V2_T2_ALGO", "lightgbm").lower()
-    if _t2_algo == "xgboost":
-        from xgboost import XGBRegressor
-        t2_model = XGBRegressor(
-            n_estimators=500, learning_rate=0.05, max_depth=6, subsample=0.8,
-            colsample_bytree=0.8, n_jobs=cfg.n_jobs, random_state=cfg.random_seed)
-        t2_model.fit(X_tr_2d_enh, y_tr_enh)
-        print(f"[Worker {month}] 算法=xgboost", flush=True)
-    elif _t2_algo == "catboost":
-        from catboost import CatBoostRegressor
-        t2_model = CatBoostRegressor(
-            iterations=800, learning_rate=0.05, depth=6, verbose=0,
-            random_seed=cfg.random_seed, thread_count=cfg.n_jobs)
-        t2_model.fit(X_tr_2d_enh, y_tr_enh)
-        print(f"[Worker {month}] 算法=catboost", flush=True)
+    if t4_only:
+        # ── t4-only：跳过 T1/T2/T3 训练（它们确定性可复现；t1/t2/t3 结果从旧缓存沿用）──
+        t2_model = t1_model = t3_model = None
+        print(f"[Worker {month}] [t4-only] 跳过 T1/T2/T3 训练（沿用旧缓存的 t1/t2/t3）", flush=True)
     else:
-        from sequoia_x.model_selection_v2.models.tree_reg import train_reg
-        t2_model = train_reg(X_tr_2d_enh, y_tr_enh, cfg, search_optuna=False)
+        # ── 训练 T2 ──
+        # 2026-09-26 实验开关 V2_T2_ALGO（默认 lightgbm = 原行为）：验证"IC≈0 是不是算法问题"。
+        # 后两者用固定轮数（不做早停）——与 LightGBM 的 early_stopping 口径略有差异，
+        # 仅用于"换算法会不会变好"的粗判，不作为精细调参结论。
+        print(f"[Worker {month}] Step1: T2训练(samples={len(X_tr_enh)})...", flush=True)
+        _t2_algo = _os.environ.get("V2_T2_ALGO", "lightgbm").lower()
+        if _t2_algo == "xgboost":
+            from xgboost import XGBRegressor
+            t2_model = XGBRegressor(
+                n_estimators=500, learning_rate=0.05, max_depth=6, subsample=0.8,
+                colsample_bytree=0.8, n_jobs=cfg.n_jobs, random_state=cfg.random_seed)
+            t2_model.fit(X_tr_2d_enh, y_tr_enh)
+            print(f"[Worker {month}] 算法=xgboost", flush=True)
+        elif _t2_algo == "catboost":
+            from catboost import CatBoostRegressor
+            t2_model = CatBoostRegressor(
+                iterations=800, learning_rate=0.05, depth=6, verbose=0,
+                random_seed=cfg.random_seed, thread_count=cfg.n_jobs)
+            t2_model.fit(X_tr_2d_enh, y_tr_enh)
+            print(f"[Worker {month}] 算法=catboost", flush=True)
+        else:
+            from sequoia_x.model_selection_v2.models.tree_reg import train_reg
+            t2_model = train_reg(X_tr_2d_enh, y_tr_enh, cfg, search_optuna=False)
 
-    # ── 训练 T1 ──
-    print(f"[Worker {month}] Step2: T1训练...", flush=True)
-    from sequoia_x.model_selection_v2.models.tree_cls import train_cls
-    t1_model = train_cls(X_tr_2d, y1_tr, cfg, search_optuna=False)
+        # ── 训练 T1 ──
+        print(f"[Worker {month}] Step2: T1训练...", flush=True)
+        from sequoia_x.model_selection_v2.models.tree_cls import train_cls
+        t1_model = train_cls(X_tr_2d, y1_tr, cfg, search_optuna=False)
 
-    # ── 训练 T3 ──
-    print(f"[Worker {month}] Step3: T3训练...", flush=True)
-    from sequoia_x.model_selection_v2.models.tree_vol import train_vol
-    t3_model = train_vol(X_tr_2d, y3_tr, cfg, search_optuna=False)
-    print(f"[Worker {month}] 训练全部完成", flush=True)
+        # ── 训练 T3 ──
+        print(f"[Worker {month}] Step3: T3训练...", flush=True)
+        from sequoia_x.model_selection_v2.models.tree_vol import train_vol
+        t3_model = train_vol(X_tr_2d, y3_tr, cfg, search_optuna=False)
+        print(f"[Worker {month}] 训练全部完成", flush=True)
 
     # ── T4 ──
     t4_model = None
     if not skip_t4:
         try:
             from sequoia_x.model_selection_v2.models.deep_lstm import train_lstm
+            # ⚠️ 这里传的 model_id **只是"月份"**，不是最终的 checkpoint 文件名。
+            #   真正的文件名由 train_lstm **内部**拼成：
+            #     t4_checkpoint_{model_id}_f{特征维数}_s{种子}_d{数据集指纹}.keras
+            #   （见 sequoia_x/model_selection_v2/models/deep_lstm.py 的 train_lstm 内
+            #     `f"t4_checkpoint_{model_id}_f{X.shape[2]}_s{_seed % 1_000_000}"...` 那一行）
+            #   ⇒ **新增 T4 调用方不要自己拼缓存路径**，否则会绕开这几个口径后缀、
+            #     重新踩「缓存 key 粒度不足」的老坑（待办 #11，年内实锤 3 次；
+            #     最严重一次是 B 臂命中 A 臂旧 checkpoint ⇒ **该月 t4 静默全 0**）。
+            #   详见 docs/特征维度变更操作规程.md §5。
+            # ── 2026-10-11 新增：**多种子实验**用的种子盐（默认不设 ⇒ 行为逐位不变）──
+            #   为什么这样做：T4 的随机种子在 deep_lstm.py 里是
+            #     `42 + md5(model_id) 的低 8 位 % 1e6`
+            #   ⇒ **给 model_id 加个后缀 = 换一个种子**。
+            #   ★ 不直接改 deep_lstm.py 的两个理由：
+            #     ① 那是模型模块，改了会让 `_SPEC_CODE_FILES` 的 code_hash 变化 ⇒
+            #        **别人既有的 T4 checkpoint 全部作废**（白重训）；
+            #     ② checkpoint 文件名里**已经带种子**（`..._s{种子}_d{数据指纹}.keras`，
+            #        待办 #11 的根因修复）⇒ 加盐后的新种子**不会撞上**旧 checkpoint ✓。
+            #   用途：量"同一配置、只换种子"的结果摆动带宽（待办 #50）。
+            _seed_salt = os.environ.get("T4_SEED_SALT", "")
             t4_model = train_lstm(X_tr_enh, y_tr_enh, cfg, search_optuna=False,
-                                  model_id=f"cache_{month}")
+                                  model_id=f"cache_{month}" + (f"_s{_seed_salt}" if _seed_salt else ""),
+                                  data_tag=_dataset_fingerprint(cache_dir))
         except Exception as e:
             # 2026-09-26：原来是 `except Exception: pass` —— T4 训练失败会被**完全静默**，
             #   该月输出里 t4 全 0 却无任何提示（生产 T2+T4 融合选股会悄悄少一半信号，
@@ -783,6 +825,24 @@ def _process_month_worker(args: tuple) -> tuple:
         return month, None
     # 预测侧必须用与训练侧**同一个特征视图**，否则维度/语义都不匹配
     X_pred_2d = _apply_feature_view(X_pred, getattr(cfg, "feature_view", "full"))
+
+    if t4_only:
+        # ── t4-only：只算 t4，返回**片段**（父进程按 symbols 硬断言后拼进旧缓存）──
+        if t4_model is None:
+            print(f"[Worker {month}] ❌ [t4-only] T4 模型为空 → 无法只重算 t4", flush=True)
+            return month, None
+        from sequoia_x.model_selection_v2.models.deep_lstm import predict_lstm
+        pred_t4 = predict_lstm(t4_model, X_pred).flatten()
+        _t4_std = float(np.std(pred_t4))
+        print(f"[Worker {month}] ✅ [t4-only] t4 预测: std={_t4_std:.4f} "
+              f"range=[{pred_t4.min():.4f},{pred_t4.max():.4f}]", flush=True)
+        if _t4_std < 1e-7:
+            print(f"[Worker {month}] ❌ [t4-only] t4 无方差 → 放弃该月（不写片段）", flush=True)
+            return month, None
+        return month, {"symbols": valid_symbols,
+                       "t4": [float(v) for v in pred_t4],
+                       "_t4_only_fragment": True}
+
     pred_t2 = predict_reg(t2_model, X_pred_2d).flatten()
     pred_t1 = predict_cls(t1_model, X_pred_2d).flatten()
     pred_t3 = predict_vol(t3_model, X_pred_2d).flatten()
@@ -815,11 +875,31 @@ def _process_month_worker(args: tuple) -> tuple:
     return month, preds
 
 
+def _dataset_fingerprint(cache_dir) -> str:
+    """数据集指纹 —— 用于 T4 checkpoint 命名，防"数据被重写但参数没变"时静默复用旧模型。
+
+    2026-10-08 新增（待办 #11 的第 ② 个轴）：
+      数据集缓存的 hash **只含参数**（n_stocks/sample_end/window/feature_version/…），
+      **不含数据状态**；而扩展维度数据每次采集都会整体重写 ⇒ 同参数下数据变了、
+      hash 却不变 ⇒ 旧 checkpoint 被静默复用。
+      本指纹 = 缓存目录名 + X.npy 的 mtime + size ⇒ **参数变或数据被重写，指纹都会变**。
+    """
+    import hashlib as _hl, os as _os
+    from pathlib import Path as _P
+    try:
+        d = _P(cache_dir)
+        st = (d / "X.npy").stat()
+        return _hl.md5(f"{d.name}|{int(st.st_mtime)}|{st.st_size}".encode()).hexdigest()[:10]
+    except Exception:
+        return "na"
+
+
 def _process_and_save(month: str, db_path: str, cfg_dict: dict,
                        max_pool_size: int, skip_t4: bool,
                        cache_dir: str, include_extra: bool,
                        synth_file: str = "", synth_ratio: float = 1.0,
-                       synth_series_dir: str = "", tmp_dir: str = "") -> None:
+                       synth_series_dir: str = "", tmp_dir: str = "",
+                       t4_only: bool = False) -> None:
     """Worker 入口：调用 _process_month_worker 并写入临时文件（避开 IPC 传大数据）。
 
     ⚠️ 2026-08-09 修复: tmp_dir 由 build_cache 按 output 文件名隔离传入——多个
@@ -838,7 +918,7 @@ def _process_and_save(month: str, db_path: str, cfg_dict: dict,
 
     try:
         args = (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir,
-                include_extra, synth_file, synth_ratio, synth_series_dir)
+                include_extra, synth_file, synth_ratio, synth_series_dir, t4_only)
         _, preds = _process_month_worker(args)
         if preds is not None:
             with open(tmp_file, "w") as f:
@@ -913,12 +993,49 @@ def _make_engine(db_path: str):
     return DataEngine(s)
 
 
-def _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months):
-    """合并 temp 文件到主缓存（由父进程轮询调用）。"""
+def _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months, t4_only=False):
+    """合并 temp 文件到主缓存（由父进程轮询调用）。
+
+    t4_only=True 时走**拼接**分支：temp 里是 `{"symbols":[...], "t4":[...]}` 片段，
+    只把 t4 写进旧缓存条目，**t1/t2/t3 原样保留**。
+    ⚠️ 拼接前对 `symbols` 做**硬断言**：不一致就**跳过该月并报错**（绝不按位置硬套，
+       否则会静默产生"行错位"——本项目最忌的那种错）。
+    """
     import json as _json
     for tmp_file in sorted(tmp_dir.glob("month_*.json")):
         m = tmp_file.stem.replace("month_", "")
-        if m not in cache:
+        if t4_only:
+            if m not in cache:
+                logger.error(f"  [t4-only] {m}: ❌ 旧缓存中无此月 → 跳过"
+                             f"（不能凭空造 t1/t2/t3）")
+                continue
+            try:
+                with open(tmp_file) as f:
+                    frag = _json.load(f)
+                old_syms = list(cache[m].get("symbols") or [])
+                new_syms = list(frag.get("symbols") or [])
+                if not new_syms or old_syms != new_syms:
+                    logger.error(
+                        f"  [t4-only] {m}: ❌ symbols 不一致"
+                        f"（旧 {len(old_syms)} vs 新 {len(new_syms)}）→ **跳过，不写入**"
+                        f"（宁可留旧 t4 也不能错位）")
+                    continue
+                cache[m]["t4"] = frag["t4"]
+                with open(output_path, "w") as f:
+                    _json.dump(cache, f, indent=2, default=str)
+                elapsed = __import__('time').time() - total_start
+                n_t4 = len(frag["t4"])
+                logger.info(f"  [{m}] t4 已更新（{n_t4} 只，symbols 校验通过）({elapsed:.0f}s)")
+                # 2026-10-09 修复（待办 #28）：拼接成功后**删掉该片段**。
+                #   原实现没有幂等守卫 —— `_merge_temp_files` 每次被调用都会重扫全部 temp 片段，
+                #   于是已拼过的月份会被**反复重拼**（值相同 ⇒ 数据无误，但日志噪音大、
+                #   且每次都重写整个缓存 JSON）。实测一次运行产生 144 条重复拼接记录。
+                #   删除是安全的：片段内容已写进 cache。**仅在成功后删**（symbols 不符的保留，
+                #   便于事后排查）。
+                tmp_file.unlink(missing_ok=True)
+            except Exception as e:
+                logger.error(f"  [t4-only] {m}: 拼接失败 {type(e).__name__}: {e}")
+        elif m not in cache:
             try:
                 with open(tmp_file) as f:
                     cache[m] = _json.load(f)
@@ -942,6 +1059,7 @@ def build_cache(
     synth_ratio: float = 1.0,
     synth_series_dir: str = "",
     feature_view: str = "full",
+    t4_only: bool = False,
 ) -> dict:
     """构建预测缓存（串行逐月，稳定可靠）。
 
@@ -1040,7 +1158,13 @@ def build_cache(
     total_start = time.time()
 
     # 过滤已完成月份
-    pending_months = [m for m in test_months if m not in cache]
+    if t4_only:
+        # t4-only：**所有月份都要重算 t4**（不做"跳过已完成"）；t1/t2/t3 由旧条目保留。
+        pending_months = list(test_months)
+        logger.info(f"[t4-only] 重算全部 {len(pending_months)} 个月的 t4"
+                    f"（t1/t2/t3 沿用旧缓存；拼接时对 symbols 硬断言）")
+    else:
+        pending_months = [m for m in test_months if m not in cache]
     if not pending_months:
         logger.info("所有月份已完成")
         return cache
@@ -1060,7 +1184,7 @@ def build_cache(
 
     task_args = [
         (month, db_path, cfg_dict, max_pool_size, skip_t4, cache_dir, include_extra,
-         synth_file, synth_ratio, synth_series_dir, str(tmp_dir))
+         synth_file, synth_ratio, synth_series_dir, str(tmp_dir), t4_only)
         for month in pending_months
     ]
 
@@ -1072,7 +1196,7 @@ def build_cache(
         # 单月时在主进程执行 _process_and_save，特征并行正常工作。
         for args in task_args:
             _process_and_save(*args)
-            _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
+            _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months, t4_only)
     else:
         # ── 多月并行：用 ProcessPoolExecutor 而非 multiprocessing.Pool（2026-08-20 修复）──
         # multiprocessing.Pool 的 worker 是 daemon 进程，禁止创建子进程；
@@ -1084,9 +1208,9 @@ def build_cache(
             # 渐进合并：as_completed + 每完成一个月份即 merge 该月 temp 文件
             for tot in as_completed(futures):
                 tot.result()  # 抛出 worker 异常（若有）
-                _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
+                _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months, t4_only)
             # 收尾 merge（确保所有月份入库）
-            _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months)
+            _merge_temp_files(tmp_dir, cache, output_path, total_start, test_months, t4_only)
 
     # 2026-09-26：失败必须可见 —— 原来失败只写 .error 文件、控制台不出声、退出码仍为 0，
     #   于是"训练集含前视"这类致命故障会被静默吞掉（实测：只显示 0/1 个月完成）。
@@ -1107,6 +1231,30 @@ def build_cache(
     if _skipped:
         logger.warning(f"⚠️ {len(_skipped)} 个月份被跳过（训练样本不足，非故障）: {_skipped}"
                        f" ⇒ 实际产出 {len(cache)}/{len(test_months)} 个月")
+
+    # ── 2026-10-08 新增：落 manifest sidecar（供 run_shared_backtest 判定"缓存是否完整"）──
+    #   为什么需要：旧判据 `months_ok >= len(test_months)` **永远为假** —— 2020-09 因
+    #   purge 后训练样本为 0 被合法跳过，缓存永远只有 69/70 个月。
+    #   后果（10-08 实测）：① 每次回测都白试一次重建；② 数据集缓存缺失时（同步推进了
+    #   sample_end ⇒ 数据集缓存 key 变了）重建直接 FileNotFoundError，B 臂回测 exit=1。
+    #   有了 manifest，回测用 `requested - produced ⊆ skipped` 即可正确判定完整性。
+    try:
+        _manifest = {
+            "schema": 1,
+            "requested": list(test_months),
+            "produced": sorted(cache.keys()),
+            "skipped": {m: "训练样本不足（purge 后 <100）" for m in _skipped},
+            "failed": [Path(p).stem for p in _errs],
+            "requested_count": len(test_months),
+            "produced_count": len(cache),
+        }
+        _mpath = Path(str(output_path) + ".manifest.json")
+        _mpath.write_text(json.dumps(_manifest, ensure_ascii=False, indent=2, sort_keys=True))
+        logger.info(f"manifest 已写: {_mpath.name}"
+                    f"（requested={len(test_months)} produced={len(cache)} "
+                    f"skipped={len(_skipped)} failed={len(_errs)}）")
+    except Exception as _me:
+        logger.warning(f"⚠️ manifest 落盘失败（回测将退回旧判据）: {_me}")
     if _errs:
         logger.error(f"❌ {len(_errs)} 个月份构建失败: "
                      f"{[Path(p).stem for p in _errs]}")
@@ -1136,6 +1284,11 @@ def main():
                         help="限制月份数（0=全部11个月）")
     parser.add_argument("--max-stocks", type=int, default=0,
                         help="限制股票池大小（0=全量~2977只）")
+    parser.add_argument("--t4-only", action="store_true",
+                        help="2026-10-08 新增：只重算 t4 并拼回**已有**缓存"
+                             "（t1/t2/t3 沿用旧条目，拼接前对 symbols 硬断言）。"
+                             "用于 T4 因'无种子修复'必须重算、而树模型确定性可复现的场景。"
+                             "要求 --output 指向一个已存在的完整缓存。")
     parser.add_argument("--skip-t4", action="store_true",
                         help="跳过 T4 LSTM 训练（加速，默认训练T4）")
     parser.add_argument("--start-month", type=str, default="2025-08",
@@ -1180,7 +1333,8 @@ def main():
                 output_path=Path(args.output), skip_t4=args.skip_t4,
                 synth_file=args.synth_file, synth_ratio=args.synth_ratio,
                 synth_series_dir=args.synth_series,
-                feature_view=args.feature_view)
+                feature_view=args.feature_view,
+                t4_only=args.t4_only)
 
     # 2026-09-27：失败月必须反映到**退出码**（原为 0，会被 wrapper/人工误读成"零失败"）。
     #   调用方 v2_monthly_retrain.py 见非 0 即中止 + 微信告警（正是我们要的行为）。

@@ -264,7 +264,16 @@ class RiskManager:
             # T1过滤
             if use_t1:
                 prob = t1_data.get("predictions", {}).get(sig["symbol"], 0.5)
-                if prob < self.cfg.min_buy_prob if hasattr(self, 'cfg') else 0.55:
+                # ── 2026-10-09 修复（待办 #26，地雷）──
+                #   原写法 `if prob < self.cfg.min_buy_prob if hasattr(self,'cfg') else 0.55:`
+                #   被 Python 解析成**条件表达式**：`(prob < self.cfg.min_buy_prob) if hasattr(...) else 0.55`。
+                #   而 `RiskManager.__init__` **只设了 t1_auc_threshold、没有 self.cfg**
+                #   ⇒ hasattr 为假 ⇒ 条件**塌缩成字面量 `0.55`** ⇒ **恒为真** ⇒ **每只股票都会被跳过**。
+                #   ⚠️ 该路径此前是死的（`use_t1` 恒为 False，见待办 #25）所以未暴露；
+                #      **一旦 T1 改造后 AUC>0.58 而激活，它会静默清空全部信号、回测产出空组合**。
+                #   ⇒ 改为显式取值，语义与作者原意一致（无 cfg 时用 0.55）。
+                _min_prob = (self.cfg.min_buy_prob if getattr(self, "cfg", None) is not None else 0.55)
+                if prob < _min_prob:
                     continue  # T1看空,跳过
 
             sig["t1_filtered"] = use_t1

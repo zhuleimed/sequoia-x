@@ -201,17 +201,173 @@ def check_disk() -> None:
 
 
 def check_cron_and_scripts() -> None:
-    print("── 7) crontab 与关键脚本 ──")
-    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    cron = r.stdout
-    for label, needle in [("月末拉取+重建 (19:00 工作日)", "month_end_pull.py"),
-                          ("月度重训 (1 号 03:00)", "v2_monthly_retrain.py"),
-                          ("日更管线 (18:10 工作日)", "pipeline/pipeline.py")]:
-        say(OK if needle in cron else BAD, f"cron: {label}", "条目缺失" if needle not in cron else "")
+    print("── 7) 调度是否在跑（**看日志，不看 crontab**）──")
+    # ★★ 2026-10-10 修正：原实现用 `crontab -l` 找三条 cron 条目 —— 但**调度在 HPC 侧**
+    #   （项目路径是 `/public/home/hpc/...` 共享盘），**本机 crontab 为空**
+    #   ⇒ 该检查会**天天报 ❌ 假警**；假警多了真警就没人看 ✗
+    #   ⇒ 改成看**"近期有没有在跑"的证据**（日志文件的新鲜度）—— 比看 crontab 可靠：
+    #     调度在哪台机器上跑都无所谓，只要有"跑过"的痕迹。
+    import glob as _g
+    specs = [
+        ("月末拉取+重建（19:00 工作日）", "month_end_pull_*.log", 4,
+         "每个工作日 19:00 都记一行（非月末写「跳过」）⇒ 4 天内应有更新"),
+        ("日更管线（18:10 工作日）", "pipeline_*.log", 4, "每个工作日 18:10 跑"),
+        ("月度重训（1 号 03:00）", "v2_retrain_*.log", 40, "每月 1 号跑 ⇒ 40 天内应有更新"),
+    ]
+    for label, pat, max_age, why in specs:
+        fs = sorted(_g.glob(str(PROJ / "logs" / pat)),
+                    key=lambda x: os.path.getmtime(x), reverse=True)
+        if not fs:
+            say(BAD, f"调度：{label}", f"找不到日志 {pat} ⇒ 可能从未跑过（{why}）")
+            issues.append(f"{label} 无日志证据（{pat}）")
+            continue
+        age = (dt.date.today() - dt.date.fromtimestamp(os.path.getmtime(fs[0]))).days
+        ok = age <= max_age
+        say(OK if ok else BAD,
+            f"调度：{label} {'✓ 在跑' if ok else f'❌ 已 {age} 天无更新（> {max_age} 天）'}",
+            f"最近日志 {Path(fs[0]).name}（{age} 天前）；{why}")
+        if not ok:
+            issues.append(f"{label} 已 {age} 天无日志更新（>{max_age} 天）")
     for s in ["scripts/month_end_pull.py", "scripts/rebuild_dataset_cache.py",
               "scripts/build_prediction_cache.py", "scripts/v2_monthly_retrain.py"]:
         p = PROJ / s
         say(OK if p.exists() else BAD, f"脚本存在: {s}")
+
+
+def check_exp_feature_freshness(today: dt.date) -> None:
+    print("── 8) 实验类维度新鲜度（V6-D 同花顺财务 / V6-E mootdx 股东机构）──")
+    #  ★ 这两批是**季度数据**（财报按季披露）⇒ 不需要日更，但**必须自动更新**：
+    #    否则一旦采纳进生产，数据停更 ⇒ **制造新的"半截列"**
+    #    （历史是全的、回测看不出问题，但实盘会慢慢失效 —— 最危险的一类）。
+    #
+    #  ★★ 2026-10-10 修正（用户问"150 天够吗"→ 查证后重做了判据）：
+    #    （a）"报告期年龄"这个判据**必须放宽到 220 天**：健康的季报节奏下，
+    #        "最新完整期"最老能到 **212 天** —— 三季报(9/30)要一直撑到**次年 4/30** 年报披露完
+    #        ⇒ 阈值 150 天会**每年春天误报** ✗。（222 天 = 212 + 余量）
+    #    （b）但"报告期年龄"**发现停更太慢**（要 7 个月）⇒ 必须配一个**更灵敏的判据**：
+    #        **"数据文件最后被写入"距今天数** —— 月末链每月跑一次、且
+    #        `--refresh`(THS) / `--force-recent N`(mootdx) 会**重写最近 N 期**
+    #        ⇒ 健康时**每月都应有写入**。>40 天 ⇒ 漏了一期（⚠️）；>70 天 ⇒ 漏两期（❌）。
+    #    （c）顺带治了一个**真 Bug**：mootdx 采集器原逻辑"文件已存在就跳过" ⇒
+    #        **季报"先残缺后补全"时永远不会补上**（实测 gpcw20260630 卡在 261 家）
+    #        ⇒ 已加 `--force-recent`（实测 261 → 5573 家 ✓）。
+    cutoff = today - dt.timedelta(days=222)
+    ACT_WARN, ACT_BAD = 40, 70          # 采集活性阈值（数据文件多久没被写）
+    deep_on = (os.environ.get("FEATURE_V6_DEEP_FINANCE") == "1"
+               or os.environ.get("FEATURE_V6_MOOTDX_HOLDER") == "1")
+    moot_on = os.environ.get("FEATURE_V6_MOOTDX_HOLDER") == "1"
+
+    def _activity(dirp):
+        """该数据目录里**最新文件的写入时间** → (距今天数, 文件名)。判"采集有没有真的在跑"。"""
+        try:
+            fs = [p for p in dirp.glob("*.parquet")]
+            if not fs:
+                return None, None
+            newest = max(fs, key=lambda p: p.stat().st_mtime)
+            return (today - dt.date.fromtimestamp(newest.stat().st_mtime)).days, newest.name
+        except Exception:
+            return None, None
+
+    def _say_activity(tag: str, dirp, gate_on: bool, missing_msg: str) -> None:
+        age, fn = _activity(dirp)
+        if age is None:
+            say(BAD if gate_on else WARN, f"{tag}：**目录为空**（采集器没跑过）", missing_msg)
+            if gate_on:
+                issues.append(f"{tag} 数据缺失（从未采集）")
+            return
+        if age > ACT_BAD:
+            say(BAD if gate_on else WARN,
+                f"{tag}：数据文件已 **{age} 天**没被写入（>{ACT_BAD} 天 = 漏了约两期月度链）"
+                f"　最近写入 {fn}")
+            if gate_on:
+                issues.append(f"{tag} 采集似已停摆（{age} 天无写入）")
+        elif age > ACT_WARN:
+            say(WARN, f"{tag}：数据文件已 **{age} 天**没被写入（>{ACT_WARN} 天，可能漏了一期）",
+                f"最近写入 {fn}；月末链每月跑一次、且会重写最近几期 ⇒ 健康时每月都应有写入")
+        else:
+            say(OK, f"{tag}：采集活跃（数据文件 {age} 天前刚写过：{fn}）")
+
+    # ① 同花顺财务（report 形如 "2026-2" ⇒ 2026-06-30）
+    Q_END = {"1": (3, 31), "2": (6, 30), "3": (9, 30), "4": (12, 31)}
+    try:
+        import random as _rnd
+        import pandas as _pd
+        _say_activity("同花顺财务", PROJ / "data/extra_features/finance_ths_v2/indicators",
+                      deep_on, "采集器没跑过或目录为空")
+        files = sorted((PROJ / "data/extra_features/finance_ths_v2/indicators").glob("*.parquet"))
+        latest = None
+        if files:
+            for f in _rnd.Random(0).sample(files, min(20, len(files))):
+                try:
+                    r = _pd.read_parquet(f, columns=["report"])
+                except Exception:
+                    continue
+                if len(r):
+                    v = str(r["report"].iloc[-1])
+                    if latest is None or v > latest:
+                        latest = v
+        if not latest:
+            say(BAD if deep_on else WARN, "同花顺财务：**读不到 report 字段**",
+                "采集器没跑过或目录为空；开关打开时这会阻断。")
+            if deep_on:
+                issues.append("同花顺财务（V6-D）数据缺失/不可读")
+        else:
+            y, q = latest.split("-")
+            mm, dd = Q_END.get(q, (12, 31))
+            pe = dt.date(int(y), mm, dd)
+            ok = pe >= cutoff
+            say(OK if ok else (BAD if deep_on else WARN),
+                f"同花顺财务：最新报告期 {latest}（≈ {pe}）"
+                f"{'✓' if ok else f'  ❌ 早于 {cutoff}（超一个季度未更新）'}",
+                f"季度数据、允许滞后；开关 " +
+                ("**已打开** ⇒ 该数据是生产特征，过期将阻断" if deep_on else "未打开 ⇒ 仅提示"))
+            if not ok and deep_on:
+                issues.append(f"同花顺财务（V6-D）最新报告期 {latest} 过旧（< {cutoff}）")
+    except Exception as e:
+        say(WARN, f"同花顺财务新鲜度检查异常: {type(e).__name__}: {e}")
+
+    # ② mootdx（文件名 gpcwYYYYMMDD = 报告期末；最新期常常是"未发布完整"的，要跳过它看最新完整期）
+    try:
+        import pandas as _pd
+        _say_activity("mootdx 财务", PROJ / "data/extra_features/mootdx_finance",
+                      moot_on, "采集器没跑过或目录为空")
+        fs = sorted((PROJ / "data/extra_features/mootdx_finance").glob("gpcw*.parquet"))
+        if not fs:
+            say(BAD if moot_on else WARN, "mootdx 财务：**目录为空**（采集器没跑过）")
+            if moot_on:
+                issues.append("mootdx 财务（V6-E）数据缺失")
+        else:
+            # 从最新往回找第一个"完整期"（股票数 ≥ 上一期的 30%）
+            latest_complete, partial_note = None, ""
+            counts = []
+            for f in reversed(fs[-4:]):
+                try:
+                    counts.append((f, _pd.read_parquet(f, columns=["report_date"]).shape[0]))
+                except Exception:
+                    continue
+            for i, (f, n) in enumerate(counts):
+                nxt = counts[i + 1][1] if i + 1 < len(counts) else 0
+                if nxt == 0 or n >= 0.3 * nxt:
+                    latest_complete = (f, n)
+                    break
+            if counts and counts[0][0] != (latest_complete[0] if latest_complete else None):
+                partial_note = f"（最新一期 {counts[0][1]} 只 = 尚未发布完整，已跳过）"
+            if latest_complete is None:
+                say(WARN, "mootdx：找不到完整期（近 4 期股票数都在骤降？）", partial_note)
+            else:
+                f, n = latest_complete
+                per = f.stem.replace("gpcw", "")
+                pe = dt.date(int(per[:4]), int(per[4:6]), int(per[6:8]))
+                ok = pe >= cutoff
+                say(OK if ok else (BAD if moot_on else WARN),
+                    f"mootdx：最新完整期 {per}（{n} 只）"
+                    f"{'✓' if ok else f'  ❌ 早于 {cutoff}'} {partial_note}",
+                    f"季度数据、允许滞后；开关 " +
+                    ("**已打开** ⇒ 该数据是生产特征，过期将阻断" if moot_on else "未打开 ⇒ 仅提示"))
+                if not ok and moot_on:
+                    issues.append(f"mootdx 财务（V6-E）最新完整期 {per} 过旧（< {cutoff}）")
+    except Exception as e:
+        say(WARN, f"mootdx 新鲜度检查异常: {type(e).__name__}: {e}")
 
 
 def main() -> int:
@@ -233,6 +389,7 @@ def main() -> int:
     check_db_freshness(today)
     check_disk()
     check_cron_and_scripts()
+    check_exp_feature_freshness(today)
 
     print("=" * 78)
     if issues:

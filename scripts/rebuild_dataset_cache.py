@@ -50,8 +50,20 @@ def rebuild(include_market_state: bool, n_workers: int, no_extra: bool = False) 
     """重建单个维度缓存。"""
     cfg = get_config()
     engine = DataEngine(Settings())
-    # 采样截止日动态化: 与 build_prediction_cache 同口径（DB 最后交易日）
-    cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
+    # 采样截止日：与 build_prediction_cache 同口径。
+    # 2026-10-09 修：原先**无条件**取 DB 最后交易日（动态），但 build_prediction_cache
+    #   是支持 `V4_SAMPLE_END_FIX` 固定口径的 ⇒ 一旦设了该变量而这里不认，两侧口径就失配：
+    #   重建出的数据集采样到"库里最新交易日"，而预测侧按固定日去找数据集缓存 ⇒ 找不到、报错退出；
+    #   更糟的情况是若恰好命中，就是把**口径不同的数据集**当成同一份用。
+    #   典型场景：跨天做 A/B 时，库里已多出同步进来的交易日（如 2026-10-08）。
+    import os as _os
+    _se_fix = _os.environ.get("V4_SAMPLE_END_FIX", "").strip()
+    if _se_fix:
+        cfg.sample_end = _se_fix
+        print(f"采样截止日（固定 V4_SAMPLE_END_FIX）: {cfg.sample_end}")
+    else:
+        cfg.sample_end = resolve_sample_end(cfg, engine.db_path)
+        print(f"采样截止日（动态）: {cfg.sample_end}")
     # 2026-08-07 回退机制: --no-extra 强制 88 维（扩展维度数据不全时降级重建）
     include_extra = bool(getattr(cfg, "extra_features", False)) and not no_extra
     # 实际生效的扩展开关：T4 的 80 维（include_market_state=False）不拼扩展特征。
