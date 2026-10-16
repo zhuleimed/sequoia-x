@@ -79,6 +79,26 @@ STEPS: list[dict] = [
         "required": False,
         "timeout": 600,  # 10min（正常约 5s；留足余量应对网络慢）
     },
+    # ── 1.6. 数据体检（单位自证 / 价格跳变，非必需） ──
+    # 【2026-10-16 新增】科创板 volume ×100 事故后加的**第二道防线**。
+    #   为什么已有 verify_data 还要它：verify_data 靠**同花顺对拍**，有两个盲区 ——
+    #     ① 只覆盖**最近 10 个交易日**（更早的问题查不到）；
+    #     ② dump 接口不可用/限流时该步骤整体失效。
+    #   本步骤是**表级、本地**检查（`--quick` 不联网），覆盖所有写入者
+    #   （含 `backfill_history.py` 这类**绕过 sync 直接 executemany 写库**的脚本）。
+    #   实测耗时 **8 秒**；判据：近 N 日 `amount/volume/close` 越界行数 ≥ 30 即告警。
+    #   API Key 不需要（--quick 不联网）；required=False：告警不阻断选股。
+    #   ⚠️ **不加 `--no-push`** —— 第二道防线的意义就是"能喊出来"，
+    #      静默的检查等于没有（与 verify_data 保持一致）。
+    {
+        "id": "audit_data",
+        "name": "数据体检(单位自证/跳变)",
+        "cmd": ["scripts/audit_data_integrity.py", "--quick"],
+        "cwd": str(PROJECT_DIR),
+        "python": PY312,
+        "required": False,
+        "timeout": 300,  # 5min（实测约 8s；留足余量）
+    },
     # ── 2. 策略选股 + LLM（必需） ──
     # 【2026-10-01 变更】原 LLM 策略（8策略→LLM）已由独立子项目 024_llm_hs300 取代
     #   （LLM 直接从沪深300成份股选2只）。子项目**不自己拉数据**，就着本管线

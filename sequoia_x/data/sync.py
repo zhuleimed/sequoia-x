@@ -81,6 +81,49 @@ def _looks_like_mass_delisting(n_local: int, n_remote: int,
     return bool(n_local) and n_remote < n_local * (1 - max_ratio)
 
 
+# 均价 / 收盘 的合理区间。超出即判定"volume 或 amount 的单位错了"。
+# 取宽区间（0.5~2.0）是为了**不误伤真实数据**：上市首日、极端行情的 vwap 天然偏离 close，
+# 但**单位错一律是 100 倍 / 10000 倍级别**（实测事故值：0.010、0.238），必然落在区间外。
+VWAP_RATIO_LO, VWAP_RATIO_HI = 0.5, 2.0
+
+
+def _check_unit_self_consistency(df: pd.DataFrame) -> int:
+    """入库自证：`amount / volume ≈ close`（CLAUDE.md「成交量单位规则」的强制要求）。
+
+    历史上**三次数据事故全是单位错**，且都能被这一条一次抓出：
+      · 2026-09-18 腾讯实时行情 amount 单位是**万元**（成交额小 1 万倍）
+      · 2026-08-10~21 科创板（688）volume **大 100 倍**
+      · 2026-09-19 amount 被前向填充 / 写死 0.0
+      · **2026-10-16 科创板 volume 又大 100 倍**（本函数诞生的直接原因）
+
+    **只告警、不阻断**：阻断会误伤上市首日等真实极端行情；
+    而告警是 loud 的 —— 每天同步都会打，不会被无声吞掉。
+
+    Returns:
+        越界行数（供测试断言用）。
+    """
+    need = {"amount", "volume", "close"}
+    if not need.issubset(df.columns) or df.empty:
+        return 0
+    a = pd.to_numeric(df["amount"], errors="coerce")
+    v = pd.to_numeric(df["volume"], errors="coerce")
+    c = pd.to_numeric(df["close"], errors="coerce")
+    ok = (a > 0) & (v > 0) & (c > 0)
+    if not ok.any():
+        return 0
+    ratio = a[ok] / v[ok] / c[ok]
+    off = ratio[(ratio < VWAP_RATIO_LO) | (ratio > VWAP_RATIO_HI)]
+    if len(off):
+        syms = (df.loc[off.index, "symbol"].astype(str).tolist()
+                if "symbol" in df.columns else [])
+        logger.warning(
+            f"⚠️ 单位自证未通过：{len(off)}/{int(ok.sum())} 行『均价/收盘』越界"
+            f"（区间 {ratio.min():.4f}~{ratio.max():.4f}）"
+            f"，疑似 volume/amount 单位错误（手↔股 / 万元↔元）| 样例 {syms[:5]}"
+        )
+    return int(len(off))
+
+
 class DataSync:
     """数据同步模块，负责 baostock → SQLite 的全量/增量数据同步。
 
@@ -271,6 +314,12 @@ class DataSync:
                 df.loc[miss, "amount"] = (
                     df.loc[miss, "close"].astype(float) * df.loc[miss, "volume"].astype(float)
                 )
+
+        # ★ 入库自证（2026-10-16 科创板 volume ×100 事故后新增）
+        #   见 CLAUDE.md「成交量单位规则」——历史上**三次事故全是单位错**
+        #   （腾讯万元 amount / 科创板手↔股 / amount 写死 0），共同特征都是"均价严重偏离当日价格"。
+        #   放在这里是所有写库路径的必经之地（小批量走缓冲区、大批量直接写盘都经过本函数）。
+        _check_unit_self_consistency(df)
 
         if df.empty:
             return 0

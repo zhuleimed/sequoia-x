@@ -69,6 +69,44 @@ def check_jumps(days: int) -> dict:
     return DataSync(get_settings()).check_price_jumps(days=days)
 
 
+# ── C. 单位自证 ──
+# 2026-10-16 新增（科创板 volume 被 ×100 事故）。
+# 这类**单位错**（手↔股 / 万元↔元）一律是 100 / 10000 倍级别 ⇒「均价 = amount/volume」
+# 必然严重偏离当日收盘价；而合法极端行情（上市首日等）偏差只有 2 倍以内 ⇒ 不会误伤。
+UNIT_RATIO_LO, UNIT_RATIO_HI = 0.5, 2.0
+UNIT_ALERT_ROWS = 30        # 近 N 日累计越界行数告警阈值
+
+
+def check_unit_consistency(con: sqlite3.Connection, days: int = 15) -> dict:
+    """C. 单位自证：`amount / volume / close` 是否落在合理区间。
+
+    ★ 为什么必须做成**表级**检查：`backfill_history.py` 等脚本用**裸 executemany**
+    直接写库，绕过了 `sync.py::_write_to_db` 里新加的入库自证
+    ⇒ **只有扫表才能覆盖全部写入路径**（不依赖"每个写入者都记得加校验"）。
+    """
+    ds = [r[0] for r in con.execute(
+        "SELECT DISTINCT date FROM stock_daily ORDER BY date DESC LIMIT ?", (days,))]
+    if not ds:
+        return {"checked_days": 0, "bad_rows": 0, "by_date": {}, "worst": []}
+    lo = min(ds)
+    rows = con.execute("""
+        SELECT symbol, date, close, volume, amount, amount / volume / close AS ratio
+        FROM stock_daily
+        WHERE date >= ? AND volume > 0 AND amount > 0 AND close > 0
+          AND (amount / volume / close < ? OR amount / volume / close > ?)
+        ORDER BY date DESC, symbol
+    """, (lo, UNIT_RATIO_LO, UNIT_RATIO_HI)).fetchall()
+    by_date: dict[str, int] = {}
+    for r in rows:
+        by_date[r[1]] = by_date.get(r[1], 0) + 1
+    return {
+        "checked_days": len(ds), "since": lo, "bad_rows": len(rows),
+        "by_date": dict(sorted(by_date.items(), reverse=True)),
+        "worst": [{"symbol": r[0], "date": r[1], "close": r[2], "volume": r[3],
+                   "amount": r[4], "ratio": round(r[5], 4)} for r in rows[:5]],
+    }
+
+
 def sample_dates(con: sqlite3.Connection, n_recent: int, n_old: int) -> list[str]:
     """取最近 n_recent 个交易日，外加 n_old 个较早的参照日（用于发现"追溯性口径变更"）。"""
     days = [r[0] for r in con.execute(
@@ -233,6 +271,29 @@ def main() -> int:
                 problems.append(
                     f"多源对拍总体异常比例 {cross['bad_ratio']:.1%} ≥ {CROSS_ALERT_RATIO:.0%}"
                     f"（各日均不突出，疑似分散性错误）")
+
+    # ── C. 单位自证（表级 ⇒ 覆盖所有写入者，含绕过 sync 的裸写脚本）──
+    print("\n" + "=" * 84)
+    print("C. 单位自证（amount/volume ≈ close；表级，覆盖所有写入路径）")
+    print("=" * 84)
+    _con = sqlite3.connect(ROOT / "data" / "sequoia_v2.db")
+    unit = check_unit_consistency(_con, max(args.days, 15))
+    _con.close()
+    result["unit_check"] = unit
+    print(f"  近 {unit['checked_days']} 日（{unit.get('since', '-')} 起）："
+          f"越界 {unit['bad_rows']} 行")
+    for d, n in list(unit["by_date"].items())[:5]:
+        print(f"    {d}: {n} 行")
+    for w in unit["worst"]:
+        print(f"    {w['symbol']} {w['date']}  close={w['close']} "
+              f"vol={w['volume']:,.0f} amount={w['amount']:,.0f}  均价/收盘={w['ratio']}")
+    if unit["bad_rows"] >= UNIT_ALERT_ROWS:
+        problems.append(
+            f"单位自证：近 {unit['checked_days']} 日有 {unit['bad_rows']} 行"
+            f"『均价/收盘』越界（阈值 {UNIT_ALERT_ROWS}）⇒ 疑似 volume/amount 单位错误")
+    elif unit["bad_rows"]:
+        print(f"  （{unit['bad_rows']} 行未达阈值 {UNIT_ALERT_ROWS}：少量越界多为"
+              f"上市首日等真实极端行情 vwap≠close，非单位错）")
 
     # ── 汇总 ──
     elapsed = time.time() - t0

@@ -136,9 +136,17 @@ class TencentSource:
             )
             for col in ["open", "close", "high", "low", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-            # Tencent fqkline API 返回的成交量单位是「手」(lots/100shares)，
-            # 统一转为「股」(shares) 以与 baostock/Sina 保持一致。
-            df["volume"] = df["volume"] * 100
+            # ⚠️⚠️ 腾讯 fqkline 的成交量单位**按板块不同**（2026-10-16 实测，同花顺对拍验证）：
+            #     · 科创板（688 / 689）：**直接返回「股」** ⇒ **绝不能再 ×100**
+            #     · 其他板块（60 / 00 / 30…）：返回「手」 ⇒ 必须 ×100
+            #   历史上这里是一刀切 ×100 ⇒ 科创板会被放大 100 倍。
+            #   2026-10-16 事故：82 只 688 中招（当天它们恰好走了 Tencent 路径；
+            #   同期走 Sina 路径的 534 只 688 没中招，因为 `_sina_kline` 不做 ×100）。
+            #   证据（腾讯原始值 ÷ 同花顺真值）：688001/688002/688005/688111/688036/688981/689009
+            #   全部 = 1.0000；600519/000001/300750/601398/002415/600036 全部 = 0.0100。
+            _sym = code[2:] if code[:2] in ("sh", "sz", "bj") else code
+            if not _sym.startswith(("688", "689")):
+                df["volume"] = df["volume"] * 100
             df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
             return df
         except Exception as e:
